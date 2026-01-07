@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 load_dotenv(ENV_PATH)
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-LLM_API_KEY = os.getenv("LLM_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 # Discord client
@@ -39,7 +39,7 @@ _embedding_factory = EmbeddingFactory(APP_CONFIG.embedding_model_name)
 rag_pipeline = RagPipeline(
     index_dir=INDEX_DIR,
     embedding_factory=_embedding_factory,
-    llm_api_key=LLM_API_KEY or "",
+    llm_api_key=GEMINI_API_KEY or "",
     config=APP_CONFIG,
 )
 

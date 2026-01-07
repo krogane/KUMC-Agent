@@ -97,7 +97,7 @@ class RagPipeline:
     @lru_cache(maxsize=1)
     def _genai_client(self) -> genai.Client:
         if not self._llm_api_key:
-            raise RuntimeError("LLM_API_KEY is not set. Please set it in .env")
+            raise RuntimeError("GEMINI_API_KEY is not set. Please set it in .env")
         return genai.Client(api_key=self._llm_api_key)
 
 

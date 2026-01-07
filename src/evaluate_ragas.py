@@ -218,7 +218,7 @@ def main() -> None:
 
     cfg = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES)
     load_dotenv(cfg.base_dir / ".env")
-    llm_api_key = os.getenv("LLM_API_KEY", "")
+    llm_api_key = os.getenv("GEMINI_API_KEY", "")
 
     rag_pipeline = RagPipeline(
         index_dir=cfg.index_dir,
