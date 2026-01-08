@@ -45,9 +45,9 @@ class AppConfig:
         resolved_base = base_dir or Path(__file__).resolve().parents[1]
         return cls(
             base_dir=resolved_base,
-            raw_data_dir=resolved_base / "data" / "raw" / "minutes",
-            chunk_dir=resolved_base / "data" / "chunk" / "minutes",
-            index_dir=resolved_base / "data" / "index" / "minutes",
+            raw_data_dir=resolved_base / "data" / "raw",
+            chunk_dir=resolved_base / "data" / "chunk",
+            index_dir=resolved_base / "data" / "index",
             embedding_model_name=embedding_model_name,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,

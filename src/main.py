@@ -10,7 +10,7 @@ from config import AppConfig, EmbeddingFactory, DEFAULT_SYSTEM_RULES
 APP_CONFIG = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES)
 ENV_PATH = APP_CONFIG.base_dir / ".env"
 INDEX_DIR = APP_CONFIG.index_dir
-COMMAND_PREFIX: str = "/llm "
+COMMAND_PREFIX: str = "/ai "
 
 LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
 

@@ -1,0 +1,10 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+.DS_Store
+.env
+.secrets/
+data/chunk/*
+data/eval/*
+data/index/*
+data/raw/*
+__pycache__/
+*.pyc
