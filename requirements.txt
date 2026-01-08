@@ -1,0 +1,13 @@
+discord.py
+google-api-python-client
+google-auth
+google-genai
+langchain-community
+langchain-core
+langchain-huggingface
+langchain-text-splitters
+sentence-transformers
+python-dotenv
+faiss-cpu
+ragas
+datasets
