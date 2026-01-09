@@ -19,16 +19,7 @@ from config import AppConfig, EmbeddingFactory
 
 logger = logging.getLogger(__name__)
 
-# コンフィグ
-CHUNK_SIZE: int = 500
-CHUNK_OVERLAP: int = 100
-MODEL_NAME: str = "intfloat/multilingual-e5-small"
-
-DOCS_CHUNK_SIZE: int = CHUNK_SIZE
-DOCS_CHUNK_OVERLAP: int = CHUNK_OVERLAP
-SHEETS_CHUNK_SIZE: int = CHUNK_SIZE
-SHEETS_CHUNK_OVERLAP: int = CHUNK_OVERLAP
-
+# Chunking separators
 DOCS_SEPARATORS: Sequence[str] = (
     "\n## ",
     "\n### ",
@@ -482,11 +473,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    cfg = AppConfig.from_here(
-        embedding_model_name=MODEL_NAME,
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
+    cfg = AppConfig.from_here()
 
     load_dotenv(cfg.base_dir / ".env")
     folder_id = os.getenv(DRIVE_FOLDER_ID_ENV) or os.getenv(
@@ -508,8 +495,8 @@ def main() -> None:
     logger.info("CHUNK_DOCS_DIR: %s", chunk_docs_dir)
     logger.info("CHUNK_SHEETS_DIR: %s", chunk_sheets_dir)
     logger.info("INDEX_DIR     : %s", cfg.index_dir)
-    logger.info("DOCS_CHUNK    : %d / %d", DOCS_CHUNK_SIZE, DOCS_CHUNK_OVERLAP)
-    logger.info("SHEETS_CHUNK  : %d / %d", SHEETS_CHUNK_SIZE, SHEETS_CHUNK_OVERLAP)
+    logger.info("DOCS_CHUNK    : %d / %d", cfg.chunk_size, cfg.chunk_overlap)
+    logger.info("SHEETS_CHUNK  : %d / %d", cfg.chunk_size, cfg.chunk_overlap)
     logger.info("MODEL         : %s", cfg.embedding_model_name)
     logger.info("DRIVE_FOLDER  : %s", folder_id)
 
@@ -522,16 +509,16 @@ def main() -> None:
     chunk_markdown_to_jsonl(
         raw_data_dir=raw_docs_dir,
         chunk_dir=chunk_docs_dir,
-        chunk_size=DOCS_CHUNK_SIZE,
-        chunk_overlap=DOCS_CHUNK_OVERLAP,
+        chunk_size=cfg.chunk_size,
+        chunk_overlap=cfg.chunk_overlap,
         separators=DOCS_SEPARATORS,
         source_type="docs",
     )
     chunk_markdown_to_jsonl(
         raw_data_dir=raw_sheets_dir,
         chunk_dir=chunk_sheets_dir,
-        chunk_size=SHEETS_CHUNK_SIZE,
-        chunk_overlap=SHEETS_CHUNK_OVERLAP,
+        chunk_size=cfg.chunk_size,
+        chunk_overlap=cfg.chunk_overlap,
         separators=SHEETS_SEPARATORS,
         source_type="sheets",
     )

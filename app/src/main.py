@@ -1,5 +1,7 @@
-import os
+import asyncio
 import logging
+import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 import discord
@@ -7,8 +9,11 @@ import discord
 from rag_pipeline import RagPipeline
 from config import AppConfig, EmbeddingFactory, DEFAULT_SYSTEM_RULES
 # コンフィグ
-APP_CONFIG = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES)
-ENV_PATH = APP_CONFIG.base_dir / ".env"
+BASE_DIR = Path(__file__).resolve().parents[2]
+ENV_PATH = BASE_DIR / ".env"
+load_dotenv(ENV_PATH)
+
+APP_CONFIG = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES, base_dir=BASE_DIR)
 INDEX_DIR = APP_CONFIG.index_dir
 COMMAND_PREFIX: str = "/ai "
 
@@ -21,8 +26,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-load_dotenv(ENV_PATH)
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -65,7 +68,7 @@ async def on_message(message: discord.Message):
         return
 
     try:
-        answer = rag_pipeline.answer(query)
+        answer = await asyncio.to_thread(rag_pipeline.answer, query)
         await message.channel.send(answer)
     except Exception as e:
         logger.exception("Failed to handle /llm request")

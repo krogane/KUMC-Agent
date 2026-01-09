@@ -15,8 +15,8 @@ from config import AppConfig, EmbeddingFactory, DEFAULT_SYSTEM_RULES
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EVAL_FILE: Path = Path("data") / "eval" / "ragas.jsonl"
-DEFAULT_RESULT_DIR: Path = Path("data") / "eval" / "result"
+DEFAULT_EVAL_FILE: Path = Path("app") / "data" / "eval" / "ragas.jsonl"
+DEFAULT_RESULT_DIR: Path = Path("app") / "data" / "eval" / "result"
 DEFAULT_SAVE_DATASET: Path = DEFAULT_RESULT_DIR / "ragas_dataset.jsonl"
 DEFAULT_RESULT_PATH: Path = DEFAULT_RESULT_DIR / "ragas_result.csv"
 
@@ -216,8 +216,9 @@ def main() -> None:
 
     args = _build_arg_parser().parse_args()
 
-    cfg = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES)
-    load_dotenv(cfg.base_dir / ".env")
+    base_dir = Path(__file__).resolve().parents[2]
+    load_dotenv(base_dir / ".env")
+    cfg = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES, base_dir=base_dir)
     llm_api_key = os.getenv("GEMINI_API_KEY", "")
 
     rag_pipeline = RagPipeline(
