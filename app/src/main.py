@@ -1,28 +1,24 @@
 import asyncio
 import logging
 import os
-from pathlib import Path
-
+import sys
 from dotenv import load_dotenv
 import discord
 
-from rag_pipeline import RagPipeline
-from config import AppConfig, EmbeddingFactory, DEFAULT_SYSTEM_RULES
+from pipeline.rag_pipeline import RagPipeline
+from config import AppConfig, EmbeddingFactory
 # コンフィグ
-BASE_DIR = Path(__file__).resolve().parents[2]
-ENV_PATH = BASE_DIR / ".env"
-load_dotenv(ENV_PATH)
-
-APP_CONFIG = AppConfig.from_here(system_rules=DEFAULT_SYSTEM_RULES, base_dir=BASE_DIR)
+APP_CONFIG = AppConfig.from_here()
+load_dotenv(APP_CONFIG.base_dir / ".env")
 INDEX_DIR = APP_CONFIG.index_dir
-COMMAND_PREFIX: str = "/ai "
-
-LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+COMMAND_PREFIX = APP_CONFIG.command_prefix
+BUILD_INDEX_COMMAND = "/build_index"
+BUILD_INDEX_PATH = APP_CONFIG.base_dir / "app" / "src" / "indexing" / "build_index.py"
 
 
 # Bootstrap
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
+    level=getattr(logging, "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -46,6 +42,45 @@ rag_pipeline = RagPipeline(
     config=APP_CONFIG,
 )
 
+is_indexing = False
+indexing_task: asyncio.Task[None] | None = None
+
+
+async def _run_build_index(channel: discord.abc.Messageable) -> None:
+    global is_indexing, indexing_task
+    is_indexing = True
+    try:
+        await channel.send("インデックス更新を開始します。")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(BUILD_INDEX_PATH),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.error(
+                "build_index failed with code %s: %s",
+                process.returncode,
+                (stderr or b"").decode("utf-8", errors="replace"),
+            )
+            await channel.send("インデックス更新に失敗しました。ログを確認してください。")
+            return
+
+        if stdout:
+            logger.info(
+                "build_index completed: %s",
+                stdout.decode("utf-8", errors="replace"),
+            )
+        rag_pipeline.refresh_index()
+        await channel.send("インデックス更新が完了しました。クエリ受付を再開します。")
+    except Exception:
+        logger.exception("Failed to run build_index")
+        await channel.send("インデックス更新に失敗しました。ログを確認してください。")
+    finally:
+        is_indexing = False
+        indexing_task = None
+
 
 # Discord events
 @discord_client.event
@@ -59,12 +94,25 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
+    if content == BUILD_INDEX_COMMAND:
+        global indexing_task, is_indexing
+        if indexing_task and not indexing_task.done():
+            await message.channel.send("インデックス更新は既に実行中です。")
+            return
+        is_indexing = True
+        indexing_task = asyncio.create_task(_run_build_index(message.channel))
+        return
+
+    if is_indexing:
+        if content.startswith(COMMAND_PREFIX):
+            await message.channel.send("インデックス更新中のため、クエリ受付を停止しています。")
+        return
+
     if not content.startswith(COMMAND_PREFIX):
         return
 
     query = content[len(COMMAND_PREFIX) :].strip()
     if not query:
-        await message.channel.send("質問が空です。例: /llm 〇〇について教えて")
         return
 
     try:
