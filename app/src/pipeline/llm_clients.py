@@ -5,6 +5,7 @@ from functools import lru_cache
 from google import genai
 
 from config import AppConfig
+from pipeline.llama_lock import LLAMA_LOCK, reset_llama_cache
 
 
 def generate_with_gemini(*, api_key: str, prompt: str, config: AppConfig) -> str:
@@ -43,12 +44,14 @@ def generate_with_llama(
         config.llama_threads,
         config.llama_gpu_layers,
     )
-    result = llama.create_chat_completion(
-        messages=messages,
-        max_tokens=config.max_output_tokens,
-        temperature=config.temperature,
-        stop=["\n---"],
-    )
+    with LLAMA_LOCK:
+        reset_llama_cache(llama)
+        result = llama.create_chat_completion(
+            messages=messages,
+            max_tokens=config.max_output_tokens,
+            temperature=config.temperature,
+            stop=["\n---"],
+        )
     return (
         (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
         or ""

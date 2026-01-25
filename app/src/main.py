@@ -1,40 +1,45 @@
 import asyncio
 import logging
-import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 import discord
 
 from pipeline.rag_pipeline import RagPipeline
 from config import AppConfig, EmbeddingFactory
-# コンフィグ
-APP_CONFIG = AppConfig.from_here()
-load_dotenv(APP_CONFIG.base_dir / ".env")
+
+
+# Config
+BASE_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(BASE_DIR / ".env", override=True)
+APP_CONFIG = AppConfig.from_here(base_dir=BASE_DIR)
+
 INDEX_DIR = APP_CONFIG.index_dir
+
 COMMAND_PREFIX = APP_CONFIG.command_prefix
-BUILD_INDEX_COMMAND = "/build_index"
+BUILD_INDEX_COMMAND = APP_CONFIG.index_command_prefix
 BUILD_INDEX_PATH = APP_CONFIG.base_dir / "app" / "src" / "indexing" / "build_index.py"
+
+DISCORD_BOT_TOKEN = APP_CONFIG.discord_bot_token
+GEMINI_API_KEY = APP_CONFIG.gemini_api_key
 
 
 # Bootstrap
 logging.basicConfig(
-    level=getattr(logging, "INFO"),
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-
-# Discord client
+# Discord Client
 intents = discord.Intents.default()
 intents.message_content = True
-
 discord_client = discord.Client(intents=intents)
 
 
-_embedding_factory = EmbeddingFactory(APP_CONFIG.embedding_model_name)
+# RAG Pipeline
+_embedding_factory = EmbeddingFactory(APP_CONFIG.embedding_model)
 rag_pipeline = RagPipeline(
     index_dir=INDEX_DIR,
     embedding_factory=_embedding_factory,

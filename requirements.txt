@@ -13,3 +13,5 @@ python-dotenv
 faiss-cpu
 ragas
 datasets
+numpy
+transformers

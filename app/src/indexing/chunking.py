@@ -4,19 +4,33 @@ import json
 import logging
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
-from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from config import AppConfig, LLM_CHUNK_SYSTEM_PROMPT, build_llm_chunk_prompt
+from config import (
+    AppConfig,
+    LLM_CHUNK_SYSTEM_PROMPT,
+    build_proposition_chunk_prompt,
+)
+from indexing.chunks import Chunk, load_chunks, write_chunks
 from indexing.constants import FILE_ID_SEPARATOR
+from indexing.llm_client import generate_text
+from indexing.token_utils import estimate_tokens
 from indexing.utils import ensure_dir, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
+
+_METADATA_KEYS = (
+    "source_file_name",
+    "source_type",
+    "drive_file_name",
+    "drive_mime_type",
+    "drive_file_path",
+    "drive_file_id",
+)
 
 
 def _extract_drive_file_id(filename: str) -> str | None:
@@ -49,6 +63,36 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
     return metadata
 
 
+def _build_base_metadata(
+    *,
+    source_file_name: str,
+    source_type: str,
+    drive_metadata: dict[str, str],
+    fallback_drive_file_id: str | None,
+) -> dict[str, object]:
+    drive_file_id = drive_metadata.get("drive_file_id") or fallback_drive_file_id or ""
+    drive_file_name = drive_metadata.get("drive_file_name") or ""
+    drive_mime_type = drive_metadata.get("drive_mime_type") or ""
+    drive_file_path = drive_metadata.get("drive_path") or drive_metadata.get(
+        "drive_file_path", ""
+    )
+
+    return {
+        "source_file_name": source_file_name,
+        "source_type": source_type,
+        "drive_file_name": drive_file_name,
+        "drive_mime_type": drive_mime_type,
+        "drive_file_path": drive_file_path,
+        "drive_file_id": drive_file_id,
+    }
+
+
+def _with_stage(metadata: dict[str, object], stage: str) -> dict[str, object]:
+    updated = dict(metadata)
+    updated["chunk_stage"] = stage
+    return updated
+
+
 def _build_splitter(
     *,
     chunk_size: int,
@@ -62,15 +106,25 @@ def _build_splitter(
     )
 
 
-def chunk_markdown_to_jsonl(
+def _is_output_up_to_date(output_path: Path, input_path: Path) -> bool:
+    try:
+        return output_path.stat().st_mtime >= input_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+
+
+def recursive_chunk_dir(
     *,
     raw_data_dir: Path,
     chunk_dir: Path,
-    chunk_size: int,
-    chunk_overlap: int,
+    rec_chunk_size: int,
+    rec_chunk_overlap: int,
+    rec_min_chunk_tokens: int,
+    tokenizer_model: str,
     separators: Sequence[str],
     source_type: str,
     file_extensions: Sequence[str] = (".md",),
+    skip_existing: bool = False,
 ) -> None:
     ensure_dir(chunk_dir)
 
@@ -90,81 +144,152 @@ def chunk_markdown_to_jsonl(
         return
 
     splitter = _build_splitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+        chunk_size=rec_chunk_size,
+        chunk_overlap=rec_chunk_overlap,
         separators=separators,
     )
 
-    for f in input_files:
-        text = f.read_text(encoding="utf-8")
-        rel_path = f.relative_to(raw_data_dir)
-        metadata = {
-            "source": f.name,
-            "source_path": str(rel_path),
-            "source_type": source_type,
-        }
-        metadata.update(_load_drive_metadata(f))
-        if "drive_file_path" not in metadata and "drive_path" in metadata:
-            metadata["drive_file_path"] = metadata["drive_path"]
-        if "drive_file_id" not in metadata:
-            drive_file_id = _extract_drive_file_id(f.name)
-            if drive_file_id:
-                metadata["drive_file_id"] = drive_file_id
-
-        docs = splitter.split_documents(
-            [Document(page_content=text, metadata=metadata)]
-        )
-
+    for path in input_files:
+        rel_path = path.relative_to(raw_data_dir)
         safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
         out_path = chunk_dir / f"{safe_rel}.jsonl"
-        with out_path.open("w", encoding="utf-8") as fw:
-            for i, doc in enumerate(docs):
-                record = {
-                    "text": doc.page_content,
-                    "metadata": {
-                        **(doc.metadata or {}),
-                        "chunk_id": i,
-                    },
-                }
-                fw.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-        logger.info("Chunked %s -> %s (%d chunks)", f.name, out_path.name, len(docs))
-
-
-def _load_jsonl_records(path: Path) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    with path.open("r", encoding="utf-8") as fr:
-        for line_no, line in enumerate(fr, start=1):
-            line = line.strip()
-            if not line:
+        if skip_existing and out_path.exists():
+            if _is_output_up_to_date(out_path, path):
+                logger.info("Skip recursive chunking (up-to-date): %s", out_path.name)
                 continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid JSON in {path.name} at line {line_no}: {exc}"
-                ) from exc
+            logger.info(
+                "Rebuilding recursive chunking (source updated): %s", out_path.name
+            )
 
-            text = obj.get("text")
-            if not isinstance(text, str):
-                raise ValueError(
-                    f"Missing/invalid 'text' in {path.name} line {line_no}"
-                )
+        text = path.read_text(encoding="utf-8")
+        drive_metadata = _load_drive_metadata(path)
+        base_metadata = _build_base_metadata(
+            source_file_name=path.name,
+            source_type=source_type,
+            drive_metadata=drive_metadata,
+            fallback_drive_file_id=_extract_drive_file_id(path.name),
+        )
 
-            metadata = obj.get("metadata")
-            if metadata is None:
-                metadata = {}
-            if not isinstance(metadata, dict):
-                raise ValueError(
-                    "Missing/invalid 'metadata' (must be dict) in "
-                    f"{path.name} line {line_no}"
-                )
+        docs = splitter.split_text(text)
+        output_chunks: list[Chunk] = []
+        output_index = 0
 
-            records.append({"text": text, "metadata": metadata})
+        for doc in docs:
+            if rec_min_chunk_tokens > 0 and estimate_tokens(
+                text=doc, model_name=tokenizer_model
+            ) < rec_min_chunk_tokens:
+                continue
+            metadata = dict(base_metadata)
+            metadata["chunk_id"] = output_index
+            metadata = _with_stage(metadata, "recursive")
+            output_chunks.append(Chunk(text=doc, metadata=metadata))
+            output_index += 1
 
-    return records
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Recursive chunked %s -> %s (%d chunks)",
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
 
 
+def proposition_chunk_jsonl_dir(
+    *,
+    input_chunk_dir: Path,
+    output_chunk_dir: Path,
+    config: AppConfig,
+    skip_existing: bool = False,
+) -> None:
+    ensure_dir(output_chunk_dir)
+
+    if not input_chunk_dir.exists():
+        raise FileNotFoundError(
+            f"Input chunk directory does not exist: {input_chunk_dir}"
+        )
+
+    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
+        return
+
+    provider = (config.prop_chunk_provider or "").lower()
+    max_retries = max(1, config.prop_chunk_max_retries)
+    logger.info(
+        "Proposition chunking enabled (%s) for %d files in %s",
+        provider,
+        len(jsonl_files),
+        input_chunk_dir,
+    )
+
+    for path in jsonl_files:
+        out_path = output_chunk_dir / path.name
+        if skip_existing and out_path.exists():
+            if _is_output_up_to_date(out_path, path):
+                logger.info("Skip proposition chunking (up-to-date): %s", out_path.name)
+                continue
+            logger.info(
+                "Rebuilding proposition chunking (input updated): %s", out_path.name
+            )
+        chunks = load_chunks(path)
+        if not chunks:
+            logger.warning("Empty chunk file: %s", path.name)
+            continue
+
+        output_chunks: list[Chunk] = []
+        output_index = 0
+
+        for chunk in chunks:
+            source_text = chunk.text
+            if not source_text:
+                continue
+            base_metadata = _strip_chunk_metadata(chunk.metadata)
+            parent_chunk_id = chunk.metadata.get("chunk_id")
+            if parent_chunk_id is not None:
+                base_metadata["parent_chunk_id"] = parent_chunk_id
+            prompt = build_proposition_chunk_prompt(
+                text=source_text,
+                chunk_size=config.prop_chunk_size,
+            )
+            source_name = path.name
+            chunk_texts = _run_llm_chunking(
+                prompt=prompt,
+                source_name=source_name,
+                provider=provider,
+                api_key=config.gemini_api_key,
+                model=config.prop_chunk_model,
+                llama_model_path=config.prop_chunk_llama_model_path,
+                llama_ctx_size=config.prop_chunk_llama_ctx_size,
+                temperature=config.prop_chunk_temperature,
+                max_output_tokens=config.prop_chunk_max_output_tokens,
+                max_retries=max_retries,
+                thinking_level=config.thinking_level,
+                llama_threads=config.llama_threads,
+                llama_gpu_layers=config.llama_gpu_layers,
+                action_label="Proposition chunking",
+            )
+            if chunk_texts is None:
+                continue
+
+            for chunk_text in chunk_texts:
+                metadata = dict(base_metadata)
+                metadata["chunk_id"] = output_index
+                metadata = _with_stage(metadata, "proposition")
+                output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
+                output_index += 1
+
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Proposition chunked %s -> %s (%d chunks)",
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+
+def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    cleaned = {k: metadata.get(k, "") for k in _METADATA_KEYS}
+    return cleaned
 
 
 def _strip_code_fences(text: str) -> str:
@@ -228,304 +353,79 @@ def _parse_llm_chunks(response: str, *, source_name: str) -> list[str]:
     return chunks
 
 
-def _generate_with_gemini_chunk(
+
+
+def _run_llm_chunking(
     *,
-    api_key: str,
     prompt: str,
-    config: AppConfig,
-) -> str:
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError(
-            "google-genai is required for LLM chunking with Gemini."
-        ) from exc
-
-    client = _genai_client(api_key)
-    response = client.models.generate_content(
-        model=config.llm_chunk_model,
-        contents=[
-            {"role": "system", "parts": [{"text": LLM_CHUNK_SYSTEM_PROMPT}]},
-            {"role": "user", "parts": [{"text": prompt}]},
-        ],
-        config=genai.types.GenerateContentConfig(
-            temperature=config.llm_chunk_temperature,
-            max_output_tokens=config.llm_chunk_max_output_tokens,
-            thinking_config=genai.types.ThinkingConfig(
-                thinking_level=config.thinking_level
-            ),
-        ),
-    )
-    return (response.text or "").strip()
-
-
-def _generate_with_llama_chunk(*, prompt: str, config: AppConfig) -> str:
-    llama = _llama_client(
-        config.llm_chunk_llama_model_path,
-        config.llama_ctx_size,
-        config.llama_threads,
-        config.llama_gpu_layers,
-    )
-    result = llama.create_chat_completion(
-        messages=[
-            {"role": "system", "content": LLM_CHUNK_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=config.llm_chunk_max_output_tokens,
-        temperature=config.llm_chunk_temperature,
-    )
-    return (
-        (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-        or ""
-    ).strip()
-
-
-@lru_cache(maxsize=1)
-def _genai_client(api_key: str):
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set. Please set it in .env")
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError(
-            "google-genai is required for LLM chunking with Gemini."
-        ) from exc
-    return genai.Client(api_key=api_key)
-
-
-@lru_cache(maxsize=1)
-def _llama_client(
-    model_path: str,
-    ctx_size: int,
-    threads: int,
-    gpu_layers: int,
-):
-    if not model_path:
-        raise RuntimeError(
-            "LLM_CHUNK_LLAMA_MODEL_PATH is not set. Please set it in .env"
-        )
-
-    try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is not installed. Please install it to use llama.cpp."
-        ) from exc
-
-    return Llama(
-        model_path=model_path,
-        n_ctx=ctx_size,
-        n_threads=threads,
-        n_gpu_layers=gpu_layers,
-    )
-
-
-def llm_chunk_jsonl_dir(
-    *,
-    input_chunk_dir: Path,
-    output_chunk_dir: Path,
-    config: AppConfig,
-) -> None:
-    ensure_dir(output_chunk_dir)
-
-    if not input_chunk_dir.exists():
-        raise FileNotFoundError(
-            f"Input chunk directory does not exist: {input_chunk_dir}"
-        )
-
-    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
-        return
-
-    provider = (config.llm_chunk_provider or "").lower()
-    logger.info(
-        "LLM rechunking enabled (%s) for %d files in %s",
-        provider,
-        len(jsonl_files),
-        input_chunk_dir,
-    )
-
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    max_retries = max(1, config.llm_chunk_max_retries)
-    skipped_chunks = 0
-    total_chunks = 0
-
-    for path in jsonl_files:
-        records = _load_jsonl_records(path)
-        if not records:
-            logger.warning("Empty chunk file: %s", path.name)
-            continue
-
-        out_path = output_chunk_dir / path.name
-        output_index = 0
-
-        with out_path.open("w", encoding="utf-8") as fw:
-            for record in records:
-                source_text = record.get("text", "")
-                if not source_text:
-                    continue
-
-                total_chunks += 1
-                base_metadata = dict(record.get("metadata") or {})
-                source_chunk_id = base_metadata.pop("chunk_id", None)
-
-                prompt = build_llm_chunk_prompt(
-                    text=source_text,
-                    chunk_size=config.llm_chunk_size,
+    source_name: str,
+    provider: str,
+    api_key: str,
+    model: str,
+    llama_model_path: str,
+    llama_ctx_size: int,
+    temperature: float,
+    max_output_tokens: int,
+    max_retries: int,
+    thinking_level: str,
+    llama_threads: int,
+    llama_gpu_layers: int,
+    action_label: str,
+) -> list[str] | None:
+    last_error: Exception | None = None
+    last_response: str | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = generate_text(
+                provider=provider,
+                api_key=api_key,
+                prompt=prompt,
+                model=model,
+                system_prompt=LLM_CHUNK_SYSTEM_PROMPT,
+                llama_model_path=llama_model_path,
+                llama_ctx_size=llama_ctx_size,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_level=thinking_level,
+                llama_threads=llama_threads,
+                llama_gpu_layers=llama_gpu_layers,
+                response_mime_type="application/json",
+            )
+            last_response = response
+            chunks = _parse_llm_chunks(response, source_name=source_name)
+            return chunks
+        except Exception as exc:
+            last_error = exc
+            if last_response:
+                logger.warning(
+                    "%s invalid output for %s (attempt %d/%d): %s",
+                    action_label,
+                    source_name,
+                    attempt,
+                    max_retries,
+                    last_response,
                 )
-
-                logger.info(
-                    "LLM rechunking %s (source chunk: %s, chars: %d)",
-                    path.name,
-                    source_chunk_id if source_chunk_id is not None else "-",
-                    len(source_text),
+            if attempt < max_retries:
+                logger.warning(
+                    "%s failed for %s (attempt %d/%d): %s",
+                    action_label,
+                    source_name,
+                    attempt,
+                    max_retries,
+                    exc,
                 )
+                continue
+            logger.error(
+                "%s failed for %s after %d attempts",
+                action_label,
+                source_name,
+                max_retries,
+            )
 
-                chunks: list[str] | None = None
-                last_error: Exception | None = None
-                last_response: str | None = None
-                source_name = f"{path.name}#chunk{source_chunk_id}"
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        if provider == "gemini":
-                            response = _generate_with_gemini_chunk(
-                                api_key=api_key, prompt=prompt, config=config
-                            )
-                        elif provider == "llama":
-                            response = _generate_with_llama_chunk(
-                                prompt=prompt, config=config
-                            )
-                        else:
-                            raise ValueError(
-                                "Unsupported llm_chunk_provider: "
-                                f"{config.llm_chunk_provider}. Use 'gemini' or 'llama'."
-                            )
-
-                        last_response = response
-                        chunks = _parse_llm_chunks(response, source_name=source_name)
-                        last_error = None
-                        break
-                    except Exception as exc:
-                        last_error = exc
-                        if last_response:
-                            logger.warning(
-                                "LLM failed output for %s (attempt %d/%d): %s",
-                                source_name,
-                                attempt,
-                                max_retries,
-                                last_response,
-                            )
-                        if attempt < max_retries:
-                            logger.warning(
-                                "LLM rechunking failed for %s (attempt %d/%d): %s",
-                                source_name,
-                                attempt,
-                                max_retries,
-                                exc,
-                            )
-                            continue
-                        logger.error(
-                            "LLM rechunking failed for %s after %d attempts",
-                            source_name,
-                            max_retries,
-                        )
-                        chunks = []
-                        break
-
-                if chunks is None:
-                    if last_error:
-                        logger.error(
-                            "Skipping %s due to repeated failures: %s",
-                            source_name,
-                            last_error,
-                        )
-                    else:
-                        logger.error(
-                            "Skipping %s due to repeated failures with no response",
-                            source_name,
-                        )
-                    skipped_chunks += 1
-                    continue
-
-                for chunk in chunks:
-                    metadata = dict(base_metadata)
-                    if source_chunk_id is not None:
-                        metadata["source_chunk_id"] = source_chunk_id
-                    out_record = {
-                        "text": chunk,
-                        "metadata": {
-                            **metadata,
-                            "chunk_id": output_index,
-                        },
-                    }
-                    fw.write(json.dumps(out_record, ensure_ascii=False) + "\n")
-                    output_index += 1
-
-        logger.info(
-            "LLM rechunked %s -> %s (%d chunks)",
-            path.name,
-            out_path.name,
-            output_index,
+    if last_error:
+        logger.error("Skipping %s due to repeated failures: %s", source_name, last_error)
+    else:
+        logger.error(
+            "Skipping %s due to repeated failures with no response", source_name
         )
-
-    if total_chunks:
-        logger.info(
-            "LLM rechunking skipped %d/%d chunks",
-            skipped_chunks,
-            total_chunks,
-        )
-
-
-def load_documents_from_jsonl(chunk_dir: Path) -> list[Document]:
-    if not chunk_dir.exists():
-        raise FileNotFoundError(f"Chunk directory does not exist: {chunk_dir}")
-
-    docs: list[Document] = []
-    jsonl_files = sorted(chunk_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        logger.warning("No .jsonl chunk files found under %s", chunk_dir)
-        return docs
-
-    for path in jsonl_files:
-        with path.open("r", encoding="utf-8") as fr:
-            for line_no, line in enumerate(fr, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError as e:
-                    raise ValueError(
-                        f"Invalid JSON in {path.name} at line {line_no}: {e}"
-                    ) from e
-
-                text = obj.get("text")
-                if not isinstance(text, str):
-                    raise ValueError(
-                        f"Missing/invalid 'text' in {path.name} line {line_no}"
-                    )
-
-                metadata = obj.get("metadata")
-                if metadata is None:
-                    metadata = {}
-                if not isinstance(metadata, dict):
-                    raise ValueError(
-                        "Missing/invalid 'metadata' (must be dict) in "
-                        f"{path.name} line {line_no}"
-                    )
-
-                metadata.setdefault("chunk_file", path.name)
-                metadata.setdefault("line_no", line_no)
-
-                docs.append(Document(page_content=text, metadata=metadata))
-
-    logger.info("Loaded %d documents from %d chunk files", len(docs), len(jsonl_files))
-    return docs
-
-
-def load_documents_from_jsonl_dirs(chunk_dirs: Iterable[Path]) -> list[Document]:
-    docs: list[Document] = []
-    for chunk_dir in chunk_dirs:
-        docs.extend(load_documents_from_jsonl(chunk_dir))
-    return docs
+    return None

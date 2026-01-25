@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -70,13 +69,14 @@ def main() -> None:
 
     args = _build_arg_parser().parse_args()
 
-    cfg = AppConfig.from_here()
-    load_dotenv(cfg.base_dir / ".env")
-    llm_api_key = os.getenv("GEMINI_API_KEY", "")
+    base_dir = Path(__file__).resolve().parents[3]
+    load_dotenv(base_dir / ".env")
+    cfg = AppConfig.from_here(base_dir=base_dir)
+    llm_api_key = cfg.gemini_api_key
 
     rag_pipeline = RagPipeline(
         index_dir=cfg.index_dir,
-        embedding_factory=EmbeddingFactory(cfg.embedding_model_name),
+        embedding_factory=EmbeddingFactory(cfg.embedding_model),
         llm_api_key=llm_api_key,
         config=cfg,
     )
