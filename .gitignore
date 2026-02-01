@@ -5,8 +5,9 @@
 docker-compose.yml
 docker/
 app/.venv/
-app/data/rec_chunk/*
-app/data/llm_chunk/*
+app/data/first_rec_chunk/*
+app/data/second_rec_chunk/*
+app/data/summery_chunk/*
 app/data/prop_chunk/*
 app/data/raptor_chunk/*
 app/data/eval/*

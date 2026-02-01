@@ -261,12 +261,9 @@ def download_drive_markdown(
                 _cleanup_drive_duplicates(
                     out_dir=docs_dir, drive_file=drive_file, keep_path=out_path
                 )
-                up_to_date = _is_drive_file_up_to_date(out_path, drive_file)
-                if skip_existing and up_to_date:
+                if skip_existing and _is_drive_file_up_to_date(out_path, drive_file):
                     logger.info("Skip download (up-to-date): %s", out_path.name)
                     continue
-                if skip_existing and out_path.exists() and not up_to_date:
-                    logger.info("Re-downloading updated Drive doc: %s", drive_file.path)
                 content = _download_export_bytes(
                     drive_service, file_id=drive_file.file_id, mime_type="text/markdown"
                 )
@@ -283,14 +280,9 @@ def download_drive_markdown(
                 _cleanup_drive_duplicates(
                     out_dir=sheets_dir, drive_file=drive_file, keep_path=out_path
                 )
-                up_to_date = _is_drive_file_up_to_date(out_path, drive_file)
-                if skip_existing and up_to_date:
+                if skip_existing and _is_drive_file_up_to_date(out_path, drive_file):
                     logger.info("Skip download (up-to-date): %s", out_path.name)
                     continue
-                if skip_existing and out_path.exists() and not up_to_date:
-                    logger.info(
-                        "Re-downloading updated Drive sheet: %s", drive_file.path
-                    )
                 csv_bytes = _download_export_bytes(
                     drive_service, file_id=drive_file.file_id, mime_type="text/csv"
                 )

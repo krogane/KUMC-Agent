@@ -1,34 +1,48 @@
 # KUMC-Agent
-KUMCが保有する情報をGoogle Driveから収集し、RAGで回答するDiscordボットです。
-ローカルの`llama.cpp`またはGeminiを使った回答生成に対応し、Index構築・評価(Ragas)まで一通りの流れが揃っています。
+KUMCが保有する情報をGoogle DriveとDiscordから収集し、RAGで回答するDiscordボットです。
+ローカルの`llama.cpp`またはGeminiを使った回答生成に対応し、Index構築・評価（ragas）まで一通りの流れが揃っています。
 
-## 全体構成
-- Google DriveのDocs/SheetsをMarkdown/CSVで取得し、段階的にChunkingしてFAISS索引を構築
-- Discordで`/ai `から始まる質問を受け取り、検索＋再ランク＋回答生成
-- Ragas評価スクリプトでRAG品質を可視化
+## 主な機能
+- Google DriveのDocs/SheetsをMarkdown/CSVとして取得（更新差分を判定）
+- Discordメッセージログの取得（Botトークンがある場合、ギルド絞り込み可）
+- Chunking: First/Second Recursive、Summery（要約）、Proposition、RAPTOR
+- 検索: FAISSのDense + BM25（Sudachi）のSparse、Cross-Encoder再ランク、MMR多様化
+- ルーティング: Function CallingでRAG / No-RAGを自動切替
+- 回答時の追加検索・追加メモリ参照
+- Drive/DiscordのソースURLを回答末尾に付与
+- 自動インデックス更新（スケジュール）
 
 ## データフロー
-Indexing:
-1. (任意) 既存データをクリア
-2. Google DriveからDocs/Sheetsを取得 (`app/data/raw`)
-3. Recursive Chunking (`app/data/rec_chunk`)
-4. (任意) Proposition Chunking (`app/data/prop_chunk`)
-5. (任意) RAPTOR要約 (`app/data/raptor_chunk`)
-6. すべてのChunkをEmbeddingしてFAISS索引を作成 (`app/data/index`)
+### Indexing
+1. (任意) 既存データのクリア
+2. Discordメッセージ取得（`DISCORD_BOT_TOKEN` がある場合）
+3. Google DriveのDocs/Sheets取得（`app/data/raw`）
+4. First Recursive Chunking（`app/data/first_rec_chunk`）
+5. (任意) Second Recursive Chunking（`app/data/second_rec_chunk`）
+6. (任意) Summery Chunking（`app/data/summery_chunk`）
+7. (任意) Proposition Chunking（`app/data/prop_chunk`、Second Rec必須）
+8. (任意) RAPTOR要約（`app/data/raptor_chunk`）
+9. すべてのChunkをEmbeddingしてFAISS索引を作成（`app/data/index`）
 
-Query:
-1. `RagPipeline`がSemantic検索＋Keyword検索を実行
-2. 必要に応じてCross-Encoderで再ランク
-3. LLM (Gemini or llama.cpp) で回答生成
+### Query
+1. Function CallingでRAG使用可否を判定（無効化可）
+2. RAG: Dense検索 + Sparse検索
+3. Cross-Encoderで再ランク、Parent doc補完、MMRで最終選択
+4. LLMで回答生成（JSON出力 → パース）
+5. 追加検索/追加メモリが要求された場合は再検索・再生成
+6. 回答にソースURLを付与（Drive/Discord）
 
 ## ディレクトリ構成
 - `app/src/main.py`: Discordボットのエントリポイント
-- `app/src/config.py`: すべての設定/環境変数の集約
+- `app/src/config.py`: 設定/環境変数の集約
 - `app/src/pipeline/`: RAG推論パイプライン
-- `app/src/indexing/`: Index構築ロジック (Drive取得/Chunking/RAPTOR/FAISS)
+- `app/src/indexing/`: Drive/Discord取得・Chunking・RAPTOR・FAISS
 - `app/src/eval/`: Ragas評価スクリプト
-- `app/data/`: 取得データ・Chunk・Index・評価データ
-- `app/model/`: ローカルLLM/Embedding/Cross-Encoderの配置場所
+- `app/data/raw`: 取得データ（docs/sheets/messages）
+- `app/data/first_rec_chunk`, `second_rec_chunk`, `summery_chunk`, `prop_chunk`, `raptor_chunk`
+- `app/data/index`: FAISS索引
+- `app/data/eval`: 評価データと結果
+- `app/model/`: ローカルモデル配置（embedding/llm/cross-encoder）
 - `docker/`, `docker-compose.yml`: Docker実行用
 
 ## セットアップ
@@ -40,21 +54,109 @@ pip install -r requirements.txt
 ```
 
 ### `.env`
-`.env`をプロジェクトルートに配置し、必要な環境変数を設定します。
-`app/src/config.py`が唯一の設定ソースです。
+`.env`はプロジェクトルートに配置します。主要なものだけ載せています。全設定は`app/src/config.py`を参照してください。
+
+#### 必須 / ほぼ必須
+- `DISCORD_BOT_TOKEN`: Discord botトークン（Bot起動・Discordログ取得に使用）
+- `FOLDER_ID`: Google DriveのフォルダID
+- `GOOGLE_APPLICATION_CREDENTIALS`: サービスアカウントJSONのパス（空ならデフォルト認証を利用）
+- `EMBEDDING_MODEL`: Embedding用モデル名 or パス
+- `LLM_PROVIDER`: `gemini` or `llama`
+- `GEMINI_API_KEY`: Gemini利用時必須
+- `LLAMA_MODEL` または `LLAMA_MODEL_PATH`: llama.cpp利用時必須
+
+#### モデルディレクトリ
+- `LLM_MODEL_DIR`（既定: `app/model/llm`）
+- `EMBEDDING_MODEL_DIR`（既定: `app/model/embedding`）
+- `CROSS_ENCODER_MODEL_DIR`（既定: `app/model/cross-encoder`）
+
+#### 回答LLM / Embedding
+- `GEMINI_MODEL`（Gemini利用時のモデル名）
+- `LLAMA_CTX_SIZE`, `LLAMA_THREADS`, `LLAMA_GPU_LAYERS`
+- `TEMPERATURE`, `MAX_OUTPUT_TOKENS`, `THINKING_LEVEL`
+- `CROSS_ENCODER_MODEL`（再ランク用モデル。未設定なら再ランクなし）
+
+#### Function Calling (RAGルーティング)
+- `FUNCTION_CALL_ENABLED` (default: true)
+- `FUNCTION_CALL_PROVIDER`: `functiongemma` or `llama_cpp`
+- `FUNCTION_CALL_HF_MODEL`: FunctionGemma用ローカルHFモデルパス（`FUNCTION_CALL_MODEL` も可）
+- `FUNCTION_CALL_LLAMA_MODEL`: llama_cpp用のggufパス
+- `FUNCTION_CALL_TEMPERATURE`, `FUNCTION_CALL_MAX_NEW_TOKENS`, `FUNCTION_CALL_MAX_RETRIES`
+
+※ Function Calling用モデルが無い場合は`FUNCTION_CALL_ENABLED=false`にしてください。
+
+#### No-RAG回答（RAGを使わない場合のLLM設定）
+- `NO_RAG_LLM_PROVIDER`, `NO_RAG_GEMINI_MODEL`, `NO_RAG_LLAMA_MODEL`
+- `NO_RAG_LLAMA_CTX_SIZE`, `NO_RAG_TEMPERATURE`, `NO_RAG_MAX_OUTPUT_TOKENS`, `NO_RAG_THINKING_LEVEL`
+
+#### Chunking
+- `FIRST_REC_CHUNK_SIZE`, `FIRST_REC_CHUNK_OVERLAP`
+- `SECOND_REC_ENABLED`, `SECOND_REC_CHUNK_SIZE`, `SECOND_REC_CHUNK_OVERLAP`
+- `SUMMERY_ENABLED`, `SUMMERY_CHARACTERS`
+- `SUMMERY_PROVIDER`, `SUMMERY_GEMINI_MODEL`, `SUMMERY_LLAMA_MODEL`
+- `SUMMERY_LLAMA_CTX_SIZE`, `SUMMERY_TEMPERATURE`
+- `SUMMERY_MAX_OUTPUT_TOKENS`, `SUMMERY_MAX_RETRIES`
+- `PROP_ENABLED`, `PROP_PROVIDER`
+- `PROP_GEMINI_MODEL`, `PROP_LLAMA_MODEL`
+- `PROP_LLAMA_CTX_SIZE`, `PROP_TEMPERATURE`
+- `PROP_MAX_OUTPUT_TOKENS`, `PROP_MAX_RETRIES`
+
+#### RAPTOR
+- `RAPTOR_ENABLED`, `RAPTOR_EMBEDDING_MODEL`
+- `RAPTOR_CLUSTER_MAX_TOKENS`, `RAPTOR_SUMMERY_MAX_TOKENS`
+- `RAPTOR_STOP_CHUNK_COUNT`, `RAPTOR_K_MAX`, `RAPTOR_K_SELECTION`
+- `RAPTOR_SUMMERY_PROVIDER`, `RAPTOR_SUMMERY_GEMINI_MODEL`
+- `RAPTOR_SUMMERY_LLAMA_MODEL`, `RAPTOR_SUMMERY_LLAMA_CTX_SIZE`
+- `RAPTOR_SUMMERY_TEMPERATURE`, `RAPTOR_SUMMERY_MAX_RETRIES`
+
+#### Retrieval
+- `TOP_K`, `DENSE_SEARCH_TOP_K`
+- `SPARSE_SEARCH_TOP_K`（初回のSparse検索）
+- `SPARSE_SEARCH_ORIGINAL_TOP_K`, `SPARSE_SEARCH_TRANSFORM_TOP_K`（再検索時）
+- `PARENT_DOC_ENABLED`, `PARENT_CHUNK_CAP`
+- `RERANK_POOL_SIZE`, `MMR_LAMBDA`
+- `SUDACHI_MODE` (`A`/`B`/`C`)
+- `SPARSE_BM25_K1`, `SPARSE_BM25_B`
+- `SPARSE_USE_NORMALIZED_FORM`, `SPARSE_REMOVE_SYMBOLS`
+- `SOURCE_MAX_COUNT`
+- `ANSWER_JSON_MAX_RETRIES`, `ANSWER_RESEARCH_MAX_RETRIES`
+
+#### Query Transform
+- `QUERY_TRANSFORM_ENABLED`, `QUERY_TRANSFORM_PROVIDER`
+- `QUERY_TRANSFORM_GEMINI_MODEL`, `QUERY_TRANSFORM_LLAMA_MODEL`
+- `QUERY_TRANSFORM_LLAMA_CTX_SIZE`, `QUERY_TRANSFORM_TEMPERATURE`
+- `QUERY_TRANSFORM_MAX_OUTPUT_TOKENS`, `QUERY_TRANSFORM_MAX_RETRIES`
+
+#### Discord / Drive / Scheduler
+- `DISCORD_GUILD_ALLOW_LIST`（カンマ区切りID。空なら全ギルド）
+- `DRIVE_MAX_FILES`（0で無制限）
+- `AUTO_INDEX_ENABLED`, `AUTO_INDEX_TIME`（例: `03:00`）, `AUTO_INDEX_WEEKDAYS`（例: `mon,tue,...` or `0-6`）
+
+#### その他
+- `COMMAND_PREFIX`（質問用プレフィックス）
+- `CHAT_HISTORY_ENABLED`, `CHAT_HISTORY_MAX_TURNS`
+- `MAX_INPUT_CHARACTERS`
+
+#### Index更新とクリア
+- `CLEAR_RAW_DATA`
+- `CLEAR_FIRST_REC_CHUNK_DATA`, `CLEAR_SECOND_REC_CHUNK_DATA`
+- `CLEAR_SUMMERY_CHUNK_DATA`, `CLEAR_PROP_CHUNK_DATA`, `CLEAR_RAPTOR_CHUNK_DATA`
+
+##### モデルパスの解決
+`EMBEDDING_MODEL`/`LLAMA_MODEL`/`CROSS_ENCODER_MODEL`/`*_LLAMA_MODEL` などは、ファイル名のみ指定した場合は各`*_MODEL_DIR`を基準に解決されます。相対パスや絶対パスでも指定可能です。
 
 ## 実行方法
 ### Index構築
 ```bash
 python app/src/indexing/build_index.py
 ```
-Google Driveから取得し、ChunkingとFAISS索引の生成を行います。
+Google Drive/Discordから取得し、ChunkingとFAISS索引の生成を行います。
 
 ### Discordボット起動
 ```bash
 python app/src/main.py
 ```
-Botが起動し、`/ai `で始まるメッセージに応答します。
+Botが起動し、`COMMAND_PREFIX`で始まるメッセージに応答します。
 
 ### ローカル対話テスト
 ```bash
@@ -67,87 +169,38 @@ python app/src/test.py
 python app/src/eval/evaluate_ragas.py
 ```
 `app/data/eval/ragas.jsonl`を読み込み、評価結果を`app/data/eval/result/`に出力します。
+オプション: `--eval-file`, `--limit`, `--save-dataset`, `--result-path`, `--judge-model`。
 
 ## Discordコマンド
-- `COMMAND_PREFIX` (デフォルト: `/ai `): 質問用のプレフィックス
-- `index_command_prefix` (デフォルト: `/build_index`): Index再構築コマンド
-  - Index更新中は質問受付を停止し、完了後に再開します
+- `COMMAND_PREFIX`（デフォルト: `/ai `）: 質問用のプレフィックス
+- `/ai build-index`: Index再構築コマンド（実行中は質問受付停止）
+- `/ai eval`: Ragas評価コマンド
+- `/ai stop`: 回答生成 / Index更新の中止
+
+※ `/ai eval` と `/ai stop` は固定です。`/ai build-index` は `config.py` の定数で変更できます。
 
 ## 主要モジュールの挙動
 ### `RagPipeline` (`app/src/pipeline/rag_pipeline.py`)
-- `retrieve`:
-  - Semantic検索 (FAISS) + Keyword検索を実施
-  - 結果をマージ後、Cross-Encoderで再ランク (設定がある場合)
-  - Proposition Chunk使用時は親Recursive Chunkを追加 (`PARENT_DOC_ENABLED`)
-- `generate`:
-  - `LLM_PROVIDER`でGemini or llama.cppを選択
-  - `system_rules`に沿って回答生成
+- Dense検索（FAISS）+ Sparse検索（BM25+Sudachi）のハイブリッド
+- Cross-Encoder再ランク（`CROSS_ENCODER_MODEL`が設定されている場合）
+- MMRによる多様化、Parent chunk追加（`PARENT_DOC_ENABLED`）
+- Function CallingでRAG / No-RAGを選択（`FUNCTION_CALL_ENABLED`）
+- LLMはJSON出力（sources, follow_up_queries, needs_additional_memory）を想定
+- 追加検索・追加メモリ要求時に再検索/再生成
 
 ### Indexing (`app/src/indexing/`)
-- `drive_loader.py`: Google DriveからDocs/Sheetsを取得し、Markdown/CSVとして保存
-- `chunking.py`: Recursive Chunking + (任意) Proposition Chunking
-  - Proposition ChunkingはLLMでJSON配列を生成し、失敗時はリトライ
-- `raptor.py`: Embedding → k-meansクラスタリング → 要約を繰り返す
+- `drive_loader.py`: Google DriveのDocs/Sheetsを取得（Markdown/CSV）
+- `discord_loader.py`: Discordログ取得（URL除去・メンション置換）
+- `chunking.py`: Recursive / Summery / Proposition Chunking
+- `raptor.py`: Embedding → k-meansクラスタリング → 要約を反復
 - `faiss_index.py`: ChunkをEmbeddingしてFAISS索引を生成
-
-## 設定一覧 (.env)
-必須 / よく使う:
-- `DISCORD_BOT_TOKEN`: Discord botトークン
-- `GEMINI_API_KEY`: Gemini APIキー (Gemini利用時)
-- `FOLDER_ID`: Google DriveのフォルダID
-- `GOOGLE_APPLICATION_CREDENTIALS`: サービスアカウントJSONのパス
-
-Embedding/LLM:
-- `EMBEDDING_MODEL`: Embedding用モデル(ggufパス or HF名)
-- `LLM_PROVIDER`: `gemini` or `llama`
-- `GEMINI_MODEL`: Geminiモデル名 (例: `gemini-3-flash-preview`)
-- `LLAMA_MODEL_PATH`: llama.cpp用モデルパス
-- `LLAMA_CTX_SIZE`, `LLAMA_THREADS`, `LLAMA_GPU_LAYERS`
-- `TEMPERATURE`, `MAX_OUTPUT_TOKENS`, `THINKING_LEVEL`
-
-Chunking:
-- `REC_CHUNK_SIZE`, `REC_CHUNK_OVERLAP`, `REC_MIN_CHUNK_TOKENS`
-- `PROP_CHUNK_ENABLED`, `PROP_CHUNK_PROVIDER`
-- `PROP_CHUNK_MODEL`, `PROP_CHUNK_LLAMA_MODEL_PATH`
-- `PROP_CHUNK_LLAMA_CTX_SIZE`, `PROP_CHUNK_TEMPERATURE`
-- `PROP_CHUNK_MAX_OUTPUT_TOKENS`, `PROP_CHUNK_SIZE`, `PROP_CHUNK_MAX_RETRIES`
-
-RAPTOR:
-- `RAPTOR_ENABLED`, `RAPTOR_EMBEDDING_MODEL`
-- `RAPTOR_CLUSTER_MAX_TOKENS`, `RAPTOR_SUMMARY_MAX_TOKENS`
-- `RAPTOR_STOP_CHUNK_COUNT`, `RAPTOR_K_MAX`, `RAPTOR_K_SELECTION`
-- `RAPTOR_SUMMARY_PROVIDER`, `RAPTOR_SUMMARY_MODEL`
-- `RAPTOR_SUMMARY_LLAMA_MODEL_PATH`, `RAPTOR_SUMMARY_LLAMA_CTX_SIZE`
-- `RAPTOR_SUMMARY_TEMPERATURE`, `RAPTOR_SUMMARY_MAX_RETRIES`
-
-Retrieval:
-- `TOP_K`, `RAPTOR_SEARCH_TOP_K`, `KEYWORD_SEARCH_TOP_K`
-- `PARENT_DOC_ENABLED`
-
-Index更新とクリア:
-- `CLEAR_RAW_DATA`, `CLEAR_REC_CHUNK_DATA`
-- `CLEAR_PROP_CHUNK_DATA`, `CLEAR_RAPTOR_CHUNK_DATA`
-
-その他:
-- `COMMAND_PREFIX`: Discord質問のプレフィックス
-- `DRIVE_MAX_FILES`: 取得するDriveファイル数の上限
-- `CROSS_ENCODER_MODEL`: 再ランク用のllama.cppモデルパス
-
-## モデル配置の例
-- Embedding: `app/model/embedding/*.gguf`
-- LLM: `app/model/llm/*.gguf`
-- Cross-Encoder: `app/model/cross-encoder/*.gguf`
-
-`EMBEDDING_MODEL`や`LLAMA_MODEL_PATH`は絶対パスでも相対パスでも指定可能です。
-相対パスの場合はリポジトリルート基準で解決されます。
 
 ## Docker
 `docker-compose.yml`から起動できます。
 ```bash
 docker compose up --build
 ```
-注意: `docker/DockerFile`は`app/requirements.txt`を参照します。
-現在はルートに`requirements.txt`があるため、必要に応じてDockerfileを修正してください。
+注意: `docker/DockerFile`はルートの`requirements.txt`を参照します。
 
 ## 参考: 評価データ形式
 `app/data/eval/ragas.jsonl`は以下の形式です:
@@ -155,4 +208,3 @@ docker compose up --build
 {"question": "質問文", "ground_truth": "正解文"}
 {"question": "質問文", "ground_truths": ["正解1", "正解2"]}
 ```
-

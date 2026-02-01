@@ -15,6 +15,24 @@ class Chunk:
     metadata: dict[str, object]
 
 
+def chunk_embedding_text(chunk: Chunk) -> str:
+    text = (chunk.text or "").strip()
+    metadata_lines: list[str] = []
+    channel_name = str(chunk.metadata.get("channel_name") or "").strip()
+    if channel_name:
+        metadata_lines.append(f"channel_name: {channel_name}")
+    drive_path = str(chunk.metadata.get("drive_file_path") or "").strip()
+    if drive_path:
+        metadata_lines.append(f"drive_file_path: {drive_path}")
+
+    if not metadata_lines:
+        return text
+    meta_block = "\n".join(metadata_lines)
+    if not text:
+        return meta_block
+    return f"{text}\n{meta_block}"
+
+
 def _load_chunk_record(*, obj: dict[str, object], path: Path, line_no: int) -> Chunk:
     text = obj.get("text")
     if not isinstance(text, str):
@@ -67,6 +85,28 @@ def load_chunks_from_dir(chunk_dir: Path) -> list[Chunk]:
         chunks.extend(load_chunks(path))
 
     logger.info("Loaded %d chunks from %d chunk files", len(chunks), len(jsonl_files))
+    return chunks
+
+
+def load_chunks_from_recursive_dir(chunk_dir: Path) -> list[Chunk]:
+    if not chunk_dir.exists():
+        raise FileNotFoundError(f"Chunk directory does not exist: {chunk_dir}")
+
+    chunks: list[Chunk] = []
+    jsonl_files = sorted(chunk_dir.rglob("*.jsonl"))
+    if not jsonl_files:
+        logger.warning("No .jsonl chunk files found under %s", chunk_dir)
+        return chunks
+
+    for path in jsonl_files:
+        chunks.extend(load_chunks(path))
+
+    logger.info(
+        "Loaded %d chunks from %d chunk files under %s",
+        len(chunks),
+        len(jsonl_files),
+        chunk_dir,
+    )
     return chunks
 
 

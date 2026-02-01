@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -13,11 +15,11 @@ from config import (
     AppConfig,
     LLM_CHUNK_SYSTEM_PROMPT,
     build_proposition_chunk_prompt,
+    build_summery_chunk_prompt,
 )
 from indexing.chunks import Chunk, load_chunks, write_chunks
-from indexing.constants import FILE_ID_SEPARATOR
+from indexing.constants import FILE_ID_SEPARATOR, MESSAGE_SEPARATORS
 from indexing.llm_client import generate_text
-from indexing.token_utils import estimate_tokens
 from indexing.utils import ensure_dir, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,12 @@ logger = logging.getLogger(__name__)
 _METADATA_KEYS = (
     "source_file_name",
     "source_type",
+    "guild_id",
+    "guild_name",
+    "channel_id",
+    "channel_name",
+    "first_message_id",
+    "first_message_date",
     "drive_file_name",
     "drive_mime_type",
     "drive_file_path",
@@ -106,23 +114,174 @@ def _build_splitter(
     )
 
 
-def _is_output_up_to_date(output_path: Path, input_path: Path) -> bool:
+_JST = timezone(timedelta(hours=9))
+
+
+def _parse_message_date(value: str | None) -> str | None:
+    if not value:
+        return None
     try:
-        return output_path.stat().st_mtime >= input_path.stat().st_mtime
-    except FileNotFoundError:
-        return False
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(_JST).strftime("%Y/%m/%d")
+
+
+def _load_message_lines(
+    path: Path,
+) -> tuple[list[str], list[str | None], list[str | None], dict[str, object]]:
+    lines: list[str] = []
+    line_message_ids: list[str | None] = []
+    line_message_dates: list[str | None] = []
+    base_metadata: dict[str, object] = {}
+    last_date: str | None = None
+
+    with path.open("r", encoding="utf-8") as fr:
+        for line_no, line in enumerate(fr, start=1):
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {path.name} at line {line_no}: {exc}"
+                ) from exc
+
+            text = obj.get("text")
+            metadata = obj.get("metadata") or {}
+            if not isinstance(text, str) or not isinstance(metadata, dict):
+                continue
+
+            if not base_metadata:
+                base_metadata = {
+                    "guild_id": str(metadata.get("guild_id") or ""),
+                    "guild_name": str(metadata.get("guild_name") or ""),
+                    "channel_id": str(metadata.get("channel_id") or ""),
+                    "channel_name": str(metadata.get("channel_name") or ""),
+                    "source_file_name": str(metadata.get("source_file_name") or ""),
+                    "source_type": "messages",
+                }
+
+            message_id: str | None = None
+            raw_message_id = metadata.get("message_id")
+            if raw_message_id is None:
+                raw_message_id = metadata.get("chunk_id")
+            if raw_message_id is not None:
+                message_id = str(raw_message_id).strip() or None
+
+            date_str = _parse_message_date(
+                str(metadata.get("message_timestamp") or "")
+            )
+            if last_date and date_str and date_str != last_date:
+                lines.append(date_str)
+                line_message_ids.append(None)
+                line_message_dates.append(date_str)
+            if date_str:
+                last_date = date_str
+            message_date = date_str or last_date
+
+            author_name = str(metadata.get("author_name") or "unknown").strip()
+            for part in text.splitlines():
+                part = part.strip()
+                if not part:
+                    continue
+                lines.append(f"{author_name}: {part}")
+                line_message_ids.append(message_id)
+                line_message_dates.append(message_date)
+
+    if base_metadata:
+        if not base_metadata.get("source_file_name"):
+            guild_id = base_metadata.get("guild_id") or ""
+            channel_id = base_metadata.get("channel_id") or ""
+            if guild_id and channel_id:
+                base_metadata["source_file_name"] = f"discord/{guild_id}/{channel_id}"
+
+    return lines, line_message_ids, line_message_dates, base_metadata
+
+
+def _build_message_text(lines: list[str]) -> tuple[str, list[int]]:
+    parts: list[str] = []
+    line_starts: list[int] = []
+    offset = 0
+    for idx, line in enumerate(lines):
+        line_starts.append(offset)
+        parts.append(line)
+        offset += len(line)
+        if idx < len(lines) - 1:
+            parts.append("\n")
+            offset += 1
+    return "".join(parts), line_starts
+
+
+def _first_message_id_for_span(
+    *,
+    line_starts: list[int],
+    line_message_ids: list[str | None],
+    start: int,
+    end: int,
+) -> str | None:
+    if start < 0 or end <= start or not line_starts:
+        return None
+
+    idx = bisect.bisect_right(line_starts, start) - 1
+    if idx < 0:
+        idx = 0
+    if idx < len(line_message_ids):
+        current = line_message_ids[idx]
+        if current:
+            return current
+
+    for next_idx in range(idx + 1, len(line_message_ids)):
+        if line_starts[next_idx] >= end:
+            break
+        candidate = line_message_ids[next_idx]
+        if candidate:
+            return candidate
+    return None
+
+
+def _first_message_date_for_span(
+    *,
+    line_starts: list[int],
+    line_message_dates: list[str | None],
+    start: int,
+    end: int,
+) -> str | None:
+    if start < 0 or end <= start or not line_starts:
+        return None
+
+    idx = bisect.bisect_right(line_starts, start) - 1
+    if idx < 0:
+        idx = 0
+
+    for current_idx in range(idx, len(line_message_dates)):
+        if line_starts[current_idx] >= end:
+            break
+        candidate = line_message_dates[current_idx]
+        if candidate:
+            return candidate
+    return None
+
+
+def _extract_channel_id_from_filename(stem: str) -> str:
+    match = re.match(r"^(\d+)", stem)
+    if match:
+        return match.group(1)
+    return stem
 
 
 def recursive_chunk_dir(
     *,
     raw_data_dir: Path,
     chunk_dir: Path,
-    rec_chunk_size: int,
-    rec_chunk_overlap: int,
-    rec_min_chunk_tokens: int,
-    tokenizer_model: str,
+    chunk_size: int,
+    chunk_overlap: int,
     separators: Sequence[str],
     source_type: str,
+    stage: str,
     file_extensions: Sequence[str] = (".md",),
     skip_existing: bool = False,
 ) -> None:
@@ -144,8 +303,8 @@ def recursive_chunk_dir(
         return
 
     splitter = _build_splitter(
-        chunk_size=rec_chunk_size,
-        chunk_overlap=rec_chunk_overlap,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         separators=separators,
     )
 
@@ -154,12 +313,8 @@ def recursive_chunk_dir(
         safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
         out_path = chunk_dir / f"{safe_rel}.jsonl"
         if skip_existing and out_path.exists():
-            if _is_output_up_to_date(out_path, path):
-                logger.info("Skip recursive chunking (up-to-date): %s", out_path.name)
-                continue
-            logger.info(
-                "Rebuilding recursive chunking (source updated): %s", out_path.name
-            )
+            logger.info("Skip recursive chunking (exists): %s", out_path.name)
+            continue
 
         text = path.read_text(encoding="utf-8")
         drive_metadata = _load_drive_metadata(path)
@@ -175,19 +330,312 @@ def recursive_chunk_dir(
         output_index = 0
 
         for doc in docs:
-            if rec_min_chunk_tokens > 0 and estimate_tokens(
-                text=doc, model_name=tokenizer_model
-            ) < rec_min_chunk_tokens:
-                continue
             metadata = dict(base_metadata)
             metadata["chunk_id"] = output_index
-            metadata = _with_stage(metadata, "recursive")
+            metadata = _with_stage(metadata, stage)
             output_chunks.append(Chunk(text=doc, metadata=metadata))
             output_index += 1
 
         write_chunks(out_path, output_chunks)
         logger.info(
-            "Recursive chunked %s -> %s (%d chunks)",
+            "Recursive chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+
+def message_chunk_jsonl_dir(
+    *,
+    raw_messages_dir: Path,
+    chunk_dir: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+    stage: str,
+    skip_existing: bool = False,
+) -> None:
+    ensure_dir(chunk_dir)
+
+    if not raw_messages_dir.exists():
+        raise FileNotFoundError(
+            f"Raw messages directory does not exist: {raw_messages_dir}"
+        )
+
+    input_files = sorted(
+        raw_messages_dir.rglob("*.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not input_files:
+        logger.warning("No message .jsonl files found under %s", raw_messages_dir)
+        return
+
+    splitter = _build_splitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=MESSAGE_SEPARATORS,
+    )
+
+    seen_outputs: set[str] = set()
+    for path in input_files:
+        if path.name.endswith(".state.json"):
+            continue
+
+        lines, line_message_ids, line_message_dates, base_metadata = (
+            _load_message_lines(path)
+        )
+        if not lines:
+            logger.warning("Empty message file: %s", path.name)
+            continue
+        if len(line_message_ids) != len(lines) or len(line_message_dates) != len(lines):
+            logger.warning(
+                "Message line metadata mismatch in %s (lines=%d ids=%d dates=%d)",
+                path.name,
+                len(lines),
+                len(line_message_ids),
+                len(line_message_dates),
+            )
+            line_message_ids = [None] * len(lines)
+            line_message_dates = [None] * len(lines)
+
+        guild_id = str(base_metadata.get("guild_id") or "").strip()
+        if not guild_id and path.parent != raw_messages_dir:
+            guild_id = path.parent.name
+            base_metadata["guild_id"] = guild_id
+
+        channel_id = str(base_metadata.get("channel_id") or "").strip()
+        if not channel_id:
+            channel_id = _extract_channel_id_from_filename(path.stem)
+            base_metadata["channel_id"] = channel_id
+
+        if not base_metadata.get("source_file_name") and guild_id and channel_id:
+            base_metadata["source_file_name"] = f"discord/{guild_id}/{channel_id}"
+        base_metadata.setdefault("source_type", "messages")
+
+        out_name = sanitize_filename(f"{guild_id}__{channel_id}.jsonl")
+        if out_name in seen_outputs:
+            logger.info("Skip duplicate message file: %s", path.name)
+            continue
+        seen_outputs.add(out_name)
+
+        out_path = chunk_dir / out_name
+        if skip_existing and out_path.exists():
+            try:
+                if out_path.stat().st_mtime >= path.stat().st_mtime:
+                    logger.info("Skip message chunking (up-to-date): %s", out_path.name)
+                    continue
+            except OSError:
+                pass
+
+        text, line_starts = _build_message_text(lines)
+        docs = splitter.split_text(text)
+        output_chunks: list[Chunk] = []
+        output_index = 0
+        search_pos = 0
+
+        for doc in docs:
+            metadata = dict(base_metadata)
+            start = text.find(doc, search_pos)
+            if start == -1:
+                start = text.find(doc)
+            if start != -1:
+                end = start + len(doc)
+                first_message_id = _first_message_id_for_span(
+                    line_starts=line_starts,
+                    line_message_ids=line_message_ids,
+                    start=start,
+                    end=end,
+                )
+                if first_message_id:
+                    metadata["first_message_id"] = first_message_id
+                first_message_date = _first_message_date_for_span(
+                    line_starts=line_starts,
+                    line_message_dates=line_message_dates,
+                    start=start,
+                    end=end,
+                )
+                if first_message_date:
+                    metadata["first_message_date"] = first_message_date
+                search_pos = max(search_pos, end)
+            metadata["chunk_id"] = output_index
+            metadata = _with_stage(metadata, stage)
+            output_chunks.append(Chunk(text=doc, metadata=metadata))
+            output_index += 1
+
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Message chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+
+def recursive_chunk_jsonl_dir(
+    *,
+    input_chunk_dir: Path,
+    output_chunk_dir: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+    separators: Sequence[str],
+    stage: str,
+    skip_existing: bool = False,
+) -> None:
+    ensure_dir(output_chunk_dir)
+
+    if not input_chunk_dir.exists():
+        raise FileNotFoundError(
+            f"Input chunk directory does not exist: {input_chunk_dir}"
+        )
+
+    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
+        return
+
+    splitter = _build_splitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=separators,
+    )
+
+    for path in jsonl_files:
+        out_path = output_chunk_dir / path.name
+        if skip_existing and out_path.exists():
+            logger.info("Skip recursive chunking (exists): %s", out_path.name)
+            continue
+
+        chunks = load_chunks(path)
+        if not chunks:
+            logger.warning("Empty chunk file: %s", path.name)
+            continue
+
+        output_chunks: list[Chunk] = []
+        output_index = 0
+
+        for chunk in chunks:
+            source_text = chunk.text
+            if not source_text:
+                continue
+            base_metadata = _strip_chunk_metadata(chunk.metadata)
+            parent_chunk_id = chunk.metadata.get("chunk_id")
+            if parent_chunk_id is not None:
+                base_metadata["parent_chunk_id"] = parent_chunk_id
+
+            docs = splitter.split_text(source_text)
+            for doc in docs:
+                metadata = dict(base_metadata)
+                metadata["chunk_id"] = output_index
+                metadata = _with_stage(metadata, stage)
+                output_chunks.append(Chunk(text=doc, metadata=metadata))
+                output_index += 1
+
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Recursive chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+
+def summery_chunk_jsonl_dir(
+    *,
+    input_chunk_dir: Path,
+    output_chunk_dir: Path,
+    config: AppConfig,
+    skip_existing: bool = False,
+) -> None:
+    ensure_dir(output_chunk_dir)
+
+    if not input_chunk_dir.exists():
+        raise FileNotFoundError(
+            f"Input chunk directory does not exist: {input_chunk_dir}"
+        )
+
+    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
+        return
+
+    provider = (config.summery_provider or "").lower()
+    max_retries = max(1, config.summery_max_retries)
+    logger.info(
+        "Summery chunking enabled (%s) for %d files in %s",
+        provider,
+        len(jsonl_files),
+        input_chunk_dir,
+    )
+
+    for path in jsonl_files:
+        out_path = output_chunk_dir / path.name
+        if skip_existing and out_path.exists():
+            logger.info("Skip summery chunking (exists): %s", out_path.name)
+            continue
+
+        chunks = load_chunks(path)
+        if not chunks:
+            logger.warning("Empty chunk file: %s", path.name)
+            continue
+
+        output_chunks: list[Chunk] = []
+        output_index = 0
+
+        for chunk in chunks:
+            source_text = chunk.text
+            if not source_text:
+                continue
+            base_metadata = _strip_chunk_metadata(chunk.metadata)
+            parent_chunk_id = chunk.metadata.get("chunk_id")
+            if parent_chunk_id is not None:
+                base_metadata["parent_chunk_id"] = parent_chunk_id
+
+            source_type = str(base_metadata.get("source_type") or "").strip()
+            drive_file_path = str(base_metadata.get("drive_file_path") or "").strip()
+            prompt = build_summery_chunk_prompt(
+                text=source_text,
+                target_characters=config.summery_characters,
+                source_type=source_type,
+                drive_file_path=drive_file_path,
+            )
+            chunk_texts = _run_llm_chunking(
+                prompt=prompt,
+                source_name=path.name,
+                provider=provider,
+                api_key=config.gemini_api_key,
+                model=_select_model_for_provider(
+                    provider=provider,
+                    gemini_model=config.summery_gemini_model,
+                    llama_model=config.summery_llama_model,
+                ),
+                llama_model_path=config.summery_llama_model_path,
+                llama_ctx_size=config.summery_llama_ctx_size,
+                temperature=config.summery_temperature,
+                max_output_tokens=config.summery_max_output_tokens,
+                max_retries=max_retries,
+                thinking_level=config.thinking_level,
+                llama_threads=config.llama_threads,
+                llama_gpu_layers=config.llama_gpu_layers,
+                action_label="Summery chunking",
+                output_format="raw_text",
+                response_mime_type="text/plain",
+            )
+            if chunk_texts is None:
+                continue
+
+            for chunk_text in chunk_texts:
+                metadata = dict(base_metadata)
+                metadata["chunk_id"] = output_index
+                metadata = _with_stage(metadata, "summery")
+                output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
+                output_index += 1
+
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Summery chunked %s -> %s (%d chunks)",
             path.name,
             out_path.name,
             len(output_chunks),
@@ -213,8 +661,8 @@ def proposition_chunk_jsonl_dir(
         logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
         return
 
-    provider = (config.prop_chunk_provider or "").lower()
-    max_retries = max(1, config.prop_chunk_max_retries)
+    provider = (config.prop_provider or "").lower()
+    max_retries = max(1, config.prop_max_retries)
     logger.info(
         "Proposition chunking enabled (%s) for %d files in %s",
         provider,
@@ -225,12 +673,8 @@ def proposition_chunk_jsonl_dir(
     for path in jsonl_files:
         out_path = output_chunk_dir / path.name
         if skip_existing and out_path.exists():
-            if _is_output_up_to_date(out_path, path):
-                logger.info("Skip proposition chunking (up-to-date): %s", out_path.name)
-                continue
-            logger.info(
-                "Rebuilding proposition chunking (input updated): %s", out_path.name
-            )
+            logger.info("Skip proposition chunking (exists): %s", out_path.name)
+            continue
         chunks = load_chunks(path)
         if not chunks:
             logger.warning("Empty chunk file: %s", path.name)
@@ -247,21 +691,22 @@ def proposition_chunk_jsonl_dir(
             parent_chunk_id = chunk.metadata.get("chunk_id")
             if parent_chunk_id is not None:
                 base_metadata["parent_chunk_id"] = parent_chunk_id
-            prompt = build_proposition_chunk_prompt(
-                text=source_text,
-                chunk_size=config.prop_chunk_size,
-            )
+            prompt = build_proposition_chunk_prompt(text=source_text)
             source_name = path.name
             chunk_texts = _run_llm_chunking(
                 prompt=prompt,
                 source_name=source_name,
                 provider=provider,
                 api_key=config.gemini_api_key,
-                model=config.prop_chunk_model,
-                llama_model_path=config.prop_chunk_llama_model_path,
-                llama_ctx_size=config.prop_chunk_llama_ctx_size,
-                temperature=config.prop_chunk_temperature,
-                max_output_tokens=config.prop_chunk_max_output_tokens,
+                model=_select_model_for_provider(
+                    provider=provider,
+                    gemini_model=config.prop_gemini_model,
+                    llama_model=config.prop_llama_model,
+                ),
+                llama_model_path=config.prop_llama_model_path,
+                llama_ctx_size=config.prop_llama_ctx_size,
+                temperature=config.prop_temperature,
+                max_output_tokens=config.prop_max_output_tokens,
                 max_retries=max_retries,
                 thinking_level=config.thinking_level,
                 llama_threads=config.llama_threads,
@@ -287,6 +732,17 @@ def proposition_chunk_jsonl_dir(
         )
 
 
+def _select_model_for_provider(
+    *,
+    provider: str,
+    gemini_model: str,
+    llama_model: str,
+) -> str:
+    if (provider or "").lower() == "llama":
+        return llama_model
+    return gemini_model
+
+
 def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
     cleaned = {k: metadata.get(k, "") for k in _METADATA_KEYS}
     return cleaned
@@ -294,7 +750,7 @@ def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
 
 def _strip_code_fences(text: str) -> str:
     stripped = text.strip()
-    if stripped.startswith("```json") and stripped.endswith("```"):
+    if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         if len(lines) >= 3:
             return "\n".join(lines[1:-1]).strip()
@@ -353,6 +809,35 @@ def _parse_llm_chunks(response: str, *, source_name: str) -> list[str]:
     return chunks
 
 
+def _parse_llm_summary(response: str, *, source_name: str) -> list[str]:
+    if not response:
+        raise ValueError(f"Empty LLM response for {source_name}")
+
+    payload = _strip_code_fences(response)
+    if not payload.strip():
+        raise ValueError(f"Empty LLM response for {source_name}")
+
+    leading = payload.lstrip()
+    if leading.startswith("[") or leading.startswith("{"):
+        try:
+            return _parse_llm_chunks(payload, source_name=source_name)
+        except Exception:
+            pass
+
+    if leading.startswith('"') and leading.rstrip().endswith('"'):
+        try:
+            decoded = json.loads(payload)
+        except Exception:
+            decoded = None
+        if isinstance(decoded, str):
+            text = decoded.strip()
+            if text:
+                return [text]
+
+    text = payload.strip()
+    if not text:
+        raise ValueError(f"LLM produced no summary for {source_name}")
+    return [text]
 
 
 def _run_llm_chunking(
@@ -371,6 +856,8 @@ def _run_llm_chunking(
     llama_threads: int,
     llama_gpu_layers: int,
     action_label: str,
+    output_format: str = "json_list",
+    response_mime_type: str | None = "application/json",
 ) -> list[str] | None:
     last_error: Exception | None = None
     last_response: str | None = None
@@ -389,10 +876,13 @@ def _run_llm_chunking(
                 thinking_level=thinking_level,
                 llama_threads=llama_threads,
                 llama_gpu_layers=llama_gpu_layers,
-                response_mime_type="application/json",
+                response_mime_type=response_mime_type,
             )
             last_response = response
-            chunks = _parse_llm_chunks(response, source_name=source_name)
+            if output_format == "raw_text":
+                chunks = _parse_llm_summary(response, source_name=source_name)
+            else:
+                chunks = _parse_llm_chunks(response, source_name=source_name)
             return chunks
         except Exception as exc:
             last_error = exc

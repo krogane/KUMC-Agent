@@ -3,6 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from pipeline.llama_lock import LLAMA_LOCK, reset_llama_cache
+
 
 def generate_text(
     *,
@@ -103,14 +105,16 @@ def _generate_with_llama(
         threads,
         gpu_layers,
     )
-    result = llama.create_chat_completion(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=max_output_tokens,
-        temperature=temperature,
-    )
+    with LLAMA_LOCK:
+        reset_llama_cache(llama)
+        result = llama.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=max_output_tokens,
+            temperature=temperature,
+        )
     return (
         (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
         or ""
@@ -139,7 +143,7 @@ def _llama_client(
 ):
     if not model_path:
         raise RuntimeError(
-            "LLAMA_MODEL_PATH is not set. Please set it in .env"
+            "LLAMA_MODEL is not set. Please set LLAMA_MODEL (and LLM_MODEL_DIR) in .env"
         )
 
     try:

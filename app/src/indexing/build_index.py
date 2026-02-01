@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import sys
@@ -12,12 +13,16 @@ if str(APP_SRC) not in sys.path:
     sys.path.insert(0, str(APP_SRC))
 
 from config import AppConfig
-from indexing.chunking import proposition_chunk_jsonl_dir, recursive_chunk_dir
-from indexing.chunks import load_chunks_from_dirs
-from indexing.constants import (
-    DOCS_SEPARATORS,
-    SHEETS_SEPARATORS,
+from indexing.chunking import (
+    message_chunk_jsonl_dir,
+    proposition_chunk_jsonl_dir,
+    recursive_chunk_dir,
+    recursive_chunk_jsonl_dir,
+    summery_chunk_jsonl_dir,
 )
+from indexing.chunks import load_chunks_from_dirs
+from indexing.constants import DOCS_SEPARATORS, SHEETS_SEPARATORS
+from indexing.discord_loader import download_discord_messages
 from indexing.drive_loader import download_drive_markdown
 from indexing.faiss_index import build_faiss_index
 from indexing.raptor import raptor_chunk_global
@@ -38,14 +43,26 @@ def _clear_dir_contents(target: Path) -> None:
 
 def _reset_output_dirs(cfg: AppConfig) -> None:
     if cfg.clear_raw_data:
-        for name in ("docs", "sheets"):
+        for name in ("docs", "sheets", "messages"):
             target = cfg.raw_data_dir / name
             if target.exists():
                 _clear_dir_contents(target)
 
-    if cfg.clear_rec_chunk_data:
-        for name in ("docs", "sheets"):
-            target = cfg.rec_chunk_dir / name
+    if cfg.clear_first_rec_chunk_data:
+        for name in ("docs", "sheets", "messages"):
+            target = cfg.first_rec_chunk_dir / name
+            if target.exists():
+                _clear_dir_contents(target)
+
+    if cfg.clear_second_rec_chunk_data:
+        for name in ("docs", "sheets", "messages"):
+            target = cfg.second_rec_chunk_dir / name
+            if target.exists():
+                _clear_dir_contents(target)
+
+    if cfg.clear_summery_chunk_data:
+        for name in ("docs", "sheets", "messages"):
+            target = cfg.summery_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
 
@@ -76,16 +93,30 @@ def main() -> None:
 
     raw_docs_dir = cfg.raw_data_dir / "docs"
     raw_sheets_dir = cfg.raw_data_dir / "sheets"
-    rec_docs_dir = cfg.rec_chunk_dir / "docs"
-    rec_sheets_dir = cfg.rec_chunk_dir / "sheets"
+    raw_messages_dir = cfg.raw_data_dir / "messages"
+    first_rec_docs_dir = cfg.first_rec_chunk_dir / "docs"
+    first_rec_sheets_dir = cfg.first_rec_chunk_dir / "sheets"
+    first_rec_messages_dir = cfg.first_rec_chunk_dir / "messages"
+    second_rec_docs_dir = cfg.second_rec_chunk_dir / "docs"
+    second_rec_sheets_dir = cfg.second_rec_chunk_dir / "sheets"
+    second_rec_messages_dir = cfg.second_rec_chunk_dir / "messages"
+    summery_docs_dir = cfg.summery_chunk_dir / "docs"
+    summery_sheets_dir = cfg.summery_chunk_dir / "sheets"
+    summery_messages_dir = cfg.summery_chunk_dir / "messages"
     prop_docs_dir = cfg.prop_chunk_dir / "docs"
     prop_sheets_dir = cfg.prop_chunk_dir / "sheets"
 
+    def _llm_label(provider: str, gemini_model: str, llama_model_path: str, llama_model: str) -> str:
+        if (provider or "").lower() == "gemini":
+            return gemini_model
+        if llama_model_path:
+            return Path(llama_model_path).name
+        return llama_model
+
     logger.info(
-        "RECURSIVE_CFG : size=%d overlap=%d min_tokens=%d",
-        cfg.rec_chunk_size,
-        cfg.rec_chunk_overlap,
-        cfg.rec_min_chunk_tokens,
+        "FIRST_REC_CFG : size=%d overlap=%d",
+        cfg.first_rec_chunk_size,
+        cfg.first_rec_chunk_overlap,
     )
     logger.info("MODEL         : %s", cfg.embedding_model)
     logger.info("DRIVE_FOLDER  : %s", drive_folder_id)
@@ -94,24 +125,72 @@ def main() -> None:
         cfg.drive_max_files if cfg.drive_max_files > 0 else "unlimited",
     )
     logger.info("CLEAR_RAW     : %s", "yes" if cfg.clear_raw_data else "no")
-    logger.info("CLEAR_REC     : %s", "yes" if cfg.clear_rec_chunk_data else "no")
+    logger.info(
+        "CLEAR_FIRST_REC : %s",
+        "yes" if cfg.clear_first_rec_chunk_data else "no",
+    )
+    logger.info(
+        "CLEAR_SECOND_REC: %s",
+        "yes" if cfg.clear_second_rec_chunk_data else "no",
+    )
+    logger.info(
+        "CLEAR_SUMMERY   : %s",
+        "yes" if cfg.clear_summery_chunk_data else "no",
+    )
     logger.info("CLEAR_PROP    : %s", "yes" if cfg.clear_prop_chunk_data else "no")
     logger.info("CLEAR_RAPTOR  : %s", "yes" if cfg.clear_raptor_chunk_data else "no")
     logger.info(
-        "PROP_CHUNKING : %s",
-        "enabled" if cfg.prop_chunk_enabled else "disabled",
+        "SECOND_REC    : %s",
+        "enabled" if cfg.second_rec_enabled else "disabled",
     )
-    if cfg.prop_chunk_enabled:
+    if cfg.second_rec_enabled:
         logger.info(
-            "PROP_CHUNK_LLM: %s / %s",
-            cfg.prop_chunk_provider,
-            cfg.prop_chunk_model,
+            "SECOND_REC_CFG: size=%d overlap=%d",
+            cfg.second_rec_chunk_size,
+            cfg.second_rec_chunk_overlap,
+        )
+
+    logger.info(
+        "SUMMERY       : %s",
+        "enabled" if cfg.summery_enabled else "disabled",
+    )
+    if cfg.summery_enabled:
+        logger.info(
+            "SUMMERY_LLM   : %s / %s",
+            cfg.summery_provider,
+            _llm_label(
+                cfg.summery_provider,
+                cfg.summery_gemini_model,
+                cfg.summery_llama_model_path,
+                cfg.summery_llama_model,
+            ),
         )
         logger.info(
-            "PROP_CHUNK_CFG: size=%d temp=%s retries=%d",
-            cfg.prop_chunk_size,
-            cfg.prop_chunk_temperature,
-            cfg.prop_chunk_max_retries,
+            "SUMMERY_CFG   : chars=%d temp=%s retries=%d",
+            cfg.summery_characters,
+            cfg.summery_temperature,
+            cfg.summery_max_retries,
+        )
+
+    logger.info(
+        "PROP_CHUNKING : %s",
+        "enabled" if cfg.prop_enabled else "disabled",
+    )
+    if cfg.prop_enabled:
+        logger.info(
+            "PROP_CHUNK_LLM: %s / %s",
+            cfg.prop_provider,
+            _llm_label(
+                cfg.prop_provider,
+                cfg.prop_gemini_model,
+                cfg.prop_llama_model_path,
+                cfg.prop_llama_model,
+            ),
+        )
+        logger.info(
+            "PROP_CHUNK_CFG: temp=%s retries=%d",
+            cfg.prop_temperature,
+            cfg.prop_max_retries,
         )
     logger.info(
         "RAPTOR        : %s",
@@ -121,7 +200,7 @@ def main() -> None:
         logger.info(
             "RAPTOR_CFG    : cluster_max=%d summary_max=%d stop=%d k_max=%d method=%s",
             cfg.raptor_cluster_max_tokens,
-            cfg.raptor_summary_max_tokens,
+            cfg.raptor_summery_max_tokens,
             cfg.raptor_stop_chunk_count,
             cfg.raptor_k_max,
             cfg.raptor_k_selection,
@@ -129,11 +208,42 @@ def main() -> None:
         logger.info("RAPTOR_EMBED  : %s", cfg.raptor_embedding_model)
         logger.info(
             "RAPTOR_LLM    : %s / %s",
-            cfg.raptor_summary_provider,
-            cfg.raptor_summary_model,
+            cfg.raptor_summery_provider,
+            _llm_label(
+                cfg.raptor_summery_provider,
+                cfg.raptor_summery_gemini_model,
+                cfg.raptor_summery_llama_model_path,
+                cfg.raptor_summery_llama_model,
+            ),
         )
 
     _reset_output_dirs(cfg)
+
+    if cfg.discord_bot_token:
+        allowed_ids = (
+            set(cfg.discord_guild_allow_list)
+            if cfg.discord_guild_allow_list
+            else None
+        )
+        logger.info("DISCORD      : fetching messages")
+        try:
+            stats = asyncio.run(
+                download_discord_messages(
+                    token=cfg.discord_bot_token,
+                    output_dir=raw_messages_dir,
+                    allowed_guild_ids=allowed_ids,
+                )
+            )
+            logger.info(
+                "DISCORD      : fetched messages=%d channels=%d guilds=%d",
+                stats.messages,
+                stats.channels,
+                stats.guilds,
+            )
+        except Exception:
+            logger.exception("DISCORD      : failed to fetch messages")
+    else:
+        logger.warning("DISCORD      : DISCORD_BOT_TOKEN not set, skipping")
 
     download_drive_markdown(
         drive_folder_id=drive_folder_id,
@@ -144,50 +254,114 @@ def main() -> None:
         skip_existing=not cfg.clear_raw_data,
     )
 
+    if raw_messages_dir.exists():
+        message_chunk_jsonl_dir(
+            raw_messages_dir=raw_messages_dir,
+            chunk_dir=first_rec_messages_dir,
+            chunk_size=cfg.first_rec_chunk_size,
+            chunk_overlap=cfg.first_rec_chunk_overlap,
+            stage="first_recursive",
+            skip_existing=not cfg.clear_first_rec_chunk_data,
+        )
+
     recursive_chunk_dir(
         raw_data_dir=raw_docs_dir,
-        chunk_dir=rec_docs_dir,
-        rec_chunk_size=cfg.rec_chunk_size,
-        rec_chunk_overlap=cfg.rec_chunk_overlap,
-        rec_min_chunk_tokens=cfg.rec_min_chunk_tokens,
-        tokenizer_model=cfg.embedding_model,
+        chunk_dir=first_rec_docs_dir,
+        chunk_size=cfg.first_rec_chunk_size,
+        chunk_overlap=cfg.first_rec_chunk_overlap,
         separators=DOCS_SEPARATORS,
         source_type="docs",
-        skip_existing=not cfg.clear_rec_chunk_data,
+        stage="first_recursive",
+        skip_existing=not cfg.clear_first_rec_chunk_data,
     )
     recursive_chunk_dir(
         raw_data_dir=raw_sheets_dir,
-        chunk_dir=rec_sheets_dir,
-        rec_chunk_size=cfg.rec_chunk_size,
-        rec_chunk_overlap=cfg.rec_chunk_overlap,
-        rec_min_chunk_tokens=cfg.rec_min_chunk_tokens,
-        tokenizer_model=cfg.embedding_model,
+        chunk_dir=first_rec_sheets_dir,
+        chunk_size=cfg.first_rec_chunk_size,
+        chunk_overlap=cfg.first_rec_chunk_overlap,
         separators=SHEETS_SEPARATORS,
         source_type="sheets",
+        stage="first_recursive",
         file_extensions=(".csv",),
-        skip_existing=not cfg.clear_rec_chunk_data,
+        skip_existing=not cfg.clear_first_rec_chunk_data,
     )
 
-    if cfg.prop_chunk_enabled:
-        proposition_chunk_jsonl_dir(
-            input_chunk_dir=rec_docs_dir,
-            output_chunk_dir=prop_docs_dir,
-            config=cfg,
-            skip_existing=not cfg.clear_prop_chunk_data,
+    if cfg.second_rec_enabled:
+        recursive_chunk_jsonl_dir(
+            input_chunk_dir=first_rec_docs_dir,
+            output_chunk_dir=second_rec_docs_dir,
+            chunk_size=cfg.second_rec_chunk_size,
+            chunk_overlap=cfg.second_rec_chunk_overlap,
+            separators=DOCS_SEPARATORS,
+            stage="second_recursive",
+            skip_existing=not cfg.clear_second_rec_chunk_data,
         )
-        proposition_chunk_jsonl_dir(
-            input_chunk_dir=rec_sheets_dir,
-            output_chunk_dir=prop_sheets_dir,
-            config=cfg,
-            skip_existing=not cfg.clear_prop_chunk_data,
+        recursive_chunk_jsonl_dir(
+            input_chunk_dir=first_rec_sheets_dir,
+            output_chunk_dir=second_rec_sheets_dir,
+            chunk_size=cfg.second_rec_chunk_size,
+            chunk_overlap=cfg.second_rec_chunk_overlap,
+            separators=SHEETS_SEPARATORS,
+            stage="second_recursive",
+            skip_existing=not cfg.clear_second_rec_chunk_data,
         )
+        if raw_messages_dir.exists():
+            message_chunk_jsonl_dir(
+                raw_messages_dir=raw_messages_dir,
+                chunk_dir=second_rec_messages_dir,
+                chunk_size=cfg.second_rec_chunk_size,
+                chunk_overlap=cfg.second_rec_chunk_overlap,
+                stage="second_recursive",
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+            )
+
+    if cfg.summery_enabled:
+        summery_chunk_jsonl_dir(
+            input_chunk_dir=first_rec_docs_dir,
+            output_chunk_dir=summery_docs_dir,
+            config=cfg,
+            skip_existing=not cfg.clear_summery_chunk_data,
+        )
+        summery_chunk_jsonl_dir(
+            input_chunk_dir=first_rec_sheets_dir,
+            output_chunk_dir=summery_sheets_dir,
+            config=cfg,
+            skip_existing=not cfg.clear_summery_chunk_data,
+        )
+        if first_rec_messages_dir.exists():
+            summery_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_messages_dir,
+                output_chunk_dir=summery_messages_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_summery_chunk_data,
+            )
+
+    if cfg.prop_enabled:
+        if not cfg.second_rec_enabled:
+            logger.warning(
+                "Proposition chunking is enabled but SECOND_REC is disabled. Skipping."
+            )
+        else:
+            proposition_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_docs_dir,
+                output_chunk_dir=prop_docs_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_prop_chunk_data,
+            )
+            proposition_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_sheets_dir,
+                output_chunk_dir=prop_sheets_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_prop_chunk_data,
+            )
 
     if cfg.raptor_enabled:
-        raptor_input_dirs = (
-            [prop_docs_dir, prop_sheets_dir]
-            if cfg.prop_chunk_enabled
-            else [rec_docs_dir, rec_sheets_dir]
-        )
+        if cfg.summery_enabled:
+            raptor_input_dirs = [summery_docs_dir, summery_sheets_dir]
+        elif cfg.second_rec_enabled:
+            raptor_input_dirs = [second_rec_docs_dir, second_rec_sheets_dir]
+        else:
+            raptor_input_dirs = [first_rec_docs_dir, first_rec_sheets_dir]
         raptor_chunk_global(
             input_chunk_dirs=raptor_input_dirs,
             output_chunk_dir=cfg.raptor_chunk_dir,
@@ -196,8 +370,18 @@ def main() -> None:
         )
 
     index_chunks = []
-    index_chunks.extend(load_chunks_from_dirs([rec_docs_dir, rec_sheets_dir]))
-    if cfg.prop_chunk_enabled:
+    base_chunk_dirs = []
+    if cfg.second_rec_enabled:
+        base_chunk_dirs.extend([second_rec_docs_dir, second_rec_sheets_dir])
+        if second_rec_messages_dir.exists():
+            base_chunk_dirs.append(second_rec_messages_dir)
+    else:
+        base_chunk_dirs.extend([first_rec_docs_dir, first_rec_sheets_dir])
+        if first_rec_messages_dir.exists():
+            base_chunk_dirs.append(first_rec_messages_dir)
+    if base_chunk_dirs:
+        index_chunks.extend(load_chunks_from_dirs(base_chunk_dirs))
+    if cfg.prop_enabled and cfg.second_rec_enabled:
         index_chunks.extend(load_chunks_from_dirs([prop_docs_dir, prop_sheets_dir]))
     if cfg.raptor_enabled:
         index_chunks.extend(load_chunks_from_dirs([cfg.raptor_chunk_dir]))

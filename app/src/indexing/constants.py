@@ -17,6 +17,11 @@ SHEETS_SEPARATORS: Sequence[str] = (
     " ",
     "",
 )
+MESSAGE_SEPARATORS: Sequence[str] = (
+    "\n",
+    " ",
+    "",
+)
 
 
 DRIVE_DOC_MIME: str = "application/vnd.google-apps.document"

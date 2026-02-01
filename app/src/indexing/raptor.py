@@ -9,12 +9,23 @@ from pathlib import Path
 import numpy as np
 
 from config import AppConfig, RAPTOR_SUMMARY_SYSTEM_PROMPT, build_raptor_summary_prompt
-from indexing.chunks import Chunk, load_chunks_from_dirs, write_chunks
+from indexing.chunks import Chunk, chunk_embedding_text, load_chunks_from_dirs, write_chunks
 from indexing.llm_client import generate_text
 from indexing.token_utils import estimate_tokens
 from indexing.utils import ensure_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _select_model_for_provider(
+    *,
+    provider: str,
+    gemini_model: str,
+    llama_model: str,
+) -> str:
+    if (provider or "").lower() == "llama":
+        return llama_model
+    return gemini_model
 
 
 def build_raptor_summaries(
@@ -61,14 +72,8 @@ def raptor_chunk_global(
 
     out_path = output_chunk_dir / output_filename
     if skip_existing and out_path.exists():
-        latest_input = _latest_input_mtime(input_chunk_dirs)
-        if latest_input is None:
-            logger.warning("No chunks available for RAPTOR under %s", output_chunk_dir)
-            return
-        if out_path.stat().st_mtime >= latest_input:
-            logger.info("Skip RAPTOR (up-to-date): %s", out_path.name)
-            return
-        logger.info("Rebuilding RAPTOR (inputs updated): %s", out_path.name)
+        logger.info("Skip RAPTOR (exists): %s", out_path.name)
+        return
 
     chunks = load_chunks_from_dirs(input_chunk_dirs)
     if not chunks:
@@ -160,11 +165,7 @@ def _embed_chunks(chunks: list[Chunk], *, config: AppConfig) -> np.ndarray:
     from config import EmbeddingFactory
 
     embedder = EmbeddingFactory(model_name).get_embeddings()
-    texts = []
-    for chunk in chunks:
-        drive_path = str(chunk.metadata.get("drive_file_path") or "")
-        texts.append(f"{chunk.text}\n{drive_path}".strip())
-
+    texts = [chunk_embedding_text(chunk) for chunk in chunks]
     vectors = embedder.embed_documents(texts)
     return np.array(vectors, dtype=np.float32)
 
@@ -229,7 +230,7 @@ def _summarize_cluster(
 
     prompt = build_raptor_summary_prompt(
         text=text,
-        target_tokens=config.raptor_summary_max_tokens,
+        target_tokens=config.raptor_summery_max_tokens,
     )
 
     summary_text = _run_summary_llm(
@@ -248,18 +249,22 @@ def _summarize_cluster(
 
 def _run_summary_llm(*, prompt: str, source_name: str, config: AppConfig) -> str | None:
     last_error: Exception | None = None
-    for attempt in range(1, config.raptor_summary_max_retries + 1):
+    for attempt in range(1, config.raptor_summery_max_retries + 1):
         try:
             response = generate_text(
-                provider=config.raptor_summary_provider,
+                provider=config.raptor_summery_provider,
                 api_key=config.gemini_api_key,
                 prompt=prompt,
-                model=config.raptor_summary_model,
+                model=_select_model_for_provider(
+                    provider=config.raptor_summery_provider,
+                    gemini_model=config.raptor_summery_gemini_model,
+                    llama_model=config.raptor_summery_llama_model,
+                ),
                 system_prompt=RAPTOR_SUMMARY_SYSTEM_PROMPT,
-                llama_model_path=config.raptor_summary_llama_model_path,
-                llama_ctx_size=config.raptor_summary_llama_ctx_size,
-                temperature=config.raptor_summary_temperature,
-                max_output_tokens=config.raptor_summary_max_tokens,
+                llama_model_path=config.raptor_summery_llama_model_path,
+                llama_ctx_size=config.raptor_summery_llama_ctx_size,
+                temperature=config.raptor_summery_temperature,
+                max_output_tokens=config.raptor_summery_max_tokens,
                 thinking_level=config.thinking_level,
                 llama_threads=config.llama_threads,
                 llama_gpu_layers=config.llama_gpu_layers,
@@ -273,7 +278,7 @@ def _run_summary_llm(*, prompt: str, source_name: str, config: AppConfig) -> str
                 "RAPTOR summary failed for %s (attempt %d/%d): %s",
                 source_name,
                 attempt,
-                config.raptor_summary_max_retries,
+                config.raptor_summery_max_retries,
                 exc,
             )
 
@@ -405,6 +410,20 @@ def _split_cluster_by_token_limit(
     sub_embeddings = embeddings[indices]
     labels = _kmeans_labels(sub_embeddings, target_k)
     groups = _group_by_label(labels)
+    if len(groups) < 2:
+        logger.warning(
+            "RAPTOR token split fallback: degenerate kmeans (n=%d total=%d max=%d target_k=%d unique_labels=%d)",
+            len(indices),
+            total_tokens,
+            max_tokens,
+            target_k,
+            len(set(labels.tolist())),
+        )
+        return _fallback_split_by_token_limit(
+            indices=indices,
+            tokens=tokens,
+            max_tokens=max_tokens,
+        )
 
     clusters: list[list[int]] = []
     for group in groups:
@@ -420,6 +439,28 @@ def _split_cluster_by_token_limit(
             )
         else:
             clusters.append(mapped)
+    return clusters
+
+
+def _fallback_split_by_token_limit(
+    *,
+    indices: list[int],
+    tokens: list[int],
+    max_tokens: int,
+) -> list[list[int]]:
+    clusters: list[list[int]] = []
+    current: list[int] = []
+    current_tokens = 0
+    for idx in indices:
+        token_count = tokens[idx]
+        if current and current_tokens + token_count > max_tokens:
+            clusters.append(current)
+            current = []
+            current_tokens = 0
+        current.append(idx)
+        current_tokens += token_count
+    if current:
+        clusters.append(current)
     return clusters
 
 

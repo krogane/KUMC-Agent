@@ -45,21 +45,19 @@ def run_ragas(
     llm_api_key: str,
     judge_model: str,
     result_path: Path | None,
-) -> None:
+) -> object:
     try:
         from datasets import Dataset
         from ragas import evaluate
         from ragas.metrics import (
             answer_relevancy,
-            context_precision,
             context_recall,
-            faithfulness,
         )
     except ImportError as e:
         raise RuntimeError("ragas and datasets are required to run evaluation.") from e
 
     dataset = Dataset.from_list(records)
-    metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
+    metrics = [answer_relevancy, context_recall]
 
     llm = build_ragas_llm(llm_api_key, judge_model)
     eval_kwargs = {"metrics": metrics}
@@ -80,3 +78,5 @@ def run_ragas(
             result.to_pandas().to_csv(result_path, index=False)
         else:
             result_path.write_text(str(result), encoding="utf-8")
+
+    return result
