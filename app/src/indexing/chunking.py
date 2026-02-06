@@ -21,6 +21,7 @@ from indexing.chunks import Chunk, load_chunks, write_chunks
 from indexing.constants import FILE_ID_SEPARATOR, MESSAGE_SEPARATORS
 from indexing.llm_client import generate_text
 from indexing.utils import ensure_dir, sanitize_filename
+from sparse_normalizer import SparseNormalizer, SparseNormalizerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,43 @@ def _extract_channel_id_from_filename(stem: str) -> str:
     return stem
 
 
+def _is_output_up_to_date(*, output_path: Path, input_path: Path) -> bool:
+    try:
+        return output_path.stat().st_mtime >= input_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _should_skip_existing_output(
+    *,
+    output_path: Path,
+    input_path: Path,
+    skip_existing: bool,
+    update_existing: bool,
+    action_label: str,
+) -> bool:
+    if not skip_existing or not output_path.exists():
+        return False
+    if not update_existing:
+        logger.info("Skip %s (exists): %s", action_label, output_path.name)
+        return True
+    if _is_output_up_to_date(output_path=output_path, input_path=input_path):
+        logger.info("Skip %s (up-to-date): %s", action_label, output_path.name)
+        return True
+    return False
+
+
+def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) -> None:
+    for path in output_dir.glob("*.jsonl"):
+        if path.name in expected_names:
+            continue
+        try:
+            path.unlink()
+            logger.info("Removed stale chunk output: %s", path.name)
+        except Exception as exc:
+            logger.warning("Failed to remove stale chunk output %s: %s", path.name, exc)
+
+
 def recursive_chunk_dir(
     *,
     raw_data_dir: Path,
@@ -284,6 +322,8 @@ def recursive_chunk_dir(
     stage: str,
     file_extensions: Sequence[str] = (".md",),
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(chunk_dir)
 
@@ -295,6 +335,8 @@ def recursive_chunk_dir(
         input_files.extend(raw_data_dir.rglob(f"*{ext}"))
     input_files = sorted(set(input_files), key=lambda path: str(path))
     if not input_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=chunk_dir, expected_names=set())
         logger.warning(
             "No files found under %s for extensions: %s",
             raw_data_dir,
@@ -308,12 +350,19 @@ def recursive_chunk_dir(
         separators=separators,
     )
 
+    expected_output_names: set[str] = set()
     for path in input_files:
         rel_path = path.relative_to(raw_data_dir)
         safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
         out_path = chunk_dir / f"{safe_rel}.jsonl"
-        if skip_existing and out_path.exists():
-            logger.info("Skip recursive chunking (exists): %s", out_path.name)
+        expected_output_names.add(out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="recursive chunking",
+        ):
             continue
 
         text = path.read_text(encoding="utf-8")
@@ -345,6 +394,12 @@ def recursive_chunk_dir(
             len(output_chunks),
         )
 
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=chunk_dir,
+            expected_names=expected_output_names,
+        )
+
 
 def message_chunk_jsonl_dir(
     *,
@@ -354,6 +409,8 @@ def message_chunk_jsonl_dir(
     chunk_overlap: int,
     stage: str,
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(chunk_dir)
 
@@ -368,6 +425,8 @@ def message_chunk_jsonl_dir(
         reverse=True,
     )
     if not input_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=chunk_dir, expected_names=set())
         logger.warning("No message .jsonl files found under %s", raw_messages_dir)
         return
 
@@ -378,6 +437,7 @@ def message_chunk_jsonl_dir(
     )
 
     seen_outputs: set[str] = set()
+    expected_output_names: set[str] = set()
     for path in input_files:
         if path.name.endswith(".state.json"):
             continue
@@ -414,19 +474,21 @@ def message_chunk_jsonl_dir(
         base_metadata.setdefault("source_type", "messages")
 
         out_name = sanitize_filename(f"{guild_id}__{channel_id}.jsonl")
+        expected_output_names.add(out_name)
         if out_name in seen_outputs:
             logger.info("Skip duplicate message file: %s", path.name)
             continue
         seen_outputs.add(out_name)
 
         out_path = chunk_dir / out_name
-        if skip_existing and out_path.exists():
-            try:
-                if out_path.stat().st_mtime >= path.stat().st_mtime:
-                    logger.info("Skip message chunking (up-to-date): %s", out_path.name)
-                    continue
-            except OSError:
-                pass
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="message chunking",
+        ):
+            continue
 
         text, line_starts = _build_message_text(lines)
         docs = splitter.split_text(text)
@@ -472,6 +534,12 @@ def message_chunk_jsonl_dir(
             len(output_chunks),
         )
 
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=chunk_dir,
+            expected_names=expected_output_names,
+        )
+
 
 def recursive_chunk_jsonl_dir(
     *,
@@ -482,6 +550,8 @@ def recursive_chunk_jsonl_dir(
     separators: Sequence[str],
     stage: str,
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(output_chunk_dir)
 
@@ -492,6 +562,8 @@ def recursive_chunk_jsonl_dir(
 
     jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
     if not jsonl_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=output_chunk_dir, expected_names=set())
         logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
         return
 
@@ -501,10 +573,16 @@ def recursive_chunk_jsonl_dir(
         separators=separators,
     )
 
+    expected_output_names = {path.name for path in jsonl_files}
     for path in jsonl_files:
         out_path = output_chunk_dir / path.name
-        if skip_existing and out_path.exists():
-            logger.info("Skip recursive chunking (exists): %s", out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="recursive chunking",
+        ):
             continue
 
         chunks = load_chunks(path)
@@ -541,13 +619,22 @@ def recursive_chunk_jsonl_dir(
             len(output_chunks),
         )
 
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=output_chunk_dir,
+            expected_names=expected_output_names,
+        )
 
-def summery_chunk_jsonl_dir(
+
+def sparse_chunk_jsonl_dir(
     *,
     input_chunk_dir: Path,
     output_chunk_dir: Path,
     config: AppConfig,
+    stage: str = "second_recursive_sparse",
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(output_chunk_dir)
 
@@ -558,6 +645,89 @@ def summery_chunk_jsonl_dir(
 
     jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
     if not jsonl_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=output_chunk_dir, expected_names=set())
+        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
+        return
+
+    normalizer = SparseNormalizer(
+        config=SparseNormalizerConfig(
+            sudachi_mode=config.sudachi_mode,
+            use_normalized_form=config.sparse_use_normalized_form,
+            remove_symbols=True,
+            remove_stopwords=True,
+        )
+    )
+    logger.info(
+        "Sparse chunking enabled for %d files in %s",
+        len(jsonl_files),
+        input_chunk_dir,
+    )
+
+    expected_output_names = {path.name for path in jsonl_files}
+    for path in jsonl_files:
+        out_path = output_chunk_dir / path.name
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="sparse chunking",
+        ):
+            continue
+
+        chunks = load_chunks(path)
+        if not chunks:
+            logger.warning("Empty chunk file: %s", path.name)
+            continue
+
+        output_chunks: list[Chunk] = []
+        for chunk in chunks:
+            tokens = normalizer.normalize_tokens(chunk.text or "")
+            if not tokens:
+                continue
+
+            metadata = dict(chunk.metadata)
+            metadata["chunk_stage"] = stage
+            output_chunks.append(
+                Chunk(text=" ".join(tokens), metadata=metadata)
+            )
+
+        write_chunks(out_path, output_chunks)
+        logger.info(
+            "Sparse chunked %s -> %s (%d chunks)",
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=output_chunk_dir,
+            expected_names=expected_output_names,
+        )
+
+
+def summery_chunk_jsonl_dir(
+    *,
+    input_chunk_dir: Path,
+    output_chunk_dir: Path,
+    config: AppConfig,
+    skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
+) -> None:
+    ensure_dir(output_chunk_dir)
+
+    if not input_chunk_dir.exists():
+        raise FileNotFoundError(
+            f"Input chunk directory does not exist: {input_chunk_dir}"
+        )
+
+    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
+    if not jsonl_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=output_chunk_dir, expected_names=set())
         logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
         return
 
@@ -570,10 +740,16 @@ def summery_chunk_jsonl_dir(
         input_chunk_dir,
     )
 
+    expected_output_names = {path.name for path in jsonl_files}
     for path in jsonl_files:
         out_path = output_chunk_dir / path.name
-        if skip_existing and out_path.exists():
-            logger.info("Skip summery chunking (exists): %s", out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="summery chunking",
+        ):
             continue
 
         chunks = load_chunks(path)
@@ -641,6 +817,12 @@ def summery_chunk_jsonl_dir(
             len(output_chunks),
         )
 
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=output_chunk_dir,
+            expected_names=expected_output_names,
+        )
+
 
 def proposition_chunk_jsonl_dir(
     *,
@@ -648,6 +830,8 @@ def proposition_chunk_jsonl_dir(
     output_chunk_dir: Path,
     config: AppConfig,
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(output_chunk_dir)
 
@@ -658,6 +842,8 @@ def proposition_chunk_jsonl_dir(
 
     jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
     if not jsonl_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=output_chunk_dir, expected_names=set())
         logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
         return
 
@@ -670,10 +856,16 @@ def proposition_chunk_jsonl_dir(
         input_chunk_dir,
     )
 
+    expected_output_names = {path.name for path in jsonl_files}
     for path in jsonl_files:
         out_path = output_chunk_dir / path.name
-        if skip_existing and out_path.exists():
-            logger.info("Skip proposition chunking (exists): %s", out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="proposition chunking",
+        ):
             continue
         chunks = load_chunks(path)
         if not chunks:
@@ -729,6 +921,12 @@ def proposition_chunk_jsonl_dir(
             path.name,
             out_path.name,
             len(output_chunks),
+        )
+
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=output_chunk_dir,
+            expected_names=expected_output_names,
         )
 
 

@@ -30,6 +30,13 @@ class DriveFile:
     modified_time: str
 
 
+def _extract_drive_file_id(filename: str) -> str | None:
+    if FILE_ID_SEPARATOR not in filename:
+        return None
+    prefix, _ = filename.split(FILE_ID_SEPARATOR, 1)
+    return prefix or None
+
+
 def _build_google_credentials(
     *, application_credentials: str
 ) -> Any:
@@ -206,6 +213,39 @@ def _cleanup_drive_duplicates(
             logger.warning("Failed to remove stale Drive export %s: %s", path.name, exc)
 
 
+def _cleanup_missing_drive_files(
+    *,
+    out_dir: Path,
+    extension: str,
+    valid_file_ids: set[str],
+) -> None:
+    for path in out_dir.glob(f"*{extension}"):
+        file_id = _extract_drive_file_id(path.name)
+        if not file_id:
+            continue
+        if file_id in valid_file_ids:
+            continue
+        try:
+            path.unlink()
+            logger.info("Removed deleted Drive export %s", path.name)
+        except Exception as exc:
+            logger.warning("Failed to remove deleted Drive export %s: %s", path.name, exc)
+            continue
+
+        meta_path = path.with_suffix(path.suffix + ".meta.json")
+        if not meta_path.exists():
+            continue
+        try:
+            meta_path.unlink()
+            logger.info("Removed deleted Drive metadata %s", meta_path.name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove deleted Drive metadata %s: %s",
+                meta_path.name,
+                exc,
+            )
+
+
 def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
     metadata = {
         "drive_file_id": drive_file.file_id,
@@ -231,6 +271,8 @@ def download_drive_markdown(
     google_application_credentials: str,
     drive_max_files: int | None = None,
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> tuple[int, int]:
     ensure_dir(docs_dir)
     ensure_dir(sheets_dir)
@@ -249,6 +291,28 @@ def download_drive_markdown(
     if drive_max_files is not None and drive_max_files > 0:
         logger.info("Limiting Drive downloads to first %d files", drive_max_files)
 
+    if sync_deleted:
+        valid_doc_ids = {
+            drive_file.file_id
+            for drive_file in drive_files
+            if drive_file.mime_type == DRIVE_DOC_MIME
+        }
+        valid_sheet_ids = {
+            drive_file.file_id
+            for drive_file in drive_files
+            if drive_file.mime_type == DRIVE_SHEET_MIME
+        }
+        _cleanup_missing_drive_files(
+            out_dir=docs_dir,
+            extension=".md",
+            valid_file_ids=valid_doc_ids,
+        )
+        _cleanup_missing_drive_files(
+            out_dir=sheets_dir,
+            extension=".csv",
+            valid_file_ids=valid_sheet_ids,
+        )
+
     docs_count = 0
     sheets_count = 0
 
@@ -261,9 +325,13 @@ def download_drive_markdown(
                 _cleanup_drive_duplicates(
                     out_dir=docs_dir, drive_file=drive_file, keep_path=out_path
                 )
-                if skip_existing and _is_drive_file_up_to_date(out_path, drive_file):
-                    logger.info("Skip download (up-to-date): %s", out_path.name)
-                    continue
+                if skip_existing and out_path.exists():
+                    if not update_existing:
+                        logger.info("Skip download (exists): %s", out_path.name)
+                        continue
+                    if _is_drive_file_up_to_date(out_path, drive_file):
+                        logger.info("Skip download (up-to-date): %s", out_path.name)
+                        continue
                 content = _download_export_bytes(
                     drive_service, file_id=drive_file.file_id, mime_type="text/markdown"
                 )
@@ -280,9 +348,13 @@ def download_drive_markdown(
                 _cleanup_drive_duplicates(
                     out_dir=sheets_dir, drive_file=drive_file, keep_path=out_path
                 )
-                if skip_existing and _is_drive_file_up_to_date(out_path, drive_file):
-                    logger.info("Skip download (up-to-date): %s", out_path.name)
-                    continue
+                if skip_existing and out_path.exists():
+                    if not update_existing:
+                        logger.info("Skip download (exists): %s", out_path.name)
+                        continue
+                    if _is_drive_file_up_to_date(out_path, drive_file):
+                        logger.info("Skip download (up-to-date): %s", out_path.name)
+                        continue
                 csv_bytes = _download_export_bytes(
                     drive_service, file_id=drive_file.file_id, mime_type="text/csv"
                 )

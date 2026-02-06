@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
-import unicodedata
 from collections import deque
 from functools import lru_cache
 from pathlib import Path
@@ -14,7 +14,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from rank_bm25 import BM25Okapi
-from sudachipy import dictionary, tokenizer as sudachi_tokenizer
 
 from config import AppConfig, EmbeddingFactory
 from indexing.chunks import load_chunks_from_dirs
@@ -36,11 +35,15 @@ from pipeline.prompts import (
 )
 from pipeline.reranker import CrossEncoderReranker
 from pipeline.vectorstore import load_faiss_index
+from sparse_normalizer import SparseNormalizer, SparseNormalizerConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_HISTORY_LIMIT = 3
-_ADDITIONAL_HISTORY_LIMIT = 10
+_MAX_FOLLOW_UP_QUERY_COUNT = 3
+_SECOND_REC_SPARSE_STAGE = "second_recursive_sparse"
+_MASKED_MENTION = "（メンション非表示）"
+_USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+_ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 
 
 class GenerationCancelled(RuntimeError):
@@ -122,13 +125,16 @@ class RagPipeline:
         _raise_if_cancelled(cancel_event)
         provider = (self._config.llm_provider or "").lower()
         if history is None:
-            history = self._history_for_prompt(limit=_DEFAULT_HISTORY_LIMIT)
+            history = self._history_for_prompt(
+                limit=self._config.prompt_history_default_turns
+            )
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
                 docs=docs,
                 history=history,
                 retry_history=retry_history,
+                circle_basic_info=self._config.circle_basic_info,
             )
             logger.info("Answer LLM prompt (gemini): %s", prompt)
             text = generate_with_gemini(
@@ -158,7 +164,7 @@ class RagPipeline:
             return "回答生成中に不具合が発生しました、もう一度お試しください。"
 
         _raise_if_cancelled(cancel_event)
-        return text
+        return _mask_discord_mentions(text)
 
     def _generate_no_rag(
         self,
@@ -171,7 +177,9 @@ class RagPipeline:
         _raise_if_cancelled(cancel_event)
         provider = (self._config.no_rag_llm_provider or "").lower()
         if history is None:
-            history = self._history_for_prompt(limit=_DEFAULT_HISTORY_LIMIT)
+            history = self._history_for_prompt(
+                limit=self._config.prompt_history_default_turns
+            )
         docs: list[Document] = []
         if provider == "gemini":
             prompt = build_gemini_prompt(
@@ -179,6 +187,7 @@ class RagPipeline:
                 docs=docs,
                 history=history,
                 retry_history=retry_history,
+                circle_basic_info=self._config.circle_basic_info,
             )
             logger.info("No-RAG LLM prompt (gemini): %s", prompt)
             text = generate_with_gemini_config(
@@ -221,7 +230,7 @@ class RagPipeline:
             return "回答生成中に不具合が発生しました、もう一度お試しください。"
 
         _raise_if_cancelled(cancel_event)
-        return text
+        return _mask_discord_mentions(text)
 
     def answer(
         self, query: str, *, cancel_event: threading.Event | None = None
@@ -243,6 +252,7 @@ class RagPipeline:
         *,
         on_research_start: Callable[[], None] | None = None,
         on_memory_start: Callable[[], None] | None = None,
+        on_research_and_memory_start: Callable[[], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
         _raise_if_cancelled(cancel_event)
@@ -264,6 +274,7 @@ class RagPipeline:
                 docs=docs,
                 on_research_start=on_research_start,
                 on_memory_start=on_memory_start,
+                on_research_and_memory_start=on_research_and_memory_start,
                 cancel_event=cancel_event,
             )
             )
@@ -299,6 +310,7 @@ class RagPipeline:
         docs: list[Document],
         on_research_start: Callable[[], None] | None = None,
         on_memory_start: Callable[[], None] | None = None,
+        on_research_and_memory_start: Callable[[], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, str, list[int], list[Document], list[str]]:
         answer, source_ids, used_docs, _ = self._generate_answer_payload(
@@ -306,6 +318,7 @@ class RagPipeline:
             docs=docs,
             on_research_start=on_research_start,
             on_memory_start=on_memory_start,
+            on_research_and_memory_start=on_research_and_memory_start,
             cancel_event=cancel_event,
         )
         history_sources = self._sources_for_history(
@@ -492,7 +505,7 @@ class RagPipeline:
             _raise_if_cancelled(cancel_event)
             if scores[idx] <= 0:
                 break
-            results.append(docs[idx])
+            results.append(self._restore_sparse_hit_doc(docs[idx]))
             if len(results) >= k:
                 break
         return results
@@ -570,7 +583,7 @@ class RagPipeline:
         docs = self._load_sparse_docs()
         if not docs:
             return [], BM25Okapi([[]])
-        tokenized = [self._sudachi_tokens(doc.page_content) for doc in docs]
+        tokenized = [self._sparse_doc_tokens(doc) for doc in docs]
         bm25 = BM25Okapi(
             tokenized,
             k1=self._config.sparse_bm25_k1,
@@ -590,19 +603,33 @@ class RagPipeline:
         ]
 
     def _sparse_chunk_dirs(self) -> list[Path]:
-        if self._config.prop_enabled and self._config.second_rec_enabled:
-            base_dir = self._config.prop_chunk_dir
-        else:
-            base_dir = (
-                self._config.second_rec_chunk_dir
-                if self._config.second_rec_enabled
-                else self._config.first_rec_chunk_dir
-            )
         dirs = []
-        for name in ("docs", "sheets"):
-            candidate = base_dir / name
-            if candidate.exists():
-                dirs.append(candidate)
+
+        if self._config.second_rec_enabled:
+            second_rec_sparse_dirs: list[Path] = []
+            for name in ("docs", "sheets", "messages"):
+                candidate = self._config.sparse_second_rec_chunk_dir / name
+                if candidate.exists():
+                    second_rec_sparse_dirs.append(candidate)
+            if second_rec_sparse_dirs:
+                dirs.extend(second_rec_sparse_dirs)
+            else:
+                for name in ("docs", "sheets", "messages"):
+                    fallback = self._config.second_rec_chunk_dir / name
+                    if fallback.exists():
+                        dirs.append(fallback)
+        else:
+            for name in ("docs", "sheets", "messages"):
+                candidate = self._config.first_rec_chunk_dir / name
+                if candidate.exists():
+                    dirs.append(candidate)
+
+        if self._config.prop_enabled and self._config.second_rec_enabled:
+            for name in ("docs", "sheets"):
+                candidate = self._config.prop_chunk_dir / name
+                if candidate.exists():
+                    dirs.append(candidate)
+
         if self._config.raptor_enabled:
             raptor_dir = self._config.raptor_chunk_dir
             if raptor_dir.exists():
@@ -610,37 +637,42 @@ class RagPipeline:
         return dirs
 
     def _sudachi_tokens(self, text: str) -> list[str]:
-        text = text.strip()
-        if not text:
-            return []
-        tokenizer = self._sudachi_tokenizer()
-        mode = self._sudachi_mode()
-        tokens: list[str] = []
-        for morph in tokenizer.tokenize(text, mode):
-            token = (
-                morph.normalized_form()
-                if self._config.sparse_use_normalized_form
-                else morph.surface()
-            )
-            token = token.strip()
-            if not token:
-                continue
-            if self._config.sparse_remove_symbols and _is_symbol_only(token):
-                continue
-            tokens.append(token)
-        return tokens
+        return self._query_normalizer().normalize_tokens(text)
 
     @lru_cache(maxsize=1)
-    def _sudachi_tokenizer(self) -> sudachi_tokenizer.Tokenizer:
-        return dictionary.Dictionary().create()
+    def _query_normalizer(self) -> SparseNormalizer:
+        return SparseNormalizer(
+            config=SparseNormalizerConfig(
+                sudachi_mode=self._config.sudachi_mode,
+                use_normalized_form=self._config.sparse_use_normalized_form,
+                remove_symbols=self._config.sparse_remove_symbols,
+                remove_stopwords=False,
+            )
+        )
 
-    def _sudachi_mode(self) -> sudachi_tokenizer.Tokenizer.SplitMode:
-        value = (self._config.sudachi_mode or "B").upper()
-        if value == "A":
-            return sudachi_tokenizer.Tokenizer.SplitMode.A
-        if value == "C":
-            return sudachi_tokenizer.Tokenizer.SplitMode.C
-        return sudachi_tokenizer.Tokenizer.SplitMode.B
+    def _sparse_doc_tokens(self, doc: Document) -> list[str]:
+        stage = str((doc.metadata or {}).get("chunk_stage") or "")
+        if stage == _SECOND_REC_SPARSE_STAGE:
+            text = (doc.page_content or "").strip()
+            if not text:
+                return []
+            return [token for token in text.split() if token]
+        return self._sudachi_tokens(doc.page_content)
+
+    def _restore_sparse_hit_doc(self, doc: Document) -> Document:
+        metadata = doc.metadata or {}
+        if metadata.get("chunk_stage") != _SECOND_REC_SPARSE_STAGE:
+            return doc
+
+        chunk_id = self._normalize_chunk_id(metadata.get("chunk_id"))
+        if chunk_id is None:
+            return doc
+        key = self._chunk_lookup_key(metadata, chunk_id)
+        if key is None:
+            return doc
+
+        resolved = self._second_rec_chunk_map().get(key)
+        return resolved if resolved is not None else doc
 
     @staticmethod
     def _doc_key(doc: Document) -> tuple[object, ...]:
@@ -1018,7 +1050,11 @@ class RagPipeline:
             return answer
 
         sources_text = "\n".join(f"- {url}" for url in urls)
-        return f"{answer}\n\nソース:\n{sources_text}"
+        return (
+            f"{answer}\n\n"
+            "※回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。\n"
+            f"主な情報源:\n{sources_text}"
+        )
 
     def _generate_no_rag_payload(
         self,
@@ -1038,10 +1074,11 @@ class RagPipeline:
             _raise_if_cancelled(cancel_event)
             history = self._history_for_prompt(
                 limit=(
-                    _ADDITIONAL_HISTORY_LIMIT
+                    self._config.prompt_history_additional_turns
                     if use_additional_history
-                    else _DEFAULT_HISTORY_LIMIT
-                )
+                    else self._config.prompt_history_default_turns
+                ),
+                include_sources=use_additional_history,
             )
             raw = self._generate_no_rag(
                 query=query,
@@ -1092,6 +1129,7 @@ class RagPipeline:
         docs: list[Document],
         on_research_start: Callable[[], None] | None = None,
         on_memory_start: Callable[[], None] | None = None,
+        on_research_and_memory_start: Callable[[], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, list[int], list[Document], list[Document]]:
         max_json_retries = max(0, self._config.answer_json_max_retries)
@@ -1106,6 +1144,7 @@ class RagPipeline:
         research_docs: list[Document] = []
         research_notified = False
         memory_notified = False
+        research_and_memory_notified = False
         use_additional_history = False
         additional_memory_used = False
 
@@ -1124,10 +1163,11 @@ class RagPipeline:
                 _raise_if_cancelled(cancel_event)
                 history = self._history_for_prompt(
                     limit=(
-                        _ADDITIONAL_HISTORY_LIMIT
+                        self._config.prompt_history_additional_turns
                         if use_additional_history
-                        else _DEFAULT_HISTORY_LIMIT
-                    )
+                        else self._config.prompt_history_default_turns
+                    ),
+                    include_sources=use_additional_history,
                 )
                 raw = self.generate(
                     query=query,
@@ -1164,7 +1204,29 @@ class RagPipeline:
             if payload_ok and needs_additional_memory and not additional_memory_used:
                 additional_memory_used = True
                 use_additional_history = True
-                if not follow_up_queries:
+                if follow_up_queries:
+                    if (
+                        on_research_and_memory_start is not None
+                        and not research_and_memory_notified
+                    ):
+                        research_and_memory_notified = True
+                        research_notified = True
+                        memory_notified = True
+                        try:
+                            on_research_and_memory_start()
+                        except Exception:
+                            logger.exception(
+                                "Failed to send research+memory start notification"
+                            )
+                    elif on_memory_start is not None and not memory_notified:
+                        memory_notified = True
+                        try:
+                            on_memory_start()
+                        except Exception:
+                            logger.exception(
+                                "Failed to send memory start notification"
+                            )
+                else:
                     if on_memory_start is not None and not memory_notified:
                         memory_notified = True
                         try:
@@ -1179,6 +1241,17 @@ class RagPipeline:
 
             if payload_ok and follow_up_queries:
                 if research_attempt < max_research_retries:
+                    follow_up_queries_for_search = follow_up_queries[
+                        :_MAX_FOLLOW_UP_QUERY_COUNT
+                    ]
+                    if len(follow_up_queries_for_search) < len(
+                        follow_up_queries
+                    ):
+                        logger.info(
+                            "Follow-up queries truncated to %s: %s",
+                            _MAX_FOLLOW_UP_QUERY_COUNT,
+                            follow_up_queries_for_search,
+                        )
                     if on_research_start is not None and not research_notified:
                         research_notified = True
                         try:
@@ -1189,14 +1262,14 @@ class RagPipeline:
                             )
                     logger.info(
                         "Follow-up queries requested by answer LLM: %s",
-                        follow_up_queries,
+                        follow_up_queries_for_search,
                     )
                     previous_answer = answer or "（前回の回答は空でした）"
                     retry_history.append((query, previous_answer))
                     current_docs, new_research_docs = (
                         self._extend_docs_with_queries(
                             base_docs=current_docs,
-                            queries=follow_up_queries,
+                            queries=follow_up_queries_for_search,
                             seen_queries=seen_queries,
                             cancel_event=cancel_event,
                         )
@@ -1367,15 +1440,20 @@ class RagPipeline:
         self,
         *,
         limit: int,
+        include_sources: bool = True,
     ) -> list[ChatHistoryEntry] | None:
         if not self._config.chat_history_enabled:
             return None
         if limit <= 0 or self._chat_history.maxlen == 0:
             return []
         history = list(self._chat_history)
-        if len(history) <= limit:
-            return history
-        return history[-limit:]
+        selected = history if len(history) <= limit else history[-limit:]
+        if include_sources:
+            return selected
+        return [
+            (user_text, assistant_text, [])
+            for user_text, assistant_text, _ in selected
+        ]
 
     def _sources_for_history(
         self,
@@ -1391,7 +1469,7 @@ class RagPipeline:
             if idx in seen:
                 continue
             if 1 <= idx <= len(docs):
-                contexts.append(f"[{idx}]\n{doc_to_context(docs[idx - 1])}")
+                contexts.append(doc_to_context(docs[idx - 1]))
                 seen.add(idx)
         return contexts
 
@@ -1409,19 +1487,6 @@ class RagPipeline:
         if not user_text or not assistant_text:
             return
         self._chat_history.append((user_text, assistant_text, list(sources)))
-
-
-def _is_symbol_only(text: str) -> bool:
-    has_visible = False
-    for ch in text:
-        if ch.isspace():
-            continue
-        has_visible = True
-        category = unicodedata.category(ch)
-        if category.startswith(("L", "N", "M")):
-            return False
-    return has_visible
-
 
 def _drive_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     if not metadata:
@@ -1535,3 +1600,10 @@ def _normalize_query_keywords(text: str) -> str:
         seen.add(token)
         deduped.append(token)
     return " ".join(deduped)
+
+
+def _mask_discord_mentions(text: str) -> str:
+    if not text:
+        return ""
+    masked = _USER_MENTION_RE.sub(_MASKED_MENTION, text)
+    return _ROLE_MENTION_RE.sub(_MASKED_MENTION, masked)

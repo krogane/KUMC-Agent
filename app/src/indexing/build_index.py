@@ -18,10 +18,11 @@ from indexing.chunking import (
     proposition_chunk_jsonl_dir,
     recursive_chunk_dir,
     recursive_chunk_jsonl_dir,
+    sparse_chunk_jsonl_dir,
     summery_chunk_jsonl_dir,
 )
 from indexing.chunks import load_chunks_from_dirs
-from indexing.constants import DOCS_SEPARATORS, SHEETS_SEPARATORS
+from indexing.constants import DOCS_SEPARATORS, MESSAGE_SEPARATORS, SHEETS_SEPARATORS
 from indexing.discord_loader import download_discord_messages
 from indexing.drive_loader import download_drive_markdown
 from indexing.faiss_index import build_faiss_index
@@ -59,6 +60,9 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
             target = cfg.second_rec_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
+            sparse_target = cfg.sparse_second_rec_chunk_dir / name
+            if sparse_target.exists():
+                _clear_dir_contents(sparse_target)
 
     if cfg.clear_summery_chunk_data:
         for name in ("docs", "sheets", "messages"):
@@ -100,6 +104,9 @@ def main() -> None:
     second_rec_docs_dir = cfg.second_rec_chunk_dir / "docs"
     second_rec_sheets_dir = cfg.second_rec_chunk_dir / "sheets"
     second_rec_messages_dir = cfg.second_rec_chunk_dir / "messages"
+    sparse_second_rec_docs_dir = cfg.sparse_second_rec_chunk_dir / "docs"
+    sparse_second_rec_sheets_dir = cfg.sparse_second_rec_chunk_dir / "sheets"
+    sparse_second_rec_messages_dir = cfg.sparse_second_rec_chunk_dir / "messages"
     summery_docs_dir = cfg.summery_chunk_dir / "docs"
     summery_sheets_dir = cfg.summery_chunk_dir / "sheets"
     summery_messages_dir = cfg.summery_chunk_dir / "messages"
@@ -139,6 +146,28 @@ def main() -> None:
     )
     logger.info("CLEAR_PROP    : %s", "yes" if cfg.clear_prop_chunk_data else "no")
     logger.info("CLEAR_RAPTOR  : %s", "yes" if cfg.clear_raptor_chunk_data else "no")
+    logger.info("UPDATE_RAW    : %s", "yes" if cfg.update_raw_data else "no")
+    logger.info(
+        "UPDATE_FIRST_REC: %s",
+        "yes" if cfg.update_first_rec_chunk_data else "no",
+    )
+    logger.info(
+        "UPDATE_SECOND_REC: %s",
+        "yes" if cfg.update_second_rec_chunk_data else "no",
+    )
+    logger.info(
+        "UPDATE_SPARSE_SECOND_REC: %s",
+        "yes" if cfg.update_sparse_second_rec_chunk_data else "no",
+    )
+    logger.info(
+        "UPDATE_SUMMERY : %s",
+        "yes" if cfg.update_summery_chunk_data else "no",
+    )
+    logger.info("UPDATE_PROP   : %s", "yes" if cfg.update_prop_chunk_data else "no")
+    logger.info(
+        "UPDATE_RAPTOR : %s",
+        "yes" if cfg.update_raptor_chunk_data else "no",
+    )
     logger.info(
         "SECOND_REC    : %s",
         "enabled" if cfg.second_rec_enabled else "disabled",
@@ -252,6 +281,8 @@ def main() -> None:
         google_application_credentials=cfg.google_application_credentials,
         drive_max_files=cfg.drive_max_files,
         skip_existing=not cfg.clear_raw_data,
+        update_existing=cfg.update_raw_data,
+        sync_deleted=cfg.update_raw_data,
     )
 
     if raw_messages_dir.exists():
@@ -262,6 +293,8 @@ def main() -> None:
             chunk_overlap=cfg.first_rec_chunk_overlap,
             stage="first_recursive",
             skip_existing=not cfg.clear_first_rec_chunk_data,
+            update_existing=cfg.update_first_rec_chunk_data,
+            sync_deleted=cfg.update_first_rec_chunk_data,
         )
 
     recursive_chunk_dir(
@@ -273,6 +306,8 @@ def main() -> None:
         source_type="docs",
         stage="first_recursive",
         skip_existing=not cfg.clear_first_rec_chunk_data,
+        update_existing=cfg.update_first_rec_chunk_data,
+        sync_deleted=cfg.update_first_rec_chunk_data,
     )
     recursive_chunk_dir(
         raw_data_dir=raw_sheets_dir,
@@ -284,6 +319,8 @@ def main() -> None:
         stage="first_recursive",
         file_extensions=(".csv",),
         skip_existing=not cfg.clear_first_rec_chunk_data,
+        update_existing=cfg.update_first_rec_chunk_data,
+        sync_deleted=cfg.update_first_rec_chunk_data,
     )
 
     if cfg.second_rec_enabled:
@@ -295,6 +332,8 @@ def main() -> None:
             separators=DOCS_SEPARATORS,
             stage="second_recursive",
             skip_existing=not cfg.clear_second_rec_chunk_data,
+            update_existing=cfg.update_second_rec_chunk_data,
+            sync_deleted=cfg.update_second_rec_chunk_data,
         )
         recursive_chunk_jsonl_dir(
             input_chunk_dir=first_rec_sheets_dir,
@@ -304,15 +343,45 @@ def main() -> None:
             separators=SHEETS_SEPARATORS,
             stage="second_recursive",
             skip_existing=not cfg.clear_second_rec_chunk_data,
+            update_existing=cfg.update_second_rec_chunk_data,
+            sync_deleted=cfg.update_second_rec_chunk_data,
         )
-        if raw_messages_dir.exists():
-            message_chunk_jsonl_dir(
-                raw_messages_dir=raw_messages_dir,
-                chunk_dir=second_rec_messages_dir,
+        if first_rec_messages_dir.exists():
+            recursive_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_messages_dir,
+                output_chunk_dir=second_rec_messages_dir,
                 chunk_size=cfg.second_rec_chunk_size,
                 chunk_overlap=cfg.second_rec_chunk_overlap,
+                separators=MESSAGE_SEPARATORS,
                 stage="second_recursive",
                 skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_second_rec_chunk_data,
+                sync_deleted=cfg.update_second_rec_chunk_data,
+            )
+        sparse_chunk_jsonl_dir(
+            input_chunk_dir=second_rec_docs_dir,
+            output_chunk_dir=sparse_second_rec_docs_dir,
+            config=cfg,
+            skip_existing=not cfg.clear_second_rec_chunk_data,
+            update_existing=cfg.update_sparse_second_rec_chunk_data,
+            sync_deleted=cfg.update_sparse_second_rec_chunk_data,
+        )
+        sparse_chunk_jsonl_dir(
+            input_chunk_dir=second_rec_sheets_dir,
+            output_chunk_dir=sparse_second_rec_sheets_dir,
+            config=cfg,
+            skip_existing=not cfg.clear_second_rec_chunk_data,
+            update_existing=cfg.update_sparse_second_rec_chunk_data,
+            sync_deleted=cfg.update_sparse_second_rec_chunk_data,
+        )
+        if second_rec_messages_dir.exists():
+            sparse_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_messages_dir,
+                output_chunk_dir=sparse_second_rec_messages_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_sparse_second_rec_chunk_data,
+                sync_deleted=cfg.update_sparse_second_rec_chunk_data,
             )
 
     if cfg.summery_enabled:
@@ -321,12 +390,16 @@ def main() -> None:
             output_chunk_dir=summery_docs_dir,
             config=cfg,
             skip_existing=not cfg.clear_summery_chunk_data,
+            update_existing=cfg.update_summery_chunk_data,
+            sync_deleted=cfg.update_summery_chunk_data,
         )
         summery_chunk_jsonl_dir(
             input_chunk_dir=first_rec_sheets_dir,
             output_chunk_dir=summery_sheets_dir,
             config=cfg,
             skip_existing=not cfg.clear_summery_chunk_data,
+            update_existing=cfg.update_summery_chunk_data,
+            sync_deleted=cfg.update_summery_chunk_data,
         )
         if first_rec_messages_dir.exists():
             summery_chunk_jsonl_dir(
@@ -334,6 +407,8 @@ def main() -> None:
                 output_chunk_dir=summery_messages_dir,
                 config=cfg,
                 skip_existing=not cfg.clear_summery_chunk_data,
+                update_existing=cfg.update_summery_chunk_data,
+                sync_deleted=cfg.update_summery_chunk_data,
             )
 
     if cfg.prop_enabled:
@@ -347,12 +422,16 @@ def main() -> None:
                 output_chunk_dir=prop_docs_dir,
                 config=cfg,
                 skip_existing=not cfg.clear_prop_chunk_data,
+                update_existing=cfg.update_prop_chunk_data,
+                sync_deleted=cfg.update_prop_chunk_data,
             )
             proposition_chunk_jsonl_dir(
                 input_chunk_dir=second_rec_sheets_dir,
                 output_chunk_dir=prop_sheets_dir,
                 config=cfg,
                 skip_existing=not cfg.clear_prop_chunk_data,
+                update_existing=cfg.update_prop_chunk_data,
+                sync_deleted=cfg.update_prop_chunk_data,
             )
 
     if cfg.raptor_enabled:
@@ -367,6 +446,8 @@ def main() -> None:
             output_chunk_dir=cfg.raptor_chunk_dir,
             config=cfg,
             skip_existing=not cfg.clear_raptor_chunk_data,
+            update_existing=cfg.update_raptor_chunk_data,
+            sync_deleted=cfg.update_raptor_chunk_data,
         )
 
     index_chunks = []

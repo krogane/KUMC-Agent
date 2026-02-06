@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from langchain_core.documents import Document
@@ -46,8 +47,10 @@ def format_doc_context(docs: Sequence[Document]) -> str:
 def format_output_instructions() -> str:
     return (
         "JSONのみで出力してください。説明文やコードフェンスは不要です。answerには必要に応じて改行などを含めて可読性を高めてください。\n"
+        "answer には `<@123...>` / `<@!123...>` / `<@&123...>` のようなメンション記法を絶対に含めないでください。\n"
+        "answer にはコンテキスト番号（[1]など）を含めないでください。"
         "コンテキストに必要なサークル関連情報が含まれていない場合や、回答に追加のコンテキストがあると望ましい場合は、 follow_up_queries に具体的な追加検索クエリを複数入れてください。十分な場合は [] を入れてください。\n"
-        "追加のチャット履歴が必要だと判断した場合は needs_additional_memory を true にしてください。不要なら false を入れてください。\n"
+        "回答に追加のチャット履歴があると望ましい場合（例: 質問に指示語が含まれている・質問の文脈が曖昧・質問が過去のチャットに関連する）は needs_additional_memory を true にしてください。不要なら false を入れてください。\n"
         "氏名と思われる単語は回答に含めないでください（ユーザーネームは回答に含めてよい）。\n"
         "質問と同じ言語で回答してください。たとえば、英語で質問されたら英語で回答します。",
         "出力形式:\n"
@@ -62,7 +65,26 @@ def format_output_instructions() -> str:
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
 
 
-def format_chat_history(history: Sequence[ChatHistoryEntry]) -> str:
+_HISTORY_SOURCE_INDEX_PATTERN = re.compile(r"^\[\d+\]\s*\n?")
+
+
+def _clean_history_sources(sources: Sequence[str]) -> list[str]:
+    cleaned_sources: list[str] = []
+    for source in sources:
+        cleaned = (source or "").strip()
+        if not cleaned:
+            continue
+        cleaned = _HISTORY_SOURCE_INDEX_PATTERN.sub("", cleaned, count=1).strip()
+        if cleaned:
+            cleaned_sources.append(cleaned)
+    return cleaned_sources
+
+
+def format_chat_history(
+    history: Sequence[ChatHistoryEntry],
+    *,
+    include_sources: bool = True,
+) -> str:
     if not history:
         return "(履歴なし)"
     parts: list[str] = []
@@ -74,12 +96,11 @@ def format_chat_history(history: Sequence[ChatHistoryEntry]) -> str:
             turn_parts.append(f"ユーザー: {user_value}")
         if assistant_value:
             turn_parts.append(f"アシスタント: {assistant_value}")
-        if sources:
-            turn_parts.append("参照ソース:")
-            for source in sources:
-                cleaned = (source or "").strip()
-                if cleaned:
-                    turn_parts.append(cleaned)
+        if include_sources and sources:
+            cleaned_sources = _clean_history_sources(sources)
+            if cleaned_sources:
+                turn_parts.append("参照ソース:")
+                turn_parts.append("\n\n---\n\n".join(cleaned_sources))
         if turn_parts:
             parts.append("\n".join(turn_parts))
     return "\n\n".join(parts) if parts else "(履歴なし)"
@@ -106,6 +127,8 @@ QUERY_TRANSFORM_SYSTEM_PROMPT = (
 
 def history_to_messages(
     history: Sequence[ChatHistoryEntry],
+    *,
+    include_sources: bool = True,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     for user_text, assistant_text, sources in history:
@@ -113,15 +136,15 @@ def history_to_messages(
         assistant_value = (assistant_text or "").strip()
         if user_value:
             messages.append({"role": "user", "content": user_value})
-        if assistant_value or sources:
+        if assistant_value or (include_sources and sources):
             assistant_parts: list[str] = []
             if assistant_value:
                 assistant_parts.append(assistant_value)
-            if sources:
-                cleaned_sources = [s.strip() for s in sources if s and s.strip()]
+            if include_sources and sources:
+                cleaned_sources = _clean_history_sources(sources)
                 if cleaned_sources:
                     assistant_parts.append(
-                        "参照ソース:\n" + "\n\n".join(cleaned_sources)
+                        "参照ソース:\n" + "\n\n---\n\n".join(cleaned_sources)
                     )
             messages.append(
                 {"role": "assistant", "content": "\n\n".join(assistant_parts)}
@@ -131,7 +154,7 @@ def history_to_messages(
 
 def build_query_transform_prompt(*, query: str) -> str:
     return (
-        "あなたは検索クエリ生成器です。質問に答えず、検索に有利なキーワードのみを出力してください。\n"
+        "あなたは検索クエリ生成器です。質問に答えず、クエリに関連する追加キーワードのみを出力してください。\n"
         "- 出力は半角スペース区切りのキーワードのみ。\n"
         "- 固有名詞は改変せず、推測で新しい固有名詞を作らない。\n"
         "- キーワードは最大で10個。\n"
@@ -139,23 +162,23 @@ def build_query_transform_prompt(*, query: str) -> str:
         "## クエリ\n"
         "2024/11/30例会で『openにするかclosedにするか』はどう結論づいた？理由も簡潔に。\n"
         "## 出力\n"
-        "2024/11/30 例会 open closed 結論 決定 理由 方針 判断\n\n"
+        "例会 議事録 運営方針 公開範囲 決定 理由 背景\n\n"
         "## クエリ\n"
         "北田さんプロジェクトの双方のタスクについてまとめて\n"
         "## 出力\n"
-        "北田 プロジェクト 双方 タスク 担当 役割 作業 内容 分担\n\n"
+        "プロジェクト 役割 一覧 進捗 担当 作業\n\n"
         "## クエリ\n"
         "NFの企画登録会はいつ開催で、参加できる時間帯は？\n"
         "## 出力\n"
-        "NF 企画 登録会 開催日 日程 開催時間 時間帯 参加可能\n\n"
+        "企画登録会 日程 時間帯 スケジュール 告知\n\n"
         "## クエリ\n"
         "京大RPGについて\n"
         "## 出力\n"
-        "京大RPG 団体 活動 内容 概要 企画\n\n"
+        "企画 ゲーム 制作 イベント 発表\n\n"
         "## クエリ\n"
         "団体広報原稿によると、主な活動場所はどこで、入会希望者はどこから連絡すればよい？\n"
         "## 出力\n"
-        "団体 広報 原稿 活動場所 主な活動 連絡先 入会 希望 問い合わせ\n\n"
+        "団体 広報 原稿 活動場所 拠点 連絡先 問い合わせ 案内\n\n"
         f"## クエリ\n{query}\n"
         "## 出力\n"
     )
@@ -167,15 +190,23 @@ def build_gemini_prompt(
     docs: list[Document],
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
+    circle_basic_info: str = "",
+    include_history_sources: bool = True,
 ) -> str:
     context = format_doc_context(docs)
     sections: list[str] = []
     if history is not None:
-        sections.append(f"# チャット履歴\n{format_chat_history(history)}")
+        sections.append(
+            "# チャット履歴\n"
+            f"{format_chat_history(history, include_sources=include_history_sources)}"
+        )
     if retry_history:
         sections.append(
             f"# 再検索前の質問と回答\n{format_retry_history(retry_history)}"
         )
+    basic_info = (circle_basic_info or "").strip()
+    if basic_info:
+        sections.append(f"# サークルの基本情報\n{basic_info}")
     sections.append(f"# コンテキスト\n{context}")
     sections.append(f"# 出力形式\n{format_output_instructions()}")
     sections.append(f"# 質問\n{query}")
@@ -189,6 +220,7 @@ def build_llama_messages(
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
+    include_history_sources: bool = True,
 ) -> list[dict[str, str]]:
     context = format_doc_context(docs)
     system = "\n".join(config.system_rules)
@@ -200,6 +232,9 @@ def build_llama_messages(
                 format_retry_history(retry_history),
             ]
         )
+    basic_info = (config.circle_basic_info or "").strip()
+    if basic_info:
+        user_sections.extend(["### サークルの基本情報", basic_info, ""])
     user_sections.extend(
         [
             "### Context",
@@ -213,6 +248,11 @@ def build_llama_messages(
     user = "\n".join(user_sections)
     messages = [{"role": "system", "content": system}]
     if history is not None:
-        messages.extend(history_to_messages(history))
+        messages.extend(
+            history_to_messages(
+                history,
+                include_sources=include_history_sources,
+            )
+        )
     messages.append({"role": "user", "content": user})
     return messages

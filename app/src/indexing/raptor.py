@@ -67,16 +67,47 @@ def raptor_chunk_global(
     config: AppConfig,
     output_filename: str = "raptor_global.jsonl",
     skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
 ) -> None:
     ensure_dir(output_chunk_dir)
 
     out_path = output_chunk_dir / output_filename
-    if skip_existing and out_path.exists():
-        logger.info("Skip RAPTOR (exists): %s", out_path.name)
+    latest_input_mtime = _latest_input_mtime(input_chunk_dirs)
+    if latest_input_mtime is None:
+        if sync_deleted and out_path.exists():
+            try:
+                out_path.unlink()
+                logger.info("Removed stale RAPTOR output: %s", out_path.name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to remove stale RAPTOR output %s: %s",
+                    out_path.name,
+                    exc,
+                )
+        logger.warning("No chunks available for RAPTOR under %s", output_chunk_dir)
         return
+
+    if skip_existing and out_path.exists():
+        if not update_existing:
+            logger.info("Skip RAPTOR (exists): %s", out_path.name)
+            return
+        if out_path.stat().st_mtime >= latest_input_mtime:
+            logger.info("Skip RAPTOR (up-to-date): %s", out_path.name)
+            return
 
     chunks = load_chunks_from_dirs(input_chunk_dirs)
     if not chunks:
+        if sync_deleted and out_path.exists():
+            try:
+                out_path.unlink()
+                logger.info("Removed stale RAPTOR output: %s", out_path.name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to remove stale RAPTOR output %s: %s",
+                    out_path.name,
+                    exc,
+                )
         logger.warning("No chunks available for RAPTOR under %s", output_chunk_dir)
         return
 

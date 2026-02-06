@@ -42,6 +42,8 @@ AUTO_INDEX_WEEKDAYS = APP_CONFIG.auto_index_weekdays
 AUTO_INDEX_HOUR = APP_CONFIG.auto_index_hour
 AUTO_INDEX_MINUTE = APP_CONFIG.auto_index_minute
 MAX_INPUT_CHARACTERS = APP_CONFIG.max_input_characters
+KUMC_AGENT_CHANNEL_NAME = "kumc-agent"
+BOT_MENTION_USER_ID = 1457352598209171520
 
 DISCORD_BOT_TOKEN = APP_CONFIG.discord_bot_token
 GEMINI_API_KEY = APP_CONFIG.gemini_api_key
@@ -80,6 +82,40 @@ is_evaluating = False
 evaluating_task: asyncio.Task[None] | None = None
 channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
 channel_cancel_events: dict[int, threading.Event] = {}
+
+
+def _bot_mention_prefixes() -> tuple[str, ...]:
+    ids: set[int] = {BOT_MENTION_USER_ID}
+    current_user = discord_client.user
+    if current_user is not None and getattr(current_user, "id", None):
+        ids.add(int(current_user.id))
+
+    prefixes: list[str] = []
+    for user_id in ids:
+        prefixes.append(f"<@{user_id}>")
+        prefixes.append(f"<@!{user_id}>")
+    return tuple(prefixes)
+
+
+def _extract_query_from_message(message: discord.Message) -> str:
+    content = (message.content or "").strip()
+    if not content:
+        return ""
+
+    for prefix in _bot_mention_prefixes():
+        if content.startswith(prefix):
+            query = content[len(prefix) :].strip()
+            if query.startswith(COMMAND_PREFIX):
+                query = query[len(COMMAND_PREFIX) :].strip()
+            return query
+
+    if content.startswith(COMMAND_PREFIX):
+        return content[len(COMMAND_PREFIX) :].strip()
+
+    channel_name = str(getattr(message.channel, "name", "") or "").strip()
+    if channel_name == KUMC_AGENT_CHANNEL_NAME:
+        return content
+    return ""
 
 
 def _warmup_embedding() -> None:
@@ -411,11 +447,29 @@ async def _run_answer(message: discord.Message, query: str) -> None:
             except Exception:
                 logger.exception("Failed to send memory status")
 
+        def _notify_research_and_memory_start() -> None:
+            if channel is None:
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                channel.send(
+                    "詳細な検索を行っています…\n過去のチャットを思い出しています…"
+                ),
+                loop,
+            )
+            future.add_done_callback(_handle_research_and_memory_status)
+
+        def _handle_research_and_memory_status(fut: asyncio.Future) -> None:
+            try:
+                fut.result()
+            except Exception:
+                logger.exception("Failed to send research+memory status")
+
         answer = await asyncio.to_thread(
             rag_pipeline.answer_with_routing,
             query,
             on_research_start=_notify_research_start,
             on_memory_start=_notify_memory_start,
+            on_research_and_memory_start=_notify_research_and_memory_start,
             cancel_event=cancel_event,
         )
         if cancel_event.is_set():
@@ -519,14 +573,11 @@ async def on_message(message: discord.Message):
         return
 
     if is_indexing:
-        if content.startswith(COMMAND_PREFIX):
+        if _extract_query_from_message(message):
             await message.channel.send("インデックス更新中のため、クエリ受付を停止しています。")
         return
 
-    if not content.startswith(COMMAND_PREFIX):
-        return
-
-    query = content[len(COMMAND_PREFIX) :].strip()
+    query = _extract_query_from_message(message)
     if not query:
         return
     if MAX_INPUT_CHARACTERS > 0 and len(query) > MAX_INPUT_CHARACTERS:
