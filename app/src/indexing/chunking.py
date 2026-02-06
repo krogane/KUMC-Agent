@@ -31,6 +31,8 @@ _METADATA_KEYS = (
     "source_type",
     "guild_id",
     "guild_name",
+    "category_id",
+    "category_name",
     "channel_id",
     "channel_name",
     "first_message_id",
@@ -160,6 +162,8 @@ def _load_message_lines(
                 base_metadata = {
                     "guild_id": str(metadata.get("guild_id") or ""),
                     "guild_name": str(metadata.get("guild_name") or ""),
+                    "category_id": str(metadata.get("category_id") or ""),
+                    "category_name": str(metadata.get("category_name") or ""),
                     "channel_id": str(metadata.get("channel_id") or ""),
                     "channel_name": str(metadata.get("channel_name") or ""),
                     "source_file_name": str(metadata.get("source_file_name") or ""),

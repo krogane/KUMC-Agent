@@ -11,15 +11,19 @@ from config import AppConfig
 def _doc_to_context(doc: Document) -> str:
     metadata = doc.metadata or {}
     first_message_date = str(metadata.get("first_message_date") or "").strip()
+    category_name = str(metadata.get("category_name") or "").strip()
     channel_name = str(metadata.get("channel_name") or "").strip()
     if channel_name:
+        channel_display = (
+            f"{category_name} / {channel_name}" if category_name else channel_name
+        )
         if first_message_date:
             return (
-                f"channel_name: {channel_name}\n"
+                f"channel_name: {channel_display}\n"
                 f"first_message_date: {first_message_date}\n"
                 f"{doc.page_content}"
             )
-        return f"channel_name: {channel_name}\n{doc.page_content}"
+        return f"channel_name: {channel_display}\n{doc.page_content}"
     drive_path = str(metadata.get("drive_file_path") or "").strip()
     drive_path_display = drive_path if drive_path else "不明"
     if first_message_date:
@@ -191,6 +195,7 @@ def build_gemini_prompt(
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
     circle_basic_info: str = "",
+    chatbot_capabilities_info: str = "",
     include_history_sources: bool = True,
 ) -> str:
     context = format_doc_context(docs)
@@ -207,6 +212,11 @@ def build_gemini_prompt(
     basic_info = (circle_basic_info or "").strip()
     if basic_info:
         sections.append(f"# サークルの基本情報\n{basic_info}")
+    capabilities_info = (chatbot_capabilities_info or "").strip()
+    if capabilities_info:
+        sections.append(
+            f"# チャットボット自身の機能情報\n{capabilities_info}"
+        )
     sections.append(f"# コンテキスト\n{context}")
     sections.append(f"# 出力形式\n{format_output_instructions()}")
     sections.append(f"# 質問\n{query}")
@@ -235,6 +245,11 @@ def build_llama_messages(
     basic_info = (config.circle_basic_info or "").strip()
     if basic_info:
         user_sections.extend(["### サークルの基本情報", basic_info, ""])
+    capabilities_info = (config.chatbot_capabilities_info or "").strip()
+    if capabilities_info:
+        user_sections.extend(
+            ["### チャットボット自身の機能情報", capabilities_info, ""]
+        )
     user_sections.extend(
         [
             "### Context",

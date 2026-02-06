@@ -135,6 +135,7 @@ class RagPipeline:
                 history=history,
                 retry_history=retry_history,
                 circle_basic_info=self._config.circle_basic_info,
+                chatbot_capabilities_info=self._config.chatbot_capabilities_info,
             )
             logger.info("Answer LLM prompt (gemini): %s", prompt)
             text = generate_with_gemini(
@@ -188,6 +189,7 @@ class RagPipeline:
                 history=history,
                 retry_history=retry_history,
                 circle_basic_info=self._config.circle_basic_info,
+                chatbot_capabilities_info=self._config.chatbot_capabilities_info,
             )
             logger.info("No-RAG LLM prompt (gemini): %s", prompt)
             text = generate_with_gemini_config(
@@ -353,6 +355,8 @@ class RagPipeline:
     def refresh_index(self) -> None:
         self._vectorstore.cache_clear()
         self._sparse_index.cache_clear()
+        self._sparse_second_rec_index.cache_clear()
+        self._second_rec_sparse_index.cache_clear()
         self._second_rec_chunk_map.cache_clear()
         self._first_rec_chunk_map.cache_clear()
         self._summery_chunk_map.cache_clear()
@@ -451,10 +455,16 @@ class RagPipeline:
         results: list[list[Document]] = []
         original_k = max(0, self._config.sparse_search_original_top_k)
         transform_k = max(0, self._config.sparse_search_transform_top_k)
+        original_sparse_k = max(
+            0, self._config.sparse_search_original_sparse_top_k
+        )
 
         if original_k > 0:
-            original_docs = self._sparse_search_once(
-                original_query, original_k, cancel_event=cancel_event
+            original_docs = self._sparse_search_mixed_sources(
+                original_query,
+                top_k=original_k,
+                sparse_top_k=original_sparse_k,
+                cancel_event=cancel_event,
             )
             if original_docs:
                 results.append(original_docs)
@@ -479,12 +489,73 @@ class RagPipeline:
         self, query: str, *, cancel_event: threading.Event | None = None
     ) -> list[Document]:
         k = max(0, self._config.sparse_search_top_k)
+        sparse_k = max(0, self._config.sparse_search_initial_sparse_top_k)
         if k <= 0:
             return []
-        return self._sparse_search_once(query, k, cancel_event=cancel_event)
+        return self._sparse_search_mixed_sources(
+            query,
+            top_k=k,
+            sparse_top_k=sparse_k,
+            cancel_event=cancel_event,
+        )
+
+    def _sparse_search_mixed_sources(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        sparse_top_k: int,
+        cancel_event: threading.Event | None = None,
+    ) -> list[Document]:
+        total_k = max(0, top_k)
+        if total_k <= 0:
+            return []
+
+        sparse_k = min(max(0, sparse_top_k), total_k)
+        second_rec_k = total_k - sparse_k
+        sparse_docs = self._sparse_search_once_with_index(
+            query,
+            k=total_k,
+            index_loader=self._sparse_second_rec_index,
+            cancel_event=cancel_event,
+        )
+        second_rec_docs = self._sparse_search_once_with_index(
+            query,
+            k=total_k,
+            index_loader=self._second_rec_sparse_index,
+            cancel_event=cancel_event,
+        )
+
+        selected_sparse = sparse_docs[:sparse_k]
+        selected_second_rec = second_rec_docs[:second_rec_k]
+        merged = self._merge_docs([selected_sparse, selected_second_rec])
+        if len(merged) < total_k:
+            merged = self._merge_docs(
+                [
+                    merged,
+                    sparse_docs[sparse_k:],
+                    second_rec_docs[second_rec_k:],
+                ]
+            )
+        return merged[:total_k]
 
     def _sparse_search_once(
         self, query: str, k: int, *, cancel_event: threading.Event | None = None
+    ) -> list[Document]:
+        return self._sparse_search_once_with_index(
+            query,
+            k,
+            index_loader=self._sparse_index,
+            cancel_event=cancel_event,
+        )
+
+    def _sparse_search_once_with_index(
+        self,
+        query: str,
+        k: int,
+        *,
+        index_loader: Callable[[], tuple[list[Document], BM25Okapi]],
+        cancel_event: threading.Event | None = None,
     ) -> list[Document]:
         _raise_if_cancelled(cancel_event)
         if k <= 0:
@@ -492,7 +563,7 @@ class RagPipeline:
         tokens = self._sudachi_tokens(query)
         if not tokens:
             return []
-        docs, bm25 = self._sparse_index()
+        docs, bm25 = index_loader()
         if not docs:
             return []
         scores = bm25.get_scores(tokens)
@@ -591,8 +662,37 @@ class RagPipeline:
         )
         return docs, bm25
 
+    @lru_cache(maxsize=1)
+    def _sparse_second_rec_index(self) -> tuple[list[Document], BM25Okapi]:
+        docs = self._load_sparse_docs_for_dirs(self._sparse_second_rec_chunk_dirs())
+        if not docs:
+            return [], BM25Okapi([[]])
+        tokenized = [self._sparse_doc_tokens(doc) for doc in docs]
+        bm25 = BM25Okapi(
+            tokenized,
+            k1=self._config.sparse_bm25_k1,
+            b=self._config.sparse_bm25_b,
+        )
+        return docs, bm25
+
+    @lru_cache(maxsize=1)
+    def _second_rec_sparse_index(self) -> tuple[list[Document], BM25Okapi]:
+        docs = self._load_sparse_docs_for_dirs(self._second_rec_chunk_dirs())
+        if not docs:
+            return [], BM25Okapi([[]])
+        tokenized = [self._sparse_doc_tokens(doc) for doc in docs]
+        bm25 = BM25Okapi(
+            tokenized,
+            k1=self._config.sparse_bm25_k1,
+            b=self._config.sparse_bm25_b,
+        )
+        return docs, bm25
+
     def _load_sparse_docs(self) -> list[Document]:
         chunk_dirs = self._sparse_chunk_dirs()
+        return self._load_sparse_docs_for_dirs(chunk_dirs)
+
+    def _load_sparse_docs_for_dirs(self, chunk_dirs: list[Path]) -> list[Document]:
         if not chunk_dirs:
             return []
 
@@ -601,6 +701,38 @@ class RagPipeline:
             Document(page_content=chunk.text, metadata=chunk.metadata)
             for chunk in chunks
         ]
+
+    def _sparse_second_rec_chunk_dirs(self) -> list[Path]:
+        if not self._config.second_rec_enabled:
+            return self._first_rec_chunk_dirs()
+
+        dirs: list[Path] = []
+        for name in ("docs", "sheets", "messages"):
+            candidate = self._config.sparse_second_rec_chunk_dir / name
+            if candidate.exists():
+                dirs.append(candidate)
+        if dirs:
+            return dirs
+        return self._second_rec_chunk_dirs()
+
+    def _second_rec_chunk_dirs(self) -> list[Path]:
+        if not self._config.second_rec_enabled:
+            return self._first_rec_chunk_dirs()
+
+        dirs: list[Path] = []
+        for name in ("docs", "sheets", "messages"):
+            candidate = self._config.second_rec_chunk_dir / name
+            if candidate.exists():
+                dirs.append(candidate)
+        return dirs
+
+    def _first_rec_chunk_dirs(self) -> list[Path]:
+        dirs: list[Path] = []
+        for name in ("docs", "sheets", "messages"):
+            candidate = self._config.first_rec_chunk_dir / name
+            if candidate.exists():
+                dirs.append(candidate)
+        return dirs
 
     def _sparse_chunk_dirs(self) -> list[Path]:
         dirs = []

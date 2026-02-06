@@ -7,6 +7,7 @@ docker/
 app/.venv/
 app/data/first_rec_chunk/*
 app/data/second_rec_chunk/*
+app/data/sparse_second_rec_chunk/*
 app/data/summery_chunk/*
 app/data/prop_chunk/*
 app/data/raptor_chunk/*

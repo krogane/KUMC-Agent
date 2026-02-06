@@ -157,11 +157,20 @@ def _channel_metadata(
     guild: discord.Guild,
     channel: discord.abc.GuildChannel | discord.Thread,
 ) -> dict[str, object]:
+    category_id = ""
+    category_name = ""
+    category = getattr(channel, "category", None)
+    if category is not None:
+        category_id = str(getattr(category, "id", "") or "")
+        category_name = str(getattr(category, "name", "") or "")
+
     return {
         "guild_id": str(guild.id),
         "guild_name": guild.name,
         "channel_id": str(channel.id),
         "channel_name": channel.name,
+        "category_id": category_id,
+        "category_name": category_name,
         "source_type": "discord_message",
         "source_file_name": f"discord/{guild.id}/{channel.id}",
     }

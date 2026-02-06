@@ -30,6 +30,12 @@ DEFAULT_CHAT_HISTORY_ENABLED: bool = False
 DEFAULT_CHAT_HISTORY_MAX_TURNS: int = 5
 DEFAULT_PROMPT_HISTORY_DEFAULT_TURNS: int = 3
 DEFAULT_PROMPT_HISTORY_ADDITIONAL_TURNS: int = 10
+DEFAULT_CHATBOT_CAPABILITIES_INFO: str = (
+    "以下はあなたの機能情報です。\n"
+    "- 呼び出し: 「kumc-agent」チャンネルまたはメンションして質問されることで呼び出されます。\n"
+    "- 資料検索: ユーザーからの質問をもとに、サークル資料・Discordの会話ログを検索します。\n"
+    "- 文章生成: 検索された資料をもとに、情報検索・企画のアイデア出し・サークルの意思決定をサポートします。"
+)
 DEFAULT_CIRCLE_BASIC_INFO: str = (
     "以下はあなたが所属するサークルの基本情報です。\n"
     "- サークル名: 京大マインクラフト同好会KUMC\n"
@@ -195,6 +201,10 @@ DEFAULT_DENSE_SEARCH_TOP_K: int = 20
 DEFAULT_SPARSE_SEARCH_TOP_K: int = 20
 DEFAULT_SPARSE_SEARCH_ORIGINAL_TOP_K: int = DEFAULT_SPARSE_SEARCH_TOP_K
 DEFAULT_SPARSE_SEARCH_TRANSFORM_TOP_K: int = DEFAULT_SPARSE_SEARCH_TOP_K
+DEFAULT_SPARSE_SEARCH_INITIAL_SPARSE_TOP_K: int = DEFAULT_SPARSE_SEARCH_TOP_K
+DEFAULT_SPARSE_SEARCH_ORIGINAL_SPARSE_TOP_K: int = (
+    DEFAULT_SPARSE_SEARCH_ORIGINAL_TOP_K
+)
 DEFAULT_PARENT_DOC_ENABLED: bool = True
 DEFAULT_PARENT_CHUNK_CAP: int = 2
 DEFAULT_RERANK_POOL_SIZE: int = 20
@@ -560,12 +570,19 @@ class AppConfig:
     prompt_history_additional_turns: int = (
         DEFAULT_PROMPT_HISTORY_ADDITIONAL_TURNS
     )
+    chatbot_capabilities_info: str = DEFAULT_CHATBOT_CAPABILITIES_INFO
     circle_basic_info: str = DEFAULT_CIRCLE_BASIC_INFO
     top_k: int = DEFAULT_TOP_K
     dense_search_top_k: int = DEFAULT_DENSE_SEARCH_TOP_K
     sparse_search_top_k: int = DEFAULT_SPARSE_SEARCH_TOP_K
     sparse_search_original_top_k: int = DEFAULT_SPARSE_SEARCH_ORIGINAL_TOP_K
     sparse_search_transform_top_k: int = DEFAULT_SPARSE_SEARCH_TRANSFORM_TOP_K
+    sparse_search_initial_sparse_top_k: int = (
+        DEFAULT_SPARSE_SEARCH_INITIAL_SPARSE_TOP_K
+    )
+    sparse_search_original_sparse_top_k: int = (
+        DEFAULT_SPARSE_SEARCH_ORIGINAL_SPARSE_TOP_K
+    )
     parent_doc_enabled: bool = DEFAULT_PARENT_DOC_ENABLED
     parent_chunk_cap: int = DEFAULT_PARENT_CHUNK_CAP
     rerank_pool_size: int = DEFAULT_RERANK_POOL_SIZE
@@ -692,12 +709,15 @@ class AppConfig:
         chat_history_max_turns: int | None = None,
         prompt_history_default_turns: int | None = None,
         prompt_history_additional_turns: int | None = None,
+        chatbot_capabilities_info: str | None = None,
         circle_basic_info: str | None = None,
         top_k: int | None = None,
         dense_search_top_k: int | None = None,
         sparse_search_top_k: int | None = None,
         sparse_search_original_top_k: int | None = None,
         sparse_search_transform_top_k: int | None = None,
+        sparse_search_initial_sparse_top_k: int | None = None,
+        sparse_search_original_sparse_top_k: int | None = None,
         parent_doc_enabled: bool | None = None,
         parent_chunk_cap: int | None = None,
         rerank_pool_size: int | None = None,
@@ -1001,6 +1021,16 @@ class AppConfig:
                 )
             )
         )
+        base_sparse_search_original_top_k = (
+            sparse_search_original_top_k
+            if sparse_search_original_top_k is not None
+            else int(
+                os.getenv(
+                    "SPARSE_SEARCH_ORIGINAL_TOP_K",
+                    str(base_sparse_search_top_k),
+                )
+            )
+        )
         return cls(
             base_dir=resolved_base,
             raw_data_dir=resolved_base / "app" / "data" / "raw",
@@ -1251,6 +1281,14 @@ class AppConfig:
                     )
                 ),
             ),
+            chatbot_capabilities_info=(
+                chatbot_capabilities_info
+                if chatbot_capabilities_info is not None
+                else os.getenv(
+                    "CHATBOT_CAPABILITIES_INFO",
+                    DEFAULT_CHATBOT_CAPABILITIES_INFO,
+                )
+            ),
             circle_basic_info=(
                 circle_basic_info
                 if circle_basic_info is not None
@@ -1268,20 +1306,29 @@ class AppConfig:
                 )
             ),
             sparse_search_top_k=base_sparse_search_top_k,
-            sparse_search_original_top_k=sparse_search_original_top_k
-            if sparse_search_original_top_k is not None
-            else int(
-                os.getenv(
-                    "SPARSE_SEARCH_ORIGINAL_TOP_K",
-                    str(base_sparse_search_top_k),
-                )
-            ),
+            sparse_search_original_top_k=base_sparse_search_original_top_k,
             sparse_search_transform_top_k=sparse_search_transform_top_k
             if sparse_search_transform_top_k is not None
             else int(
                 os.getenv(
                     "SPARSE_SEARCH_TRANSFORM_TOP_K",
                     str(base_sparse_search_top_k),
+                )
+            ),
+            sparse_search_initial_sparse_top_k=sparse_search_initial_sparse_top_k
+            if sparse_search_initial_sparse_top_k is not None
+            else int(
+                os.getenv(
+                    "SPARSE_SEARCH_INITIAL_SPARSE_TOP_K",
+                    str(base_sparse_search_top_k),
+                )
+            ),
+            sparse_search_original_sparse_top_k=sparse_search_original_sparse_top_k
+            if sparse_search_original_sparse_top_k is not None
+            else int(
+                os.getenv(
+                    "SPARSE_SEARCH_ORIGINAL_SPARSE_TOP_K",
+                    str(base_sparse_search_original_top_k),
                 )
             ),
             parent_doc_enabled=parent_doc_enabled

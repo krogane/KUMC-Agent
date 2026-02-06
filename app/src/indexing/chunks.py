@@ -18,9 +18,13 @@ class Chunk:
 def chunk_embedding_text(chunk: Chunk) -> str:
     text = (chunk.text or "").strip()
     metadata_lines: list[str] = []
+    category_name = str(chunk.metadata.get("category_name") or "").strip()
     channel_name = str(chunk.metadata.get("channel_name") or "").strip()
     if channel_name:
-        metadata_lines.append(f"channel_name: {channel_name}")
+        channel_display = (
+            f"{category_name} / {channel_name}" if category_name else channel_name
+        )
+        metadata_lines.append(f"channel_name: {channel_display}")
     drive_path = str(chunk.metadata.get("drive_file_path") or "").strip()
     if drive_path:
         metadata_lines.append(f"drive_file_path: {drive_path}")
