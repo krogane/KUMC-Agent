@@ -278,11 +278,77 @@ def _extract_channel_id_from_filename(stem: str) -> str:
     return stem
 
 
-def _is_output_up_to_date(*, output_path: Path, input_path: Path) -> bool:
+def _chunk_mtime_sidecar_path(chunk_path: Path) -> Path:
+    return chunk_path.with_suffix(chunk_path.suffix + ".mtime.json")
+
+
+def _safe_mtime(path: Path) -> float | None:
     try:
-        return output_path.stat().st_mtime >= input_path.stat().st_mtime
+        return path.stat().st_mtime
     except OSError:
+        return None
+
+
+def _read_chunk_mtime_sidecar(chunk_path: Path) -> dict[str, object]:
+    sidecar = _chunk_mtime_sidecar_path(chunk_path)
+    if not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _write_chunk_mtime_sidecar(*, chunk_path: Path, input_path: Path) -> None:
+    input_mtime = _safe_mtime(input_path)
+    output_mtime = _safe_mtime(chunk_path)
+    payload = {
+        "source_path": str(input_path),
+        "source_mtime": input_mtime,
+        "output_mtime": output_mtime,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sidecar = _chunk_mtime_sidecar_path(chunk_path)
+    sidecar.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _remove_chunk_mtime_sidecar(chunk_path: Path) -> None:
+    sidecar = _chunk_mtime_sidecar_path(chunk_path)
+    if not sidecar.exists():
+        return
+    try:
+        sidecar.unlink()
+        logger.info("Removed stale chunk mtime sidecar: %s", sidecar.name)
+    except Exception as exc:
+        logger.warning(
+            "Failed to remove stale chunk mtime sidecar %s: %s",
+            sidecar.name,
+            exc,
+        )
+
+
+def _is_output_up_to_date(*, output_path: Path, input_path: Path) -> bool:
+    input_mtime = _safe_mtime(input_path)
+    if input_mtime is None:
         return False
+    sidecar = _read_chunk_mtime_sidecar(output_path)
+    if sidecar:
+        source_path = sidecar.get("source_path")
+        source_mtime = sidecar.get("source_mtime")
+        if (
+            isinstance(source_path, str)
+            and source_path == str(input_path)
+            and isinstance(source_mtime, (int, float))
+            and float(source_mtime) >= input_mtime
+        ):
+            return True
+    output_mtime = _safe_mtime(output_path)
+    if output_mtime is None:
+        return False
+    return output_mtime >= input_mtime
 
 
 def _should_skip_existing_output(
@@ -311,8 +377,22 @@ def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) 
         try:
             path.unlink()
             logger.info("Removed stale chunk output: %s", path.name)
+            _remove_chunk_mtime_sidecar(path)
         except Exception as exc:
             logger.warning("Failed to remove stale chunk output %s: %s", path.name, exc)
+    for sidecar in output_dir.glob("*.jsonl.mtime.json"):
+        chunk_name = sidecar.name[: -len(".mtime.json")]
+        if chunk_name in expected_names:
+            continue
+        try:
+            sidecar.unlink()
+            logger.info("Removed stale chunk mtime sidecar: %s", sidecar.name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove stale chunk mtime sidecar %s: %s",
+                sidecar.name,
+                exc,
+            )
 
 
 def recursive_chunk_dir(
@@ -390,6 +470,7 @@ def recursive_chunk_dir(
             output_index += 1
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Recursive chunked (%s) %s -> %s (%d chunks)",
             stage,
@@ -530,6 +611,7 @@ def message_chunk_jsonl_dir(
             output_index += 1
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Message chunked (%s) %s -> %s (%d chunks)",
             stage,
@@ -615,6 +697,7 @@ def recursive_chunk_jsonl_dir(
                 output_index += 1
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Recursive chunked (%s) %s -> %s (%d chunks)",
             stage,
@@ -698,6 +781,7 @@ def sparse_chunk_jsonl_dir(
             )
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Sparse chunked %s -> %s (%d chunks)",
             path.name,
@@ -814,6 +898,7 @@ def summery_chunk_jsonl_dir(
                 output_index += 1
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Summery chunked %s -> %s (%d chunks)",
             path.name,
@@ -920,6 +1005,7 @@ def proposition_chunk_jsonl_dir(
                 output_index += 1
 
         write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
         logger.info(
             "Proposition chunked %s -> %s (%d chunks)",
             path.name,

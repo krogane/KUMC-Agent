@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Iterable
 from pathlib import Path
 
@@ -15,6 +17,48 @@ from indexing.token_utils import estimate_tokens
 from indexing.utils import ensure_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _raptor_mtime_sidecar_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".mtime.json")
+
+
+def _read_raptor_mtime_sidecar(path: Path) -> dict[str, object]:
+    sidecar = _raptor_mtime_sidecar_path(path)
+    if not sidecar.exists():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _write_raptor_mtime_sidecar(*, out_path: Path, source_mtime: float) -> None:
+    payload = {
+        "source_mtime": source_mtime,
+        "output_mtime": out_path.stat().st_mtime,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sidecar = _raptor_mtime_sidecar_path(out_path)
+    sidecar.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _remove_raptor_mtime_sidecar(path: Path) -> None:
+    sidecar = _raptor_mtime_sidecar_path(path)
+    if not sidecar.exists():
+        return
+    try:
+        sidecar.unlink()
+        logger.info("Removed stale RAPTOR mtime sidecar: %s", sidecar.name)
+    except Exception as exc:
+        logger.warning(
+            "Failed to remove stale RAPTOR mtime sidecar %s: %s",
+            sidecar.name,
+            exc,
+        )
 
 
 def _select_model_for_provider(
@@ -79,6 +123,7 @@ def raptor_chunk_global(
             try:
                 out_path.unlink()
                 logger.info("Removed stale RAPTOR output: %s", out_path.name)
+                _remove_raptor_mtime_sidecar(out_path)
             except Exception as exc:
                 logger.warning(
                     "Failed to remove stale RAPTOR output %s: %s",
@@ -92,6 +137,14 @@ def raptor_chunk_global(
         if not update_existing:
             logger.info("Skip RAPTOR (exists): %s", out_path.name)
             return
+        sidecar = _read_raptor_mtime_sidecar(out_path)
+        sidecar_source_mtime = sidecar.get("source_mtime")
+        if (
+            isinstance(sidecar_source_mtime, (int, float))
+            and float(sidecar_source_mtime) >= latest_input_mtime
+        ):
+            logger.info("Skip RAPTOR (up-to-date): %s", out_path.name)
+            return
         if out_path.stat().st_mtime >= latest_input_mtime:
             logger.info("Skip RAPTOR (up-to-date): %s", out_path.name)
             return
@@ -102,6 +155,7 @@ def raptor_chunk_global(
             try:
                 out_path.unlink()
                 logger.info("Removed stale RAPTOR output: %s", out_path.name)
+                _remove_raptor_mtime_sidecar(out_path)
             except Exception as exc:
                 logger.warning(
                     "Failed to remove stale RAPTOR output %s: %s",
@@ -124,6 +178,10 @@ def raptor_chunk_global(
         output_chunks.append(Chunk(text=summary.text, metadata=metadata))
 
     write_chunks(out_path, output_chunks)
+    _write_raptor_mtime_sidecar(
+        out_path=out_path,
+        source_mtime=latest_input_mtime,
+    )
     logger.info(
         "RAPTOR summarized %d chunks -> %s (%d chunks)",
         len(chunks),
