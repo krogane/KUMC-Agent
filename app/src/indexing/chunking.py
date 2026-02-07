@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 _METADATA_KEYS = (
     "source_file_name",
     "source_type",
+    "meeting_date",
+    "meeting_label",
     "guild_id",
     "guild_name",
     "category_id",
@@ -91,10 +93,24 @@ def _build_base_metadata(
     return {
         "source_file_name": source_file_name,
         "source_type": source_type,
+        "meeting_date": "",
+        "meeting_label": "",
         "drive_file_name": drive_file_name,
         "drive_mime_type": drive_mime_type,
         "drive_file_path": drive_file_path,
         "drive_file_id": drive_file_id,
+    }
+
+
+def _build_vc_meeting_metadata(path: Path) -> dict[str, str]:
+    parent_name = path.parent.name
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})_\d+$", parent_name)
+    if not match:
+        return {}
+    meeting_date = f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+    return {
+        "meeting_date": meeting_date,
+        "meeting_label": f"{meeting_date} 例会",
     }
 
 
@@ -457,6 +473,13 @@ def recursive_chunk_dir(
             drive_metadata=drive_metadata,
             fallback_drive_file_id=_extract_drive_file_id(path.name),
         )
+        if source_type == "vc_transcript":
+            vc_meta = _build_vc_meeting_metadata(path)
+            if vc_meta:
+                base_metadata.update(vc_meta)
+            base_metadata["source_file_name"] = (
+                f"vc/{str(rel_path).replace(os.sep, '/')}"
+            )
 
         docs = splitter.split_text(text)
         output_chunks: list[Chunk] = []

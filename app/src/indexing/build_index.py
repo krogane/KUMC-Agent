@@ -44,7 +44,7 @@ def _clear_dir_contents(target: Path) -> None:
 
 def _reset_output_dirs(cfg: AppConfig) -> None:
     if cfg.clear_raw_data:
-        for name in ("docs", "sheets", "messages"):
+        for name in ("docs", "sheets", "messages", "vc"):
             target = cfg.raw_data_dir / name
             if target.exists():
                 _clear_dir_contents(target)
@@ -56,7 +56,7 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
                 _clear_dir_contents(target)
 
     if cfg.clear_second_rec_chunk_data:
-        for name in ("docs", "sheets", "messages"):
+        for name in ("docs", "sheets", "messages", "vc"):
             target = cfg.second_rec_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
@@ -65,7 +65,7 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
                 _clear_dir_contents(sparse_target)
 
     if cfg.clear_summery_chunk_data:
-        for name in ("docs", "sheets", "messages"):
+        for name in ("docs", "sheets", "messages", "vc"):
             target = cfg.summery_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
@@ -98,15 +98,18 @@ def main() -> None:
     raw_docs_dir = cfg.raw_data_dir / "docs"
     raw_sheets_dir = cfg.raw_data_dir / "sheets"
     raw_messages_dir = cfg.raw_data_dir / "messages"
+    raw_vc_dir = cfg.raw_data_dir / "vc"
     first_rec_docs_dir = cfg.first_rec_chunk_dir / "docs"
     first_rec_sheets_dir = cfg.first_rec_chunk_dir / "sheets"
     first_rec_messages_dir = cfg.first_rec_chunk_dir / "messages"
     second_rec_docs_dir = cfg.second_rec_chunk_dir / "docs"
     second_rec_sheets_dir = cfg.second_rec_chunk_dir / "sheets"
     second_rec_messages_dir = cfg.second_rec_chunk_dir / "messages"
+    second_rec_vc_dir = cfg.second_rec_chunk_dir / "vc"
     sparse_second_rec_docs_dir = cfg.sparse_second_rec_chunk_dir / "docs"
     sparse_second_rec_sheets_dir = cfg.sparse_second_rec_chunk_dir / "sheets"
     sparse_second_rec_messages_dir = cfg.sparse_second_rec_chunk_dir / "messages"
+    sparse_second_rec_vc_dir = cfg.sparse_second_rec_chunk_dir / "vc"
     summery_docs_dir = cfg.summery_chunk_dir / "docs"
     summery_sheets_dir = cfg.summery_chunk_dir / "sheets"
     summery_messages_dir = cfg.summery_chunk_dir / "messages"
@@ -384,6 +387,30 @@ def main() -> None:
                 sync_deleted=cfg.update_sparse_second_rec_chunk_data,
             )
 
+    if raw_vc_dir.exists():
+        recursive_chunk_dir(
+            raw_data_dir=raw_vc_dir,
+            chunk_dir=second_rec_vc_dir,
+            chunk_size=cfg.second_rec_chunk_size,
+            chunk_overlap=cfg.second_rec_chunk_overlap,
+            separators=MESSAGE_SEPARATORS,
+            source_type="vc_transcript",
+            stage="second_recursive",
+            file_extensions=(".txt",),
+            skip_existing=not cfg.clear_second_rec_chunk_data,
+            update_existing=cfg.update_second_rec_chunk_data,
+            sync_deleted=cfg.update_second_rec_chunk_data,
+        )
+        if second_rec_vc_dir.exists():
+            sparse_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_vc_dir,
+                output_chunk_dir=sparse_second_rec_vc_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_sparse_second_rec_chunk_data,
+                sync_deleted=cfg.update_sparse_second_rec_chunk_data,
+            )
+
     if cfg.summery_enabled:
         summery_chunk_jsonl_dir(
             input_chunk_dir=first_rec_docs_dir,
@@ -462,6 +489,8 @@ def main() -> None:
             base_chunk_dirs.append(first_rec_messages_dir)
     if base_chunk_dirs:
         index_chunks.extend(load_chunks_from_dirs(base_chunk_dirs))
+    if second_rec_vc_dir.exists():
+        index_chunks.extend(load_chunks_from_dirs([second_rec_vc_dir]))
     if cfg.prop_enabled and cfg.second_rec_enabled:
         index_chunks.extend(load_chunks_from_dirs([prop_docs_dir, prop_sheets_dir]))
     if cfg.raptor_enabled:

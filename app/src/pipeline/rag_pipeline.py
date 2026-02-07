@@ -44,6 +44,8 @@ _SECOND_REC_SPARSE_STAGE = "second_recursive_sparse"
 _MASKED_MENTION = "（メンション非表示）"
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
+_BASE_SOURCE_DIRS = ("docs", "sheets", "messages")
+_SECOND_REC_SOURCE_DIRS = ("docs", "sheets", "messages", "vc")
 
 
 class GenerationCancelled(RuntimeError):
@@ -396,11 +398,12 @@ class RagPipeline:
         if self._config.prop_enabled and self._config.second_rec_enabled:
             stages.add("proposition")
         else:
-            stages.add(
-                "second_recursive"
-                if self._config.second_rec_enabled
-                else "first_recursive"
-            )
+            if self._config.second_rec_enabled:
+                stages.add("second_recursive")
+            else:
+                stages.add("first_recursive")
+                if (self._config.second_rec_chunk_dir / "vc").exists():
+                    stages.add("second_recursive")
         if self._config.raptor_enabled:
             stages.add("raptor")
         return stages
@@ -704,10 +707,18 @@ class RagPipeline:
 
     def _sparse_second_rec_chunk_dirs(self) -> list[Path]:
         if not self._config.second_rec_enabled:
-            return self._first_rec_chunk_dirs()
+            dirs = self._first_rec_chunk_dirs()
+            vc_sparse = self._config.sparse_second_rec_chunk_dir / "vc"
+            if vc_sparse.exists():
+                dirs.append(vc_sparse)
+            else:
+                vc_second = self._config.second_rec_chunk_dir / "vc"
+                if vc_second.exists():
+                    dirs.append(vc_second)
+            return dirs
 
         dirs: list[Path] = []
-        for name in ("docs", "sheets", "messages"):
+        for name in _SECOND_REC_SOURCE_DIRS:
             candidate = self._config.sparse_second_rec_chunk_dir / name
             if candidate.exists():
                 dirs.append(candidate)
@@ -717,10 +728,14 @@ class RagPipeline:
 
     def _second_rec_chunk_dirs(self) -> list[Path]:
         if not self._config.second_rec_enabled:
-            return self._first_rec_chunk_dirs()
+            dirs = self._first_rec_chunk_dirs()
+            vc_second = self._config.second_rec_chunk_dir / "vc"
+            if vc_second.exists():
+                dirs.append(vc_second)
+            return dirs
 
         dirs: list[Path] = []
-        for name in ("docs", "sheets", "messages"):
+        for name in _SECOND_REC_SOURCE_DIRS:
             candidate = self._config.second_rec_chunk_dir / name
             if candidate.exists():
                 dirs.append(candidate)
@@ -728,7 +743,7 @@ class RagPipeline:
 
     def _first_rec_chunk_dirs(self) -> list[Path]:
         dirs: list[Path] = []
-        for name in ("docs", "sheets", "messages"):
+        for name in _BASE_SOURCE_DIRS:
             candidate = self._config.first_rec_chunk_dir / name
             if candidate.exists():
                 dirs.append(candidate)
@@ -739,22 +754,29 @@ class RagPipeline:
 
         if self._config.second_rec_enabled:
             second_rec_sparse_dirs: list[Path] = []
-            for name in ("docs", "sheets", "messages"):
+            for name in _SECOND_REC_SOURCE_DIRS:
                 candidate = self._config.sparse_second_rec_chunk_dir / name
                 if candidate.exists():
                     second_rec_sparse_dirs.append(candidate)
             if second_rec_sparse_dirs:
                 dirs.extend(second_rec_sparse_dirs)
             else:
-                for name in ("docs", "sheets", "messages"):
+                for name in _SECOND_REC_SOURCE_DIRS:
                     fallback = self._config.second_rec_chunk_dir / name
                     if fallback.exists():
                         dirs.append(fallback)
         else:
-            for name in ("docs", "sheets", "messages"):
+            for name in _BASE_SOURCE_DIRS:
                 candidate = self._config.first_rec_chunk_dir / name
                 if candidate.exists():
                     dirs.append(candidate)
+            vc_sparse = self._config.sparse_second_rec_chunk_dir / "vc"
+            if vc_sparse.exists():
+                dirs.append(vc_sparse)
+            else:
+                vc_second = self._config.second_rec_chunk_dir / "vc"
+                if vc_second.exists():
+                    dirs.append(vc_second)
 
         if self._config.prop_enabled and self._config.second_rec_enabled:
             for name in ("docs", "sheets"):
@@ -1065,7 +1087,7 @@ class RagPipeline:
         if not self._config.summery_enabled:
             return {}
         chunk_dirs = []
-        for name in ("docs", "sheets", "messages"):
+        for name in _SECOND_REC_SOURCE_DIRS:
             candidate = self._config.summery_chunk_dir / name
             if candidate.exists():
                 chunk_dirs.append(candidate)
@@ -1088,7 +1110,7 @@ class RagPipeline:
 
     def _chunk_map_for_dirs(self, base_dir: Path) -> dict[tuple[object, ...], Document]:
         chunk_dirs = []
-        for name in ("docs", "sheets", "messages"):
+        for name in _SECOND_REC_SOURCE_DIRS:
             candidate = base_dir / name
             if candidate.exists():
                 chunk_dirs.append(candidate)
@@ -1177,11 +1199,11 @@ class RagPipeline:
         for idx in source_ids:
             if 1 <= idx <= len(docs):
                 selected_docs.append(docs[idx - 1])
-        urls = self._build_source_urls(selected_docs)
-        if not urls:
+        refs = self._build_source_refs(selected_docs)
+        if not refs:
             return answer
 
-        sources_text = "\n".join(f"- {url}" for url in urls)
+        sources_text = "\n".join(f"- {ref}" for ref in refs)
         return (
             f"{answer}\n\n"
             "※回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。\n"
@@ -1452,18 +1474,20 @@ class RagPipeline:
         return ordered[:max_count]
 
     @staticmethod
-    def _build_source_urls(docs: list[Document]) -> list[str]:
-        urls: list[str] = []
+    def _build_source_refs(docs: list[Document]) -> list[str]:
+        refs: list[str] = []
         seen: set[str] = set()
         for doc in docs:
-            url = _discord_url_from_metadata(doc.metadata)
-            if not url:
-                url = _drive_url_from_metadata(doc.metadata)
-            if not url or url in seen:
+            ref = _discord_url_from_metadata(doc.metadata)
+            if not ref:
+                ref = _drive_url_from_metadata(doc.metadata)
+            if not ref:
+                ref = _vc_source_label_from_metadata(doc.metadata)
+            if not ref or ref in seen:
                 continue
-            urls.append(url)
-            seen.add(url)
-        return urls
+            refs.append(ref)
+            seen.add(ref)
+        return refs
 
     def _parse_answer_payload(
         self,
@@ -1649,6 +1673,23 @@ def _discord_url_from_metadata(metadata: dict[str, object] | None) -> str | None
     if not guild_id or not channel_id or not message_id:
         return None
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def _vc_source_label_from_metadata(metadata: dict[str, object] | None) -> str | None:
+    if not metadata:
+        return None
+    source_type = str(metadata.get("source_type") or "").strip().lower()
+    if source_type != "vc_transcript":
+        return None
+
+    meeting_date = str(metadata.get("meeting_date") or "").strip()
+    if not meeting_date:
+        meeting_label = str(metadata.get("meeting_label") or "").strip()
+        if meeting_label:
+            meeting_date = meeting_label.split(" ", maxsplit=1)[0].strip()
+    if not meeting_date:
+        return None
+    return f"{meeting_date}例会 文字起こし"
 
 
 def _load_json_payload(text: str) -> dict[str, object] | None:

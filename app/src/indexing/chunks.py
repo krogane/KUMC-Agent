@@ -18,6 +18,11 @@ class Chunk:
 def chunk_embedding_text(chunk: Chunk) -> str:
     text = (chunk.text or "").strip()
     metadata_lines: list[str] = []
+    source_type = str(chunk.metadata.get("source_type") or "").strip().lower()
+    if source_type == "vc_transcript":
+        meeting_label = str(chunk.metadata.get("meeting_label") or "").strip()
+        if meeting_label:
+            metadata_lines.append(meeting_label)
     category_name = str(chunk.metadata.get("category_name") or "").strip()
     channel_name = str(chunk.metadata.get("channel_name") or "").strip()
     if channel_name:

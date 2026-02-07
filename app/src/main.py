@@ -21,6 +21,7 @@ from pipeline.prompts import (
     QUERY_TRANSFORM_SYSTEM_PROMPT,
     build_query_transform_prompt,
 )
+from vc import VoiceMeetingManager
 
 
 # Config
@@ -54,12 +55,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
 # Discord Client
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 discord_client = discord.Client(intents=intents)
 
 
@@ -82,6 +85,13 @@ is_evaluating = False
 evaluating_task: asyncio.Task[None] | None = None
 channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
 channel_cancel_events: dict[int, threading.Event] = {}
+voice_meeting_manager = VoiceMeetingManager(
+    discord_client=discord_client,
+    config=APP_CONFIG,
+    is_indexing_active=lambda: is_indexing,
+)
+JOIN_COMMAND = f"{COMMAND_PREFIX.strip()} join".strip().lower()
+QUIT_COMMAND = f"{COMMAND_PREFIX.strip()} quit".strip().lower()
 
 
 def _bot_mention_prefixes() -> tuple[str, ...]:
@@ -313,6 +323,7 @@ async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
                 stdout.decode("utf-8", errors="replace"),
             )
         rag_pipeline.refresh_index()
+        _warmup_models()
         await _send_status(
             channel, "インデックス更新が完了しました。クエリ受付を再開します。"
         )
@@ -414,6 +425,7 @@ async def _run_answer(message: discord.Message, query: str) -> None:
     channel_id = channel.id
     cancel_event = threading.Event()
     channel_cancel_events[channel_id] = cancel_event
+    voice_meeting_manager.notify_rag_started()
     try:
         loop = asyncio.get_running_loop()
 
@@ -481,6 +493,7 @@ async def _run_answer(message: discord.Message, query: str) -> None:
         logger.exception("Failed to handle /llm request")
         await channel.send(f"エラーが発生しました: {type(e).__name__}: {e}")
     finally:
+        voice_meeting_manager.notify_rag_finished()
         channel_cancel_events.pop(channel_id, None)
         channel_generation_tasks.pop(channel_id, None)
 
@@ -515,6 +528,10 @@ async def _auto_index_loop() -> None:
             logger.info("Auto index skipped: indexing already running.")
             auto_index_last_run = now.date()
             continue
+        if voice_meeting_manager.has_active_session():
+            logger.info("Auto index skipped: VC participation is active.")
+            auto_index_last_run = now.date()
+            continue
         is_indexing = True
         indexing_stop_requested = False
         auto_index_last_run = now.date()
@@ -525,9 +542,19 @@ async def _auto_index_loop() -> None:
 @discord_client.event
 async def on_ready():
     logger.info("Logged in as %s", discord_client.user)
+    await voice_meeting_manager.start()
     global auto_index_task
     if AUTO_INDEX_ENABLED and (auto_index_task is None or auto_index_task.done()):
         auto_index_task = asyncio.create_task(_auto_index_loop())
+
+
+@discord_client.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+):
+    await voice_meeting_manager.on_voice_state_update(member, before, after)
 
 
 @discord_client.event
@@ -538,7 +565,29 @@ async def on_message(message: discord.Message):
         return
 
     content = (message.content or "").strip()
+    if voice_meeting_manager.is_voice_chat_channel(message.channel):
+        await voice_meeting_manager.capture_voice_chat_message(message)
+    lower_content = content.lower()
+
+    if lower_content == JOIN_COMMAND:
+        handled = await voice_meeting_manager.maybe_join_from_command(message)
+        if handled:
+            return
+        await message.channel.send("`/ai join` はVCのチャット欄でのみ有効です。")
+        return
+    if lower_content == QUIT_COMMAND:
+        handled = await voice_meeting_manager.maybe_quit_from_command(message)
+        if handled:
+            return
+        await message.channel.send("`/ai quit` はVCのチャット欄でのみ有効です。")
+        return
+
     if content == BUILD_INDEX_COMMAND:
+        if voice_meeting_manager.has_active_session():
+            await message.channel.send(
+                "VC参加中のため、新規のインデックス更新は開始できません。"
+            )
+            return
         if indexing_task and not indexing_task.done():
             await message.channel.send("インデックス更新は既に実行中です。")
             return
@@ -602,7 +651,7 @@ def main() -> None:
         raise RuntimeError("DISCORD_BOT_TOKEN is not set. Please set it in .env")
 
     _warmup_models()
-    discord_client.run(DISCORD_BOT_TOKEN)
+    discord_client.run(DISCORD_BOT_TOKEN, log_handler=None)
 
 
 if __name__ == "__main__":

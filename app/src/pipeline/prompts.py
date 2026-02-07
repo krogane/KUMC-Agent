@@ -10,6 +10,15 @@ from config import AppConfig
 
 def _doc_to_context(doc: Document) -> str:
     metadata = doc.metadata or {}
+    source_type = str(metadata.get("source_type") or "").strip().lower()
+    if source_type == "vc_transcript":
+        meeting_label = str(metadata.get("meeting_label") or "").strip()
+        if meeting_label:
+            return f"meeting: {meeting_label}\n{doc.page_content}"
+        meeting_date = str(metadata.get("meeting_date") or "").strip()
+        if meeting_date:
+            return f"meeting_date: {meeting_date}\n{doc.page_content}"
+        return doc.page_content
     first_message_date = str(metadata.get("first_message_date") or "").strip()
     category_name = str(metadata.get("category_name") or "").strip()
     channel_name = str(metadata.get("channel_name") or "").strip()
