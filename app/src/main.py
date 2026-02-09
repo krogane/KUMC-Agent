@@ -128,6 +128,14 @@ def _extract_query_from_message(message: discord.Message) -> str:
     return ""
 
 
+def _history_scope_for_message(message: discord.Message) -> str:
+    guild = getattr(message, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    if guild_id is not None:
+        return f"guild:{guild_id}"
+    return f"channel:{message.channel.id}"
+
+
 def _warmup_embedding() -> None:
     embeddings = _embedding_factory.get_embeddings()
     embeddings.embed_query("warmup")
@@ -147,6 +155,9 @@ def _warmup_faiss_index() -> None:
 
 
 def _warmup_reranker() -> None:
+    if not APP_CONFIG.rerank_enabled:
+        logger.info("Warmup: cross-encoder reranker skipped (rerank disabled).")
+        return
     model_path = (APP_CONFIG.cross_encoder_model_path or "").strip()
     if not model_path:
         logger.info("Warmup: cross-encoder reranker skipped (model path not set).")
@@ -364,6 +375,8 @@ def _parse_eval_metrics(output: bytes) -> dict[str, float] | None:
 def _format_eval_metrics(metrics: dict[str, float]) -> str:
     preferred_order = [
         "answer_relevancy",
+        "faithfulness",
+        "context_precision",
         "context_recall",
     ]
     parts: list[str] = []
@@ -423,6 +436,7 @@ async def _run_eval(channel: discord.abc.Messageable | None) -> None:
 async def _run_answer(message: discord.Message, query: str) -> None:
     channel = message.channel
     channel_id = channel.id
+    history_scope = _history_scope_for_message(message)
     cancel_event = threading.Event()
     channel_cancel_events[channel_id] = cancel_event
     voice_meeting_manager.notify_rag_started()
@@ -482,6 +496,7 @@ async def _run_answer(message: discord.Message, query: str) -> None:
             on_research_start=_notify_research_start,
             on_memory_start=_notify_memory_start,
             on_research_and_memory_start=_notify_research_and_memory_start,
+            history_scope=history_scope,
             cancel_event=cancel_event,
         )
         if cancel_event.is_set():

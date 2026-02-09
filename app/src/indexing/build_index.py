@@ -5,8 +5,10 @@ import logging
 import shutil
 import sys
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
+from langchain_core.documents import Document
 
 APP_SRC = Path(__file__).resolve().parents[1]
 if str(APP_SRC) not in sys.path:
@@ -26,7 +28,20 @@ from indexing.constants import DOCS_SEPARATORS, MESSAGE_SEPARATORS, SHEETS_SEPAR
 from indexing.discord_loader import download_discord_messages
 from indexing.drive_loader import download_drive_markdown
 from indexing.faiss_index import build_faiss_index
+from indexing.keyword_inverted_index import (
+    KEYWORD_CORPUS_SECOND_REC_SPARSE,
+    KEYWORD_CORPUS_SPARSE,
+    KEYWORD_CORPUS_SPARSE_SECOND_REC,
+    build_and_save_keyword_index,
+    tokenize_sparse_doc,
+)
 from indexing.raptor import raptor_chunk_global
+from indexing.sparse_sources import (
+    second_rec_chunk_dirs,
+    sparse_chunk_dirs,
+    sparse_second_rec_chunk_dirs,
+)
+from sparse_normalizer import SparseNormalizer, SparseNormalizerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +93,67 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
 
     if cfg.clear_raptor_chunk_data and cfg.raptor_chunk_dir.exists():
         _clear_dir_contents(cfg.raptor_chunk_dir)
+
+
+def _build_keyword_inverted_indexes(cfg: AppConfig) -> None:
+    normalizer = SparseNormalizer(
+        config=SparseNormalizerConfig(
+            sudachi_mode=cfg.sudachi_mode,
+            use_normalized_form=cfg.sparse_use_normalized_form,
+            remove_symbols=cfg.sparse_remove_symbols,
+            remove_stopwords=False,
+        )
+    )
+    tokenize_doc = _sparse_doc_tokenizer(normalizer)
+    dir_cache: dict[Path, list[Document]] = {}
+    corpus_to_dirs = [
+        (KEYWORD_CORPUS_SPARSE, sparse_chunk_dirs(cfg)),
+        (KEYWORD_CORPUS_SPARSE_SECOND_REC, sparse_second_rec_chunk_dirs(cfg)),
+        (KEYWORD_CORPUS_SECOND_REC_SPARSE, second_rec_chunk_dirs(cfg)),
+    ]
+
+    for corpus_name, chunk_dirs in corpus_to_dirs:
+        docs = _load_documents_for_dirs(chunk_dirs, dir_cache=dir_cache)
+        build_and_save_keyword_index(
+            index_dir=cfg.index_dir,
+            corpus_name=corpus_name,
+            docs=docs,
+            tokenize_doc=tokenize_doc,
+            k1=cfg.sparse_bm25_k1,
+            b=cfg.sparse_bm25_b,
+        )
+
+
+def _sparse_doc_tokenizer(
+    normalizer: SparseNormalizer,
+) -> Callable[[Document], list[str]]:
+    def _tokenize(doc: Document) -> list[str]:
+        return tokenize_sparse_doc(
+            doc,
+            sparse_stage="second_recursive_sparse",
+            sudachi_tokenize=normalizer.normalize_tokens,
+        )
+
+    return _tokenize
+
+
+def _load_documents_for_dirs(
+    chunk_dirs: list[Path],
+    *,
+    dir_cache: dict[Path, list[Document]],
+) -> list[Document]:
+    docs: list[Document] = []
+    for chunk_dir in chunk_dirs:
+        cached = dir_cache.get(chunk_dir)
+        if cached is None:
+            chunks = load_chunks_from_dirs([chunk_dir])
+            cached = [
+                Document(page_content=chunk.text, metadata=chunk.metadata)
+                for chunk in chunks
+            ]
+            dir_cache[chunk_dir] = cached
+        docs.extend(cached)
+    return docs
 
 
 def main() -> None:
@@ -501,6 +577,7 @@ def main() -> None:
         model_name=cfg.embedding_model,
         index_dir=cfg.index_dir,
     )
+    _build_keyword_inverted_indexes(cfg)
 
 
 if __name__ == "__main__":

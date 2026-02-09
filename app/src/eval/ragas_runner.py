@@ -45,19 +45,35 @@ def run_ragas(
     llm_api_key: str,
     judge_model: str,
     result_path: Path | None,
+    eval_answer_relevancy_enabled: bool,
+    eval_faithfulness_enabled: bool,
+    eval_context_precision_enabled: bool,
+    eval_context_recall_enabled: bool,
 ) -> object:
     try:
         from datasets import Dataset
         from ragas import evaluate
         from ragas.metrics import (
             answer_relevancy,
+            context_precision,
             context_recall,
+            faithfulness,
         )
     except ImportError as e:
         raise RuntimeError("ragas and datasets are required to run evaluation.") from e
 
     dataset = Dataset.from_list(records)
-    metrics = [answer_relevancy, context_recall]
+    metric_options = [
+        ("answer_relevancy", answer_relevancy, eval_answer_relevancy_enabled),
+        ("faithfulness", faithfulness, eval_faithfulness_enabled),
+        ("context_precision", context_precision, eval_context_precision_enabled),
+        ("context_recall", context_recall, eval_context_recall_enabled),
+    ]
+    metrics = [metric for _, metric, enabled in metric_options if enabled]
+    metric_names = [name for name, _, enabled in metric_options if enabled]
+    if not metrics:
+        raise ValueError("At least one RAGAS metric must be enabled.")
+    logger.info("Enabled RAGAS metrics: %s", ", ".join(metric_names))
 
     llm = build_ragas_llm(llm_api_key, judge_model)
     eval_kwargs = {"metrics": metrics}

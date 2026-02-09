@@ -57,6 +57,9 @@ _FINAL_SUMMARY_CHANNEL = "kumc-agent"
 _SUMMARY_SYSTEM_PROMPT = "You are a concise meeting summarization assistant."
 _END_JUDGEMENT_SYSTEM_PROMPT = "You are a meeting end-judgement assistant."
 _FINAL_SUMMARY_SYSTEM_PROMPT = "You are a concise meeting minutes assistant."
+_ANSWER_DISCLAIMER = (
+    "※回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。"
+)
 
 
 class _PauseRequested(RuntimeError):
@@ -91,6 +94,8 @@ class _PostProcessJob:
     meeting_key: str
     transcript_index: int
     transcript_path: Path
+    chunk_start_offset_seconds: float = 0.0
+    chunk_end_offset_seconds: float = 0.0
     is_final_chunk: bool = False
     marker_only: bool = False
 
@@ -113,6 +118,11 @@ class _MeetingArchive:
     meeting_date: str
     meeting_label: str
     summary_chunk_path: Path
+    pending_summary_texts: list[str] = field(default_factory=list)
+    pending_summary_seconds: float = 0.0
+    pending_summary_last_index: int = 0
+    pending_end_judge_texts: list[str] = field(default_factory=list)
+    pending_end_judge_seconds: float = 0.0
 
 
 @dataclass
@@ -417,18 +427,29 @@ class VoiceMeetingManager:
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        bot_user = self._discord_client.user
-        if bot_user is None:
-            return
-        if int(member.id) != int(bot_user.id):
-            return
-
         before_channel = getattr(before, "channel", None)
         if before_channel is None:
             return
 
         session = self._sessions_by_channel.get(before_channel.id)
         if session is None:
+            return
+
+        # Auto-quit when no human participants remain in the active VC.
+        if self._config.vc_auto_quit_enabled and not session.ending:
+            remaining = [m for m in before_channel.members if not getattr(m, "bot", False)]
+            if not remaining:
+                await self._leave_session(
+                    session,
+                    reason="no_participants",
+                    process_final_transcript=True,
+                )
+                return
+
+        bot_user = self._discord_client.user
+        if bot_user is None:
+            return
+        if int(member.id) != int(bot_user.id):
             return
 
         after_channel = getattr(after, "channel", None)
@@ -548,7 +569,10 @@ class VoiceMeetingManager:
             start_monotonic=time.monotonic(),
             meeting_dir=meeting_dir,
             summary_chunk_path=summary_chunk_path,
-            transcript_interval_seconds=max(30, self._config.vc_transcribe_interval_seconds),
+            transcript_interval_seconds=min(
+                max(30, self._config.vc_summary_transcribe_interval_seconds),
+                max(30, self._config.vc_end_judge_transcribe_interval_seconds),
+            ),
         )
 
         sink = _VoiceReceiveSink(
@@ -702,6 +726,7 @@ class VoiceMeetingManager:
         if not session.active and not is_final:
             return
 
+        window_start = session.last_flush_offset
         cutoff = max(0.0, time.monotonic() - session.start_monotonic)
         audio_events, chat_events = self._pop_events_until(session, cutoff=cutoff)
         if not audio_events and not chat_events:
@@ -712,7 +737,7 @@ class VoiceMeetingManager:
             self._build_transcript_lines,
             audio_events,
             chat_events,
-            session.last_flush_offset,
+            window_start,
             cutoff,
         )
         session.last_flush_offset = cutoff
@@ -739,6 +764,8 @@ class VoiceMeetingManager:
                 meeting_key=session.meeting_key,
                 transcript_index=transcript_index,
                 transcript_path=transcript_path,
+                chunk_start_offset_seconds=window_start,
+                chunk_end_offset_seconds=cutoff,
                 is_final_chunk=is_final,
             )
         )
@@ -1024,49 +1051,76 @@ class VoiceMeetingManager:
 
     async def _process_post_job(self, job: _PostProcessJob) -> None:
         self._ensure_post_worker_not_paused()
-        if job.marker_only:
-            return
-
-        transcript_text = (job.transcript_path.read_text(encoding="utf-8") or "").strip()
-        if not transcript_text:
-            return
-
         archive = self._archives.get(job.meeting_key)
         if archive is None:
             return
 
-        summary_text = self._load_existing_summary_for_transcript(
-            summary_chunk_path=archive.summary_chunk_path,
-            transcript_index=job.transcript_index,
-        )
-        if not summary_text:
-            previous_summaries = self._load_recent_summaries(
-                summary_chunk_path=archive.summary_chunk_path,
-                limit=self._config.vc_summary_previous_max,
-            )
-            summary_prompt = build_summary_prompt(
-                transcript_text=transcript_text,
-                previous_summaries=previous_summaries,
-                target_characters=self._config.vc_summary_target_characters,
-            )
-            summary_text = await asyncio.to_thread(
-                self._generate_text_with_cfg,
-                cfg=self._summary_llm_cfg,
-                prompt=summary_prompt,
-                system_prompt=_SUMMARY_SYSTEM_PROMPT,
-                response_mime_type="text/plain",
-            )
-            summary_text = (summary_text or "").strip()
-            if summary_text:
-                self._append_summary_chunk(
+        if job.marker_only:
+            if job.is_final_chunk:
+                await self._generate_summary_from_pending(
                     meeting_key=job.meeting_key,
-                    transcript_index=job.transcript_index,
-                    summary_text=summary_text,
+                    archive=archive,
                 )
+                self._reset_pending_end_judge(archive)
+            return
+
+        transcript_text = (job.transcript_path.read_text(encoding="utf-8") or "").strip()
+        if not transcript_text:
+            if job.is_final_chunk:
+                await self._generate_summary_from_pending(
+                    meeting_key=job.meeting_key,
+                    archive=archive,
+                )
+                self._reset_pending_end_judge(archive)
+            return
+
+        chunk_seconds = max(
+            0.0,
+            job.chunk_end_offset_seconds - job.chunk_start_offset_seconds,
+        )
+        self._queue_pending_summary(
+            archive=archive,
+            transcript_text=transcript_text,
+            transcript_index=job.transcript_index,
+            chunk_seconds=chunk_seconds,
+        )
+        self._queue_pending_end_judge(
+            archive=archive,
+            transcript_text=transcript_text,
+            chunk_seconds=chunk_seconds,
+        )
+
+        should_run_summary = job.is_final_chunk or (
+            archive.pending_summary_seconds
+            >= self._config.vc_summary_transcribe_interval_seconds
+        )
+        if should_run_summary:
+            await self._generate_summary_from_pending(
+                meeting_key=job.meeting_key,
+                archive=archive,
+            )
 
         self._ensure_post_worker_not_paused()
 
-        end_prompt = build_end_judgement_prompt(transcript_text=transcript_text)
+        if job.is_final_chunk:
+            self._reset_pending_end_judge(archive)
+            return
+
+        should_run_end_judge = (
+            archive.pending_end_judge_seconds
+            >= self._config.vc_end_judge_transcribe_interval_seconds
+        )
+        if not should_run_end_judge:
+            return
+
+        pending_end_text = self._build_pending_transcript_text(
+            archive.pending_end_judge_texts
+        )
+        if not pending_end_text:
+            self._reset_pending_end_judge(archive)
+            return
+
+        end_prompt = build_end_judgement_prompt(transcript_text=pending_end_text)
         end_result = await asyncio.to_thread(
             self._generate_text_with_cfg,
             cfg=self._end_llm_cfg,
@@ -1074,6 +1128,7 @@ class VoiceMeetingManager:
             system_prompt=_END_JUDGEMENT_SYSTEM_PROMPT,
             response_mime_type="text/plain",
         )
+        self._reset_pending_end_judge(archive)
 
         is_end = _parse_boolean_output(end_result)
         if not is_end:
@@ -1091,6 +1146,89 @@ class VoiceMeetingManager:
             reason="auto_end_detected",
             process_final_transcript=True,
         )
+
+    async def _generate_summary_from_pending(
+        self,
+        *,
+        meeting_key: str,
+        archive: _MeetingArchive,
+    ) -> None:
+        if archive.pending_summary_last_index <= 0:
+            self._reset_pending_summary(archive)
+            return
+
+        pending_summary_text = self._build_pending_transcript_text(
+            archive.pending_summary_texts
+        )
+        if not pending_summary_text:
+            self._reset_pending_summary(archive)
+            return
+
+        transcript_index = archive.pending_summary_last_index
+        summary_text = self._load_existing_summary_for_transcript(
+            summary_chunk_path=archive.summary_chunk_path,
+            transcript_index=transcript_index,
+        )
+        if not summary_text:
+            previous_summaries = self._load_recent_summaries(
+                summary_chunk_path=archive.summary_chunk_path,
+                limit=self._config.vc_summary_previous_max,
+            )
+            summary_prompt = build_summary_prompt(
+                transcript_text=pending_summary_text,
+                previous_summaries=previous_summaries,
+                target_characters=self._config.vc_summary_target_characters,
+            )
+            summary_text = await asyncio.to_thread(
+                self._generate_text_with_cfg,
+                cfg=self._summary_llm_cfg,
+                prompt=summary_prompt,
+                system_prompt=_SUMMARY_SYSTEM_PROMPT,
+                response_mime_type="text/plain",
+            )
+            summary_text = (summary_text or "").strip()
+            if summary_text:
+                self._append_summary_chunk(
+                    meeting_key=meeting_key,
+                    transcript_index=transcript_index,
+                    summary_text=summary_text,
+                )
+
+        self._reset_pending_summary(archive)
+
+    def _queue_pending_summary(
+        self,
+        *,
+        archive: _MeetingArchive,
+        transcript_text: str,
+        transcript_index: int,
+        chunk_seconds: float,
+    ) -> None:
+        archive.pending_summary_texts.append(transcript_text)
+        archive.pending_summary_seconds += max(0.0, chunk_seconds)
+        archive.pending_summary_last_index = transcript_index
+
+    def _queue_pending_end_judge(
+        self,
+        *,
+        archive: _MeetingArchive,
+        transcript_text: str,
+        chunk_seconds: float,
+    ) -> None:
+        archive.pending_end_judge_texts.append(transcript_text)
+        archive.pending_end_judge_seconds += max(0.0, chunk_seconds)
+
+    def _reset_pending_summary(self, archive: _MeetingArchive) -> None:
+        archive.pending_summary_texts.clear()
+        archive.pending_summary_seconds = 0.0
+        archive.pending_summary_last_index = 0
+
+    def _reset_pending_end_judge(self, archive: _MeetingArchive) -> None:
+        archive.pending_end_judge_texts.clear()
+        archive.pending_end_judge_seconds = 0.0
+
+    def _build_pending_transcript_text(self, chunks: list[str]) -> str:
+        return "\n".join(item.strip() for item in chunks if (item or "").strip()).strip()
 
     def _append_summary_chunk(
         self,
@@ -1157,7 +1295,7 @@ class VoiceMeetingManager:
             )
             return
 
-        await channel.send(text)
+        await channel.send(f"{text}\n\n{_ANSWER_DISCLAIMER}")
 
     def _load_existing_summary_for_transcript(
         self,

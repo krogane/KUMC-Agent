@@ -184,6 +184,10 @@ def main() -> None:
         llm_api_key=llm_api_key,
         judge_model=judge_model,
         result_path=result_path,
+        eval_answer_relevancy_enabled=cfg.eval_answer_relevancy_enabled,
+        eval_faithfulness_enabled=cfg.eval_faithfulness_enabled,
+        eval_context_precision_enabled=cfg.eval_context_precision_enabled,
+        eval_context_recall_enabled=cfg.eval_context_recall_enabled,
     )
 
     metrics = _extract_summary_metrics(result)

@@ -211,6 +211,7 @@ DEFAULT_SPARSE_SEARCH_ORIGINAL_SPARSE_TOP_K: int = (
 )
 DEFAULT_PARENT_DOC_ENABLED: bool = True
 DEFAULT_PARENT_CHUNK_CAP: int = 2
+DEFAULT_RERANK_ENABLED: bool = True
 DEFAULT_RERANK_POOL_SIZE: int = 20
 DEFAULT_MMR_LAMBDA: float = 0.5
 DEFAULT_SUDACHI_MODE: str = "B"
@@ -221,6 +222,10 @@ DEFAULT_SPARSE_REMOVE_SYMBOLS: bool = True
 DEFAULT_SOURCE_MAX_COUNT: int = 3
 DEFAULT_ANSWER_JSON_MAX_RETRIES: int = 2
 DEFAULT_ANSWER_RESEARCH_MAX_RETRIES: int = 3
+DEFAULT_EVAL_ANSWER_RELEVANCY_ENABLED: bool = True
+DEFAULT_EVAL_FAITHFULNESS_ENABLED: bool = True
+DEFAULT_EVAL_CONTEXT_PRECISION_ENABLED: bool = True
+DEFAULT_EVAL_CONTEXT_RECALL_ENABLED: bool = True
 
 # Query Transform Settings
 DEFAULT_QUERY_TRANSFORM_ENABLED: bool = False
@@ -243,6 +248,7 @@ DEFAULT_AUTO_INDEX_TIME: str = "03:00"
 DEFAULT_AUTO_INDEX_WEEKDAYS: str = "mon,tue,wed,thu,fri"
 DEFAULT_DISCORD_GUILD_ALLOW_LIST: str = ""
 DEFAULT_MAX_INPUT_CHARACTERS: int = 0
+DEFAULT_PROMPT_FULL_LOG_ENABLED: bool = True
 
 # VC Meeting Settings
 DEFAULT_VC_FEATURE_ENABLED: bool = False
@@ -253,7 +259,8 @@ DEFAULT_VC_AUTO_JOIN_DURATION_MINUTES: int = 30
 DEFAULT_VC_TARGET_VOICE_CHANNEL_NAME: str = "例会"
 DEFAULT_VC_AUTO_JOIN_MIN_PARTICIPANTS: int = 3
 DEFAULT_VC_PARTICIPANT_CHECK_INTERVAL_SECONDS: int = 10
-DEFAULT_VC_TRANSCRIBE_INTERVAL_SECONDS: int = 300
+DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS: int = 300
+DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS: int = 60
 DEFAULT_VC_TRANSCRIBE_MODEL: str = "kotoba-tech/kotoba-whisper-v2.2"
 DEFAULT_VC_TRANSCRIBE_DEVICE: str = "auto"
 DEFAULT_VC_TRANSCRIBE_TORCH_DTYPE: str = "auto"
@@ -645,6 +652,7 @@ class AppConfig:
     )
     parent_doc_enabled: bool = DEFAULT_PARENT_DOC_ENABLED
     parent_chunk_cap: int = DEFAULT_PARENT_CHUNK_CAP
+    rerank_enabled: bool = DEFAULT_RERANK_ENABLED
     rerank_pool_size: int = DEFAULT_RERANK_POOL_SIZE
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
     sudachi_mode: str = DEFAULT_SUDACHI_MODE
@@ -655,7 +663,16 @@ class AppConfig:
     source_max_count: int = DEFAULT_SOURCE_MAX_COUNT
     answer_json_max_retries: int = DEFAULT_ANSWER_JSON_MAX_RETRIES
     answer_research_max_retries: int = DEFAULT_ANSWER_RESEARCH_MAX_RETRIES
+    eval_answer_relevancy_enabled: bool = (
+        DEFAULT_EVAL_ANSWER_RELEVANCY_ENABLED
+    )
+    eval_faithfulness_enabled: bool = DEFAULT_EVAL_FAITHFULNESS_ENABLED
+    eval_context_precision_enabled: bool = (
+        DEFAULT_EVAL_CONTEXT_PRECISION_ENABLED
+    )
+    eval_context_recall_enabled: bool = DEFAULT_EVAL_CONTEXT_RECALL_ENABLED
     max_input_characters: int = DEFAULT_MAX_INPUT_CHARACTERS
+    prompt_full_log_enabled: bool = DEFAULT_PROMPT_FULL_LOG_ENABLED
     query_transform_enabled: bool = DEFAULT_QUERY_TRANSFORM_ENABLED
     query_transform_provider: str = DEFAULT_QUERY_TRANSFORM_PROVIDER
     query_transform_gemini_model: str = DEFAULT_QUERY_TRANSFORM_GEMINI_MODEL
@@ -698,8 +715,11 @@ class AppConfig:
     vc_participant_check_interval_seconds: int = (
         DEFAULT_VC_PARTICIPANT_CHECK_INTERVAL_SECONDS
     )
-    vc_transcribe_interval_seconds: int = (
-        DEFAULT_VC_TRANSCRIBE_INTERVAL_SECONDS
+    vc_summary_transcribe_interval_seconds: int = (
+        DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS
+    )
+    vc_end_judge_transcribe_interval_seconds: int = (
+        DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS
     )
     vc_transcribe_model: str = DEFAULT_VC_TRANSCRIBE_MODEL
     vc_transcribe_device: str = DEFAULT_VC_TRANSCRIBE_DEVICE
@@ -847,6 +867,7 @@ class AppConfig:
         sparse_search_original_sparse_top_k: int | None = None,
         parent_doc_enabled: bool | None = None,
         parent_chunk_cap: int | None = None,
+        rerank_enabled: bool | None = None,
         rerank_pool_size: int | None = None,
         mmr_lambda: float | None = None,
         sudachi_mode: str | None = None,
@@ -857,7 +878,12 @@ class AppConfig:
         source_max_count: int | None = None,
         answer_json_max_retries: int | None = None,
         answer_research_max_retries: int | None = None,
+        eval_answer_relevancy_enabled: bool | None = None,
+        eval_faithfulness_enabled: bool | None = None,
+        eval_context_precision_enabled: bool | None = None,
+        eval_context_recall_enabled: bool | None = None,
         max_input_characters: int | None = None,
+        prompt_full_log_enabled: bool | None = None,
         query_transform_enabled: bool | None = None,
         query_transform_provider: str | None = None,
         query_transform_gemini_model: str | None = None,
@@ -1210,6 +1236,19 @@ class AppConfig:
             vc_auto_join_weekdays_value,
             default=DEFAULT_VC_AUTO_JOIN_WEEKDAYS,
         )
+        legacy_vc_transcribe_interval_seconds = os.getenv(
+            "VC_TRANSCRIBE_INTERVAL_SECONDS"
+        )
+        vc_summary_transcribe_interval_default = (
+            legacy_vc_transcribe_interval_seconds
+            if legacy_vc_transcribe_interval_seconds is not None
+            else str(DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS)
+        )
+        vc_end_judge_transcribe_interval_default = (
+            legacy_vc_transcribe_interval_seconds
+            if legacy_vc_transcribe_interval_seconds is not None
+            else str(DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS)
+        )
         discord_guild_allow_list_value = (
             discord_guild_allow_list
             if discord_guild_allow_list is not None
@@ -1553,6 +1592,12 @@ class AppConfig:
             else int(
                 os.getenv("PARENT_CHUNK_CAP", str(DEFAULT_PARENT_CHUNK_CAP))
             ),
+            rerank_enabled=rerank_enabled
+            if rerank_enabled is not None
+            else _env_bool(
+                os.getenv("RERANK_ENABLED"),
+                DEFAULT_RERANK_ENABLED,
+            ),
             rerank_pool_size=rerank_pool_size
             if rerank_pool_size is not None
             else int(
@@ -1609,6 +1654,30 @@ class AppConfig:
                     str(DEFAULT_ANSWER_RESEARCH_MAX_RETRIES),
                 )
             ),
+            eval_answer_relevancy_enabled=eval_answer_relevancy_enabled
+            if eval_answer_relevancy_enabled is not None
+            else _env_bool(
+                os.getenv("EVAL_ANSWER_RELEVANCY_ENABLED"),
+                DEFAULT_EVAL_ANSWER_RELEVANCY_ENABLED,
+            ),
+            eval_faithfulness_enabled=eval_faithfulness_enabled
+            if eval_faithfulness_enabled is not None
+            else _env_bool(
+                os.getenv("EVAL_FAITHFULNESS_ENABLED"),
+                DEFAULT_EVAL_FAITHFULNESS_ENABLED,
+            ),
+            eval_context_precision_enabled=eval_context_precision_enabled
+            if eval_context_precision_enabled is not None
+            else _env_bool(
+                os.getenv("EVAL_CONTEXT_PRECISION_ENABLED"),
+                DEFAULT_EVAL_CONTEXT_PRECISION_ENABLED,
+            ),
+            eval_context_recall_enabled=eval_context_recall_enabled
+            if eval_context_recall_enabled is not None
+            else _env_bool(
+                os.getenv("EVAL_CONTEXT_RECALL_ENABLED"),
+                DEFAULT_EVAL_CONTEXT_RECALL_ENABLED,
+            ),
             max_input_characters=max(
                 0,
                 max_input_characters
@@ -1619,6 +1688,12 @@ class AppConfig:
                         str(DEFAULT_MAX_INPUT_CHARACTERS),
                     )
                 ),
+            ),
+            prompt_full_log_enabled=prompt_full_log_enabled
+            if prompt_full_log_enabled is not None
+            else _env_bool(
+                os.getenv("PROMPT_FULL_LOG_ENABLED"),
+                DEFAULT_PROMPT_FULL_LOG_ENABLED,
             ),
             query_transform_enabled=query_transform_enabled
             if query_transform_enabled is not None
@@ -1757,12 +1832,21 @@ class AppConfig:
                     )
                 ),
             ),
-            vc_transcribe_interval_seconds=max(
+            vc_summary_transcribe_interval_seconds=max(
                 30,
                 int(
                     os.getenv(
-                        "VC_TRANSCRIBE_INTERVAL_SECONDS",
-                        str(DEFAULT_VC_TRANSCRIBE_INTERVAL_SECONDS),
+                        "VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS",
+                        vc_summary_transcribe_interval_default,
+                    )
+                ),
+            ),
+            vc_end_judge_transcribe_interval_seconds=max(
+                30,
+                int(
+                    os.getenv(
+                        "VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS",
+                        vc_end_judge_transcribe_interval_default,
                     )
                 ),
             ),
