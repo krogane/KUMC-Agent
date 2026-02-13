@@ -5,6 +5,7 @@ import sys
 import threading
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import discord
 from langchain_core.documents import Document
@@ -38,6 +39,7 @@ EVAL_COMMAND = "/ai eval"
 STOP_COMMAND = "/ai stop"
 EVAL_SCRIPT_PATH = APP_CONFIG.base_dir / "app" / "src" / "eval" / "evaluate_ragas.py"
 EVAL_METRICS_PREFIX = "EVAL_METRICS_JSON:"
+AUTO_INDEX_TIMEZONE = ZoneInfo("Asia/Tokyo")
 AUTO_INDEX_ENABLED = APP_CONFIG.auto_index_enabled
 AUTO_INDEX_WEEKDAYS = APP_CONFIG.auto_index_weekdays
 AUTO_INDEX_HOUR = APP_CONFIG.auto_index_hour
@@ -528,15 +530,16 @@ def _should_run_auto_index(now: datetime) -> bool:
 async def _auto_index_loop() -> None:
     global auto_index_last_run, indexing_task, is_indexing, indexing_stop_requested
     logger.info(
-        "Auto index scheduler started. enabled=%s time=%02d:%02d weekdays=%s",
+        "Auto index scheduler started. enabled=%s time=%02d:%02d weekdays=%s timezone=%s",
         AUTO_INDEX_ENABLED,
         AUTO_INDEX_HOUR,
         AUTO_INDEX_MINUTE,
         ",".join(str(day) for day in AUTO_INDEX_WEEKDAYS) or "all",
+        AUTO_INDEX_TIMEZONE.key,
     )
     while True:
         await asyncio.sleep(20)
-        now = datetime.now()
+        now = datetime.now(AUTO_INDEX_TIMEZONE)
         if not _should_run_auto_index(now):
             continue
         if indexing_task and not indexing_task.done():
