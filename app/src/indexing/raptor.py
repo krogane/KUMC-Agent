@@ -583,6 +583,15 @@ def _build_summary_metadata(
         "drive_file_id": common_or_mixed(
             [str(chunk.metadata.get("drive_file_id", "")) for chunk in chunks]
         ),
+        "hatenablog_title": common_or_mixed(
+            [str(chunk.metadata.get("hatenablog_title", "")) for chunk in chunks]
+        ),
+        "hatenablog_created_at": common_or_mixed(
+            [str(chunk.metadata.get("hatenablog_created_at", "")) for chunk in chunks]
+        ),
+        "hatenablog_url": common_or_mixed(
+            [str(chunk.metadata.get("hatenablog_url", "")) for chunk in chunks]
+        ),
         "chunk_stage": "raptor",
         "raptor_level": level,
         "raptor_cluster_id": cluster_id,
@@ -594,6 +603,9 @@ def _format_chunk_for_prompt(*, chunk: Chunk, include_drive_path: bool) -> str:
     text = chunk.text.strip()
     if not text:
         return ""
+    hatenablog_title = str(chunk.metadata.get("hatenablog_title") or "").strip()
+    if hatenablog_title:
+        text = f"{text}\nhatenablog_title: {hatenablog_title}"
     if not include_drive_path:
         return text
     drive_path = str(chunk.metadata.get("drive_file_path") or "")

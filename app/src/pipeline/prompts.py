@@ -19,6 +19,21 @@ def _doc_to_context(doc: Document) -> str:
         if meeting_date:
             return f"meeting_date: {meeting_date}\n{doc.page_content}"
         return doc.page_content
+    if source_type == "hatenablog":
+        lines: list[str] = []
+        title = str(metadata.get("hatenablog_title") or "").strip()
+        if title:
+            lines.append(f"hatenablog_title: {title}")
+        created_at = str(metadata.get("hatenablog_created_at") or "").strip()
+        if created_at:
+            lines.append(f"hatenablog_created_at: {created_at}")
+        url = str(metadata.get("hatenablog_url") or "").strip()
+        if url:
+            lines.append(f"hatenablog_url: {url}")
+        if lines:
+            header = "\n".join(lines)
+            return f"{header}\n{doc.page_content}"
+        return doc.page_content
     first_message_date = str(metadata.get("first_message_date") or "").strip()
     category_name = str(metadata.get("category_name") or "").strip()
     channel_name = str(metadata.get("channel_name") or "").strip()

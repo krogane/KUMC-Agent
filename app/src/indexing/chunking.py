@@ -43,6 +43,9 @@ _METADATA_KEYS = (
     "drive_mime_type",
     "drive_file_path",
     "drive_file_id",
+    "hatenablog_title",
+    "hatenablog_created_at",
+    "hatenablog_url",
 )
 
 
@@ -69,7 +72,15 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
         return {}
 
     metadata: dict[str, str] = {}
-    for key in ("drive_file_id", "drive_file_name", "drive_path", "drive_mime_type"):
+    for key in (
+        "drive_file_id",
+        "drive_file_name",
+        "drive_path",
+        "drive_mime_type",
+        "hatenablog_title",
+        "hatenablog_created_at",
+        "hatenablog_url",
+    ):
         value = data.get(key)
         if isinstance(value, str) and value:
             metadata[key] = value
@@ -99,6 +110,9 @@ def _build_base_metadata(
         "drive_mime_type": drive_mime_type,
         "drive_file_path": drive_file_path,
         "drive_file_id": drive_file_id,
+        "hatenablog_title": drive_metadata.get("hatenablog_title", ""),
+        "hatenablog_created_at": drive_metadata.get("hatenablog_created_at", ""),
+        "hatenablog_url": drive_metadata.get("hatenablog_url", ""),
     }
 
 

@@ -1,10 +1,11 @@
 # KUMC-Agent
-KUMCが保有する情報をGoogle DriveとDiscordから収集し、RAGで回答するDiscordボットです。
+KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収集し、RAGで回答するDiscordボットです。
 ローカルの`llama.cpp`またはGeminiを使った回答生成に対応し、Index構築・評価（ragas）まで一通りの流れが揃っています。
 
 ## 主な機能
 - Google DriveのDocs/SheetsをMarkdown/CSVとして取得（更新差分を判定）
 - Discordメッセージログの取得（Botトークンがある場合、ギルド絞り込み可）
+- はてなブログ（`https://kumc.hatenablog.com/`）の記事取得（更新差分を判定）
 - Chunking: First/Second Recursive、Summery（要約）、Proposition、RAPTOR
 - 検索: FAISSのDense + BM25（Sudachi）のSparse、Cross-Encoder再ランク、MMR多様化
 - ルーティング: Function CallingでRAG / No-RAGを自動切替
@@ -17,12 +18,13 @@ KUMCが保有する情報をGoogle DriveとDiscordから収集し、RAGで回答
 1. (任意) 既存データのクリア
 2. Discordメッセージ取得（`DISCORD_BOT_TOKEN` がある場合）
 3. Google DriveのDocs/Sheets取得（`app/data/raw`）
-4. First Recursive Chunking（`app/data/first_rec_chunk`）
-5. (任意) Second Recursive Chunking（`app/data/second_rec_chunk`）
-6. (任意) Summery Chunking（`app/data/summery_chunk`）
-7. (任意) Proposition Chunking（`app/data/prop_chunk`、Second Rec必須）
-8. (任意) RAPTOR要約（`app/data/raptor_chunk`）
-9. すべてのChunkをEmbeddingしてFAISS索引を作成（`app/data/index`）
+4. はてなブログ記事取得（`app/data/raw/hatenablog`）
+5. First Recursive Chunking（`app/data/first_rec_chunk`）
+6. (任意) Second Recursive Chunking（`app/data/second_rec_chunk`）
+7. (任意) Summery Chunking（`app/data/summery_chunk`）
+8. (任意) Proposition Chunking（`app/data/prop_chunk`、Second Rec必須）
+9. (任意) RAPTOR要約（`app/data/raptor_chunk`）
+10. すべてのChunkをEmbeddingしてFAISS索引を作成（`app/data/index`）
 
 ### Query
 1. Function CallingでRAG使用可否を判定（無効化可）
@@ -38,7 +40,7 @@ KUMCが保有する情報をGoogle DriveとDiscordから収集し、RAGで回答
 - `app/src/pipeline/`: RAG推論パイプライン
 - `app/src/indexing/`: Drive/Discord取得・Chunking・RAPTOR・FAISS
 - `app/src/eval/`: Ragas評価スクリプト
-- `app/data/raw`: 取得データ（docs/sheets/messages）
+- `app/data/raw`: 取得データ（docs/sheets/messages/hatenablog）
 - `app/data/first_rec_chunk`, `second_rec_chunk`, `summery_chunk`, `prop_chunk`, `raptor_chunk`
 - `app/data/index`: FAISS索引
 - `app/data/eval`: 評価データと結果
@@ -203,6 +205,7 @@ python app/src/eval/evaluate_ragas.py
 
 ### Indexing (`app/src/indexing/`)
 - `drive_loader.py`: Google DriveのDocs/Sheetsを取得（Markdown/CSV）
+- `hatenablog_loader.py`: はてなブログ記事を取得（本文テキスト）
 - `discord_loader.py`: Discordログ取得（URL除去・メンション置換）
 - `chunking.py`: Recursive / Summery / Proposition Chunking
 - `raptor.py`: Embedding → k-meansクラスタリング → 要約を反復

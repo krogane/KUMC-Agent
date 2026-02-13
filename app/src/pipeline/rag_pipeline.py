@@ -1831,6 +1831,8 @@ class RagPipeline:
         for doc in docs:
             ref = _discord_url_from_metadata(doc.metadata)
             if not ref:
+                ref = _hatenablog_url_from_metadata(doc.metadata)
+            if not ref:
                 ref = _drive_url_from_metadata(doc.metadata)
             if not ref:
                 ref = _vc_source_label_from_metadata(doc.metadata)
@@ -2035,6 +2037,13 @@ def _drive_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     else:
         base = "https://docs.google.com/document/d/"
     return f"{base}{file_id}/"
+
+
+def _hatenablog_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
+    if not metadata:
+        return None
+    url = str(metadata.get("hatenablog_url") or "").strip()
+    return url or None
 
 
 def _discord_url_from_metadata(metadata: dict[str, object] | None) -> str | None:

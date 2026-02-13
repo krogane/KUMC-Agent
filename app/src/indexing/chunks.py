@@ -19,6 +19,13 @@ def chunk_embedding_text(chunk: Chunk) -> str:
     text = (chunk.text or "").strip()
     metadata_lines: list[str] = []
     source_type = str(chunk.metadata.get("source_type") or "").strip().lower()
+    if source_type == "hatenablog":
+        title = str(chunk.metadata.get("hatenablog_title") or "").strip()
+        if title:
+            metadata_lines.append(f"hatenablog_title: {title}")
+        created_at = str(chunk.metadata.get("hatenablog_created_at") or "").strip()
+        if created_at:
+            metadata_lines.append(f"hatenablog_created_at: {created_at}")
     if source_type == "vc_transcript":
         meeting_label = str(chunk.metadata.get("meeting_label") or "").strip()
         if meeting_label:
