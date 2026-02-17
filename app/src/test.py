@@ -28,7 +28,7 @@ def _build_pipeline() -> RagPipeline:
 
 
 def _answer_once(*, pipeline: RagPipeline, query: str) -> None:
-    answer = pipeline.answer(query)
+    answer = pipeline.answer_with_routing(query)
     print(answer)
 
 

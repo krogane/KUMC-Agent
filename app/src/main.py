@@ -12,14 +12,9 @@ from langchain_core.documents import Document
 
 from pipeline.rag_pipeline import GenerationCancelled, RagPipeline
 from config import AppConfig, EmbeddingFactory
-from indexing.llm_client import generate_text
 from pipeline.function_calling import decide_tools
 from pipeline.llm_clients import (
     generate_with_llama_config,
-)
-from pipeline.prompts import (
-    QUERY_TRANSFORM_SYSTEM_PROMPT,
-    build_query_transform_prompt,
 )
 from vc import VoiceMeetingManager
 
@@ -228,36 +223,54 @@ def _warmup_no_rag_llm() -> None:
     )
 
 
-def _warmup_query_transform_llm() -> None:
-    provider = (APP_CONFIG.query_transform_provider or "").lower()
+def _warmup_refusal_llm() -> None:
+    provider = (APP_CONFIG.refusal_llm_provider or "").lower()
     if provider == "gemini":
         logger.info(
-            "Warmup: query transform skipped (Gemini API warmup is disabled)."
+            "Warmup: refusal LLM skipped (Gemini API warmup is disabled)."
         )
         return
+    if provider == "llama":
+        generate_with_llama_config(
+            messages=[
+                {"role": "system", "content": "You are a refusal warmup assistant."},
+                {"role": "user", "content": "hello"},
+            ],
+            model_path=APP_CONFIG.refusal_llama_model_path,
+            ctx_size=APP_CONFIG.refusal_llama_ctx_size,
+            threads=APP_CONFIG.llama_threads,
+            gpu_layers=APP_CONFIG.llama_gpu_layers,
+            temperature=APP_CONFIG.refusal_temperature,
+            max_output_tokens=_warmup_max_tokens(
+                APP_CONFIG.refusal_max_output_tokens
+            ),
+            stop=["\n---"],
+        )
+        return
+    raise ValueError(
+        f"Unsupported refusal_llm_provider: {APP_CONFIG.refusal_llm_provider}"
+    )
+
+
+def _warmup_rag_idea_llm() -> None:
+    provider = (APP_CONFIG.llm_provider or "").lower()
     if provider != "llama":
-        logger.info(
-            "Warmup: query transform skipped (unsupported provider=%s).",
-            APP_CONFIG.query_transform_provider,
-        )
+        logger.info("Warmup: rag-idea LLM skipped (provider=%s).", provider)
         return
-    prompt = build_query_transform_prompt(query="warmup")
-    generate_text(
-        provider=provider,
-        api_key=GEMINI_API_KEY or "",
-        prompt=prompt,
-        model=APP_CONFIG.query_transform_llama_model,
-        system_prompt=QUERY_TRANSFORM_SYSTEM_PROMPT,
-        llama_model_path=APP_CONFIG.query_transform_llama_model_path,
-        llama_ctx_size=APP_CONFIG.query_transform_llama_ctx_size,
-        temperature=APP_CONFIG.query_transform_temperature,
+    generate_with_llama_config(
+        messages=[
+            {"role": "system", "content": "You are a creative warmup assistant."},
+            {"role": "user", "content": "hello"},
+        ],
+        model_path=APP_CONFIG.llama_model_path,
+        ctx_size=APP_CONFIG.llama_ctx_size,
+        threads=APP_CONFIG.llama_threads,
+        gpu_layers=APP_CONFIG.llama_gpu_layers,
+        temperature=APP_CONFIG.rag_idea_temperature,
         max_output_tokens=_warmup_max_tokens(
-            APP_CONFIG.query_transform_max_output_tokens
+            APP_CONFIG.max_output_tokens
         ),
-        thinking_level=APP_CONFIG.thinking_level,
-        llama_threads=APP_CONFIG.llama_threads,
-        llama_gpu_layers=APP_CONFIG.llama_gpu_layers,
-        response_mime_type="text/plain",
+        stop=["\n---"],
     )
 
 
@@ -277,7 +290,8 @@ def _warmup_models(*, trigger: str) -> None:
             ("function_calling", _warmup_function_calling),
             ("answer_llm", _warmup_answer_llm),
             ("no_rag_llm", _warmup_no_rag_llm),
-            ("query_transform_llm", _warmup_query_transform_llm),
+            ("refusal_llm", _warmup_refusal_llm),
+            ("rag_idea_llm", _warmup_rag_idea_llm),
         ]
         for name, action in steps:
             try:

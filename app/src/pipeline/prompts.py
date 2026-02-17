@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from typing import Literal, Sequence
 
 from langchain_core.documents import Document
 
-from config import AppConfig
+from config import AppConfig, get_required_prompt_env
+
+
+PromptMode = Literal["rag", "rag_idea", "no_rag", "refusal"]
+
+
+_OUTPUT_INSTRUCTIONS_ENV_BY_MODE: dict[PromptMode, str] = {
+    "rag": "PROMPT_OUTPUT_INSTRUCTIONS_RAG",
+    "rag_idea": "PROMPT_OUTPUT_INSTRUCTIONS_RAG_IDEA",
+    "no_rag": "PROMPT_OUTPUT_INSTRUCTIONS_NO_RAG",
+    "refusal": "PROMPT_OUTPUT_INSTRUCTIONS_REFUSAL",
+}
+
+_MODE_INSTRUCTIONS_ENV_BY_MODE: dict[PromptMode, str] = {
+    "rag": "PROMPT_MODE_INSTRUCTIONS_RAG",
+    "rag_idea": "PROMPT_MODE_INSTRUCTIONS_RAG_IDEA",
+    "no_rag": "PROMPT_MODE_INSTRUCTIONS_NO_RAG",
+    "refusal": "PROMPT_MODE_INSTRUCTIONS_REFUSAL",
+}
 
 
 def _doc_to_context(doc: Document) -> str:
@@ -65,29 +83,21 @@ def doc_to_context(doc: Document) -> str:
 
 def format_doc_context(docs: Sequence[Document]) -> str:
     if not docs:
-        return "(コンテキストなし)"
+        return get_required_prompt_env("PROMPT_EMPTY_CONTEXT")
     parts: list[str] = []
     for idx, doc in enumerate(docs, start=1):
         parts.append(f"[{idx}]\n{doc_to_context(doc)}")
     return "\n\n---\n\n".join(parts)
 
 
-def format_output_instructions() -> str:
-    return (
-        "JSONのみで出力してください。説明文やコードフェンスは不要です。answerには必要に応じて改行などを含めて可読性を高めてください。\n"
-        "answer には `<@123...>` / `<@!123...>` / `<@&123...>` のようなメンション記法を絶対に含めないでください。\n"
-        "answer にはコンテキスト番号（[1]など）を含めないでください。"
-        "コンテキストに必要なサークル関連情報が含まれていない場合や、回答に追加のコンテキストがあると望ましい場合は、 follow_up_queries に具体的な追加検索クエリを複数入れてください。十分な場合は [] を入れてください。\n"
-        "回答に追加のチャット履歴があると望ましい場合（例: 質問に指示語が含まれている・質問の文脈が曖昧・質問が過去のチャットに関連する）は needs_additional_memory を true にしてください。不要なら false を入れてください。\n"
-        "氏名と思われる単語は回答に含めないでください（ユーザーネームは回答に含めてよい）。\n"
-        "質問と同じ言語で回答してください。たとえば、英語で質問されたら英語で回答します。",
-        "出力形式:\n"
-        "{\"answer\": \"...\", \"sources\": [2], \"follow_up_queries\": [\"...\"], \"needs_additional_memory\": false}\n"
-        "- answer: 質問への回答。\n"
-        "- sources: 回答に直接参照したコンテキストの番号（[1]のような番号）の配列。根拠がない場合は []。\n"
-        "- follow_up_queries: 追加検索が必要な場合の具体的な検索クエリの配列。不要なら []。\n"
-        "- needs_additional_memory: 追加のチャット履歴が必要かどうか。\n"
-    )
+def format_output_instructions(*, mode: PromptMode) -> str:
+    common = get_required_prompt_env("PROMPT_OUTPUT_INSTRUCTIONS_COMMON")
+    mode_specific = get_required_prompt_env(_OUTPUT_INSTRUCTIONS_ENV_BY_MODE[mode])
+    return f"{common}\n{mode_specific}"
+
+
+def format_mode_instructions(*, mode: PromptMode) -> str:
+    return get_required_prompt_env(_MODE_INSTRUCTIONS_ENV_BY_MODE[mode])
 
 
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
@@ -114,43 +124,46 @@ def format_chat_history(
     include_sources: bool = True,
 ) -> str:
     if not history:
-        return "(履歴なし)"
+        return get_required_prompt_env("PROMPT_EMPTY_HISTORY")
     parts: list[str] = []
     for user_text, assistant_text, sources in history:
         user_value = (user_text or "").strip()
         assistant_value = (assistant_text or "").strip()
         turn_parts: list[str] = []
         if user_value:
-            turn_parts.append(f"ユーザー: {user_value}")
+            turn_parts.append(
+                f"{get_required_prompt_env('PROMPT_HISTORY_USER_PREFIX')}{user_value}"
+            )
         if assistant_value:
-            turn_parts.append(f"アシスタント: {assistant_value}")
+            turn_parts.append(
+                f"{get_required_prompt_env('PROMPT_HISTORY_ASSISTANT_PREFIX')}{assistant_value}"
+            )
         if include_sources and sources:
             cleaned_sources = _clean_history_sources(sources)
             if cleaned_sources:
-                turn_parts.append("参照ソース:")
+                turn_parts.append(get_required_prompt_env("PROMPT_HISTORY_SOURCES_LABEL"))
                 turn_parts.append("\n\n---\n\n".join(cleaned_sources))
         if turn_parts:
             parts.append("\n".join(turn_parts))
-    return "\n\n".join(parts) if parts else "(履歴なし)"
+    return "\n\n".join(parts) if parts else get_required_prompt_env("PROMPT_EMPTY_HISTORY")
 
 
 def format_retry_history(history: Sequence[tuple[str, str]]) -> str:
     if not history:
-        return "(履歴なし)"
+        return get_required_prompt_env("PROMPT_EMPTY_HISTORY")
     parts: list[str] = []
     for user_text, assistant_text in history:
         user_value = (user_text or "").strip()
         assistant_value = (assistant_text or "").strip()
         if user_value:
-            parts.append(f"ユーザー: {user_value}")
+            parts.append(
+                f"{get_required_prompt_env('PROMPT_HISTORY_USER_PREFIX')}{user_value}"
+            )
         if assistant_value:
-            parts.append(f"アシスタント: {assistant_value}")
-    return "\n".join(parts) if parts else "(履歴なし)"
-
-
-QUERY_TRANSFORM_SYSTEM_PROMPT = (
-    "You are a query keyword conversion assistant."
-)
+            parts.append(
+                f"{get_required_prompt_env('PROMPT_HISTORY_ASSISTANT_PREFIX')}{assistant_value}"
+            )
+    return "\n".join(parts) if parts else get_required_prompt_env("PROMPT_EMPTY_HISTORY")
 
 
 def history_to_messages(
@@ -172,115 +185,128 @@ def history_to_messages(
                 cleaned_sources = _clean_history_sources(sources)
                 if cleaned_sources:
                     assistant_parts.append(
-                        "参照ソース:\n" + "\n\n---\n\n".join(cleaned_sources)
+                        f"{get_required_prompt_env('PROMPT_HISTORY_SOURCES_LABEL')}\n"
+                        + "\n\n---\n\n".join(cleaned_sources)
                     )
             messages.append(
                 {"role": "assistant", "content": "\n\n".join(assistant_parts)}
             )
     return messages
 
-
-def build_query_transform_prompt(*, query: str) -> str:
-    return (
-        "あなたは検索クエリ生成器です。質問に答えず、クエリに関連する追加キーワードのみを出力してください。\n"
-        "- 出力は半角スペース区切りのキーワードのみ。\n"
-        "- 固有名詞は改変せず、推測で新しい固有名詞を作らない。\n"
-        "- キーワードは最大で10個。\n"
-        "- 余計な説明、記号、引用符、JSON、箇条書きは禁止。\n\n"
-        "## クエリ\n"
-        "2024/11/30例会で『openにするかclosedにするか』はどう結論づいた？理由も簡潔に。\n"
-        "## 出力\n"
-        "例会 議事録 運営方針 公開範囲 決定 理由 背景\n\n"
-        "## クエリ\n"
-        "北田さんプロジェクトの双方のタスクについてまとめて\n"
-        "## 出力\n"
-        "プロジェクト 役割 一覧 進捗 担当 作業\n\n"
-        "## クエリ\n"
-        "NFの企画登録会はいつ開催で、参加できる時間帯は？\n"
-        "## 出力\n"
-        "企画登録会 日程 時間帯 スケジュール 告知\n\n"
-        "## クエリ\n"
-        "京大RPGについて\n"
-        "## 出力\n"
-        "企画 ゲーム 制作 イベント 発表\n\n"
-        "## クエリ\n"
-        "団体広報原稿によると、主な活動場所はどこで、入会希望者はどこから連絡すればよい？\n"
-        "## 出力\n"
-        "団体 広報 原稿 活動場所 拠点 連絡先 問い合わせ 案内\n\n"
-        f"## クエリ\n{query}\n"
-        "## 出力\n"
-    )
-
-
 def build_gemini_prompt(
     *,
     query: str,
+    prompt_mode: PromptMode,
     docs: list[Document],
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
     circle_basic_info: str = "",
     chatbot_capabilities_info: str = "",
+    include_capabilities_info: bool = True,
     include_history_sources: bool = True,
 ) -> str:
     context = format_doc_context(docs)
     sections: list[str] = []
     if history is not None:
         sections.append(
-            "# チャット履歴\n"
+            f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_CHAT_HISTORY')}\n"
             f"{format_chat_history(history, include_sources=include_history_sources)}"
         )
     if retry_history:
         sections.append(
-            f"# 再検索前の質問と回答\n{format_retry_history(retry_history)}"
+            f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_RETRY_HISTORY')}\n"
+            f"{format_retry_history(retry_history)}"
         )
     basic_info = (circle_basic_info or "").strip()
     if basic_info:
-        sections.append(f"# サークルの基本情報\n{basic_info}")
-    capabilities_info = (chatbot_capabilities_info or "").strip()
+        sections.append(
+            f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_CIRCLE_INFO')}\n{basic_info}"
+        )
+    capabilities_info = (
+        (chatbot_capabilities_info or "").strip()
+        if include_capabilities_info
+        else ""
+    )
     if capabilities_info:
         sections.append(
-            f"# チャットボット自身の機能情報\n{capabilities_info}"
+            f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_CAPABILITIES')}\n"
+            f"{capabilities_info}"
         )
-    sections.append(f"# コンテキスト\n{context}")
-    sections.append(f"# 出力形式\n{format_output_instructions()}")
-    sections.append(f"# 質問\n{query}")
+    sections.append(f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_CONTEXT')}\n{context}")
+    sections.append(
+        f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_OUTPUT_FORMAT')}\n"
+        f"{format_output_instructions(mode=prompt_mode)}"
+    )
+    sections.append(
+        f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_INSTRUCTIONS')}\n"
+        f"{format_mode_instructions(mode=prompt_mode)}"
+    )
+    sections.append(f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_QUESTION')}\n{query}")
     return "\n\n".join(sections)
 
 
 def build_llama_messages(
     *,
     query: str,
+    prompt_mode: PromptMode,
     docs: list[Document],
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
+    include_capabilities_info: bool = True,
     include_history_sources: bool = True,
+    circle_basic_info: str | None = None,
 ) -> list[dict[str, str]]:
     context = format_doc_context(docs)
     system = "\n".join(config.system_rules)
-    user_sections = ["### Question", f"{query}"]
+    user_sections = [
+        get_required_prompt_env("PROMPT_LLAMA_HEADER_QUESTION"),
+        f"{query}",
+    ]
     if retry_history:
         user_sections.extend(
             [
-                "### Previous attempt (Question/Answer)",
+                get_required_prompt_env("PROMPT_LLAMA_HEADER_PREVIOUS_ATTEMPT"),
                 format_retry_history(retry_history),
             ]
         )
-    basic_info = (config.circle_basic_info or "").strip()
+    basic_info_raw = (
+        config.circle_basic_info
+        if circle_basic_info is None
+        else circle_basic_info
+    )
+    basic_info = (basic_info_raw or "").strip()
     if basic_info:
-        user_sections.extend(["### サークルの基本情報", basic_info, ""])
-    capabilities_info = (config.chatbot_capabilities_info or "").strip()
+        user_sections.extend(
+            [
+                get_required_prompt_env("PROMPT_LLAMA_HEADER_CIRCLE_INFO"),
+                basic_info,
+                "",
+            ]
+        )
+    capabilities_info = (
+        (config.chatbot_capabilities_info or "").strip()
+        if include_capabilities_info
+        else ""
+    )
     if capabilities_info:
         user_sections.extend(
-            ["### チャットボット自身の機能情報", capabilities_info, ""]
+            [
+                get_required_prompt_env("PROMPT_LLAMA_HEADER_CAPABILITIES"),
+                capabilities_info,
+                "",
+            ]
         )
     user_sections.extend(
         [
-            "### Context",
+            get_required_prompt_env("PROMPT_LLAMA_HEADER_CONTEXT"),
             f"{context}",
             "",
-            "### Output format",
-            f"{format_output_instructions()}",
+            get_required_prompt_env("PROMPT_LLAMA_HEADER_OUTPUT_FORMAT"),
+            f"{format_output_instructions(mode=prompt_mode)}",
+            "",
+            get_required_prompt_env("PROMPT_LLAMA_HEADER_INSTRUCTIONS"),
+            f"{format_mode_instructions(mode=prompt_mode)}",
             "",
         ]
     )

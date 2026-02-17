@@ -8,8 +8,8 @@ KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収
 - はてなブログ（`https://kumc.hatenablog.com/`）の記事取得（更新差分を判定）
 - Chunking: First/Second Recursive、Summery（要約）、Proposition、RAPTOR
 - 検索: FAISSのDense + BM25（Sudachi）のSparse、Cross-Encoder再ランク、MMR多様化
-- ルーティング: Function CallingでRAG / No-RAGを自動切替
-- 回答時の追加検索・追加メモリ参照
+- ルーティング: Function Callingで `RAG / No-RAG / Refusal` を自動切替
+- Function Callingでメモリ参照・モデル情報挿入・検索クエリ変換・機密判定を実施
 - Drive/DiscordのソースURLを回答末尾に付与
 - 自動インデックス更新（スケジュール）
 
@@ -27,12 +27,12 @@ KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収
 10. すべてのChunkをEmbeddingしてFAISS索引を作成（`app/data/index`）
 
 ### Query
-1. Function CallingでRAG使用可否を判定（無効化可）
-2. RAG: Dense検索 + Sparse検索
+1. Function Callingで回答経路（`rag` / `no_rag` / `refusal`）と各フラグを判定（無効化可）
+2. `rag`: originalクエリ + 変換クエリ（最大3）で Dense + Sparse 検索
 3. Cross-Encoderで再ランク、Parent doc補完、MMRで最終選択
-4. LLMで回答生成（JSON出力 → パース）
-5. 追加検索/追加メモリが要求された場合は再検索・再生成
-6. 回答にソースURLを付与（Drive/Discord）
+4. 回答LLMで回答生成（JSON出力 → パース）
+5. `refusal`: 固定拒否文 + 拒否LLM補足（任意）
+6. 回答にソースURLを付与（Drive/Discord、refusalは除く）
 
 ## ディレクトリ構成
 - `app/src/main.py`: Discordボットのエントリポイント
@@ -81,16 +81,21 @@ pip install -r requirements.txt
 
 #### Function Calling (RAGルーティング)
 - `FUNCTION_CALL_ENABLED` (default: true)
-- `FUNCTION_CALL_PROVIDER`: `functiongemma` or `llama_cpp`
-- `FUNCTION_CALL_HF_MODEL`: FunctionGemma用ローカルHFモデルパス（`FUNCTION_CALL_MODEL` も可）
+- `FUNCTION_CALL_PROVIDER`: `gemini` or `llama_cpp`
+- `FUNCTION_CALL_GEMINI_MODEL`: Gemini利用時のモデル名
 - `FUNCTION_CALL_LLAMA_MODEL`: llama_cpp用のggufパス
 - `FUNCTION_CALL_TEMPERATURE`, `FUNCTION_CALL_MAX_NEW_TOKENS`, `FUNCTION_CALL_MAX_RETRIES`
+- `RAG_IDEA_TEMPERATURE`: RAGアイデア生成モード用
 
-※ Function Calling用モデルが無い場合は`FUNCTION_CALL_ENABLED=false`にしてください。
+※ Function Calling用モデルが無い場合は `FUNCTION_CALL_ENABLED=false` にしてください。
 
 #### No-RAG回答（RAGを使わない場合のLLM設定）
 - `NO_RAG_LLM_PROVIDER`, `NO_RAG_GEMINI_MODEL`, `NO_RAG_LLAMA_MODEL`
 - `NO_RAG_LLAMA_CTX_SIZE`, `NO_RAG_TEMPERATURE`, `NO_RAG_MAX_OUTPUT_TOKENS`, `NO_RAG_THINKING_LEVEL`
+
+#### Refusal回答（回答拒否用LLM設定）
+- `REFUSAL_LLM_PROVIDER`, `REFUSAL_GEMINI_MODEL`, `REFUSAL_LLAMA_MODEL`
+- `REFUSAL_LLAMA_CTX_SIZE`, `REFUSAL_TEMPERATURE`, `REFUSAL_MAX_OUTPUT_TOKENS`, `REFUSAL_THINKING_LEVEL`
 
 #### Ragas評価
 - `EVAL_ANSWER_RELEVANCY_ENABLED`
@@ -129,12 +134,6 @@ pip install -r requirements.txt
 - `SPARSE_USE_NORMALIZED_FORM`, `SPARSE_REMOVE_SYMBOLS`
 - `SOURCE_MAX_COUNT`
 - `ANSWER_JSON_MAX_RETRIES`, `ANSWER_RESEARCH_MAX_RETRIES`
-
-#### Query Transform
-- `QUERY_TRANSFORM_ENABLED`, `QUERY_TRANSFORM_PROVIDER`
-- `QUERY_TRANSFORM_GEMINI_MODEL`, `QUERY_TRANSFORM_LLAMA_MODEL`
-- `QUERY_TRANSFORM_LLAMA_CTX_SIZE`, `QUERY_TRANSFORM_TEMPERATURE`
-- `QUERY_TRANSFORM_MAX_OUTPUT_TOKENS`, `QUERY_TRANSFORM_MAX_RETRIES`
 
 #### Discord / Drive / Scheduler
 - `DISCORD_GUILD_ALLOW_LIST`（カンマ区切りID。空なら全ギルド）
@@ -202,9 +201,9 @@ python app/src/eval/evaluate_ragas.py
 - Dense検索（FAISS）+ Sparse検索（BM25+Sudachi）のハイブリッド
 - Cross-Encoder再ランク（`CROSS_ENCODER_MODEL`が設定されている場合）
 - MMRによる多様化、Parent chunk追加（`PARENT_DOC_ENABLED`）
-- Function CallingでRAG / No-RAGを選択（`FUNCTION_CALL_ENABLED`）
-- LLMはJSON出力（sources, follow_up_queries, needs_additional_memory）を想定
-- 追加検索・追加メモリ要求時に再検索/再生成
+- Function Callingで `RAG / No-RAG / Refusal` と回答フラグを選択（`FUNCTION_CALL_ENABLED`）
+- LLMはJSON出力（`answer`, `sources`）を想定
+- クエリ変換・追加メモリ判定はFunction Calling側で実施
 
 ### Indexing (`app/src/indexing/`)
 - `drive_loader.py`: Google DriveのDocs/Sheets/Word/Excel/Slides/PowerPoint/PDFを取得・テキスト化（Officeは`.docx/.xlsx/.pptx`、PDFはPyMuPDF＋OCR）

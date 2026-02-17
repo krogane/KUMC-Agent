@@ -10,7 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
-from config import AppConfig, RAPTOR_SUMMARY_SYSTEM_PROMPT, build_raptor_summary_prompt
+from config import (
+    AppConfig,
+    build_raptor_summary_prompt,
+    get_raptor_summary_system_prompt,
+)
 from indexing.chunks import Chunk, chunk_embedding_text, load_chunks_from_dirs, write_chunks
 from indexing.llm_client import generate_text
 from indexing.token_utils import estimate_tokens
@@ -349,7 +353,7 @@ def _run_summary_llm(*, prompt: str, source_name: str, config: AppConfig) -> str
                     gemini_model=config.raptor_summery_gemini_model,
                     llama_model=config.raptor_summery_llama_model,
                 ),
-                system_prompt=RAPTOR_SUMMARY_SYSTEM_PROMPT,
+                system_prompt=get_raptor_summary_system_prompt(),
                 llama_model_path=config.raptor_summery_llama_model_path,
                 llama_ctx_size=config.raptor_summery_llama_ctx_size,
                 temperature=config.raptor_summery_temperature,

@@ -27,25 +27,20 @@ from indexing.keyword_inverted_index import (
     load_keyword_index,
     tokenize_sparse_doc,
 )
-from indexing.llm_client import generate_text
 from indexing.sparse_sources import (
     second_rec_chunk_dirs as resolve_second_rec_chunk_dirs,
     sparse_chunk_dirs as resolve_sparse_chunk_dirs,
     sparse_second_rec_chunk_dirs as resolve_sparse_second_rec_chunk_dirs,
 )
-from pipeline.function_calling import decide_tools
+from pipeline.function_calling import FunctionRoutingDecision, decide_tools
 from pipeline.llm_clients import (
-    generate_with_gemini,
     generate_with_gemini_config,
-    generate_with_llama,
     generate_with_llama_config,
 )
 from pipeline.prompts import (
-    QUERY_TRANSFORM_SYSTEM_PROMPT,
     ChatHistoryEntry,
     build_gemini_prompt,
     build_llama_messages,
-    build_query_transform_prompt,
     doc_to_context,
 )
 from pipeline.reranker import CrossEncoderReranker
@@ -54,7 +49,6 @@ from sparse_normalizer import SparseNormalizer, SparseNormalizerConfig
 
 logger = logging.getLogger(__name__)
 
-_MAX_FOLLOW_UP_QUERY_COUNT = 3
 _SECOND_REC_SPARSE_STAGE = "second_recursive_sparse"
 _MASKED_MENTION = "（メンション非表示）"
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
@@ -131,6 +125,21 @@ class RagPipeline:
             dense_result = dense_future.result()
             sparse_docs = sparse_future.result()
 
+        return self._finalize_retrieved_docs(
+            query=query,
+            dense_result=dense_result,
+            sparse_docs=sparse_docs,
+            cancel_event=cancel_event,
+        )
+
+    def _finalize_retrieved_docs(
+        self,
+        *,
+        query: str,
+        dense_result: _DenseSearchResult,
+        sparse_docs: list[Document],
+        cancel_event: threading.Event | None = None,
+    ) -> list[Document]:
         dense_docs = dense_result.docs
         merged = self._merge_docs([dense_docs, sparse_docs])
         if merged:
@@ -158,6 +167,30 @@ class RagPipeline:
         docs = self._vectorstore().similarity_search(q, k=self._config.top_k)
         return self._append_parent_docs(docs)
 
+    def _retrieve_transformed_query(
+        self,
+        query: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> list[Document]:
+        _raise_if_cancelled(cancel_event)
+        cleaned = (query or "").strip()
+        if not cleaned:
+            return []
+        dense_result = self._dense_search(cleaned, cancel_event=cancel_event)
+        transform_k = max(0, self._config.sparse_search_transform_top_k)
+        sparse_docs = self._sparse_search_once(
+            cleaned,
+            transform_k,
+            cancel_event=cancel_event,
+        )
+        return self._finalize_retrieved_docs(
+            query=cleaned,
+            dense_result=dense_result,
+            sparse_docs=sparse_docs,
+            cancel_event=cancel_event,
+        )
+
     def _retrieve_sparse_docs(
         self,
         query: str,
@@ -167,12 +200,9 @@ class RagPipeline:
     ) -> list[Document]:
         _raise_if_cancelled(cancel_event)
         if re_search:
-            sparse_query = self._maybe_transform_query(
-                query, cancel_event=cancel_event
-            )
             return self._sparse_search(
                 original_query=query,
-                transformed_query=sparse_query,
+                transformed_query=None,
                 cancel_event=cancel_event,
             )
         return self._sparse_search_initial(
@@ -186,6 +216,8 @@ class RagPipeline:
         docs: list[Document],
         retry_history: Sequence[tuple[str, str]] | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
+        include_capabilities_info: bool = True,
+        idea_generation: bool = False,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
@@ -199,32 +231,60 @@ class RagPipeline:
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
+                prompt_mode="rag_idea" if idea_generation else "rag",
                 docs=docs,
                 history=history,
                 retry_history=retry_history,
                 circle_basic_info=self._config.circle_basic_info,
                 chatbot_capabilities_info=self._config.chatbot_capabilities_info,
+                include_capabilities_info=include_capabilities_info,
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM prompt (gemini): %s", prompt)
-            text = generate_with_gemini(
-                api_key=self._llm_api_key,
+            temperature = (
+                self._config.rag_idea_temperature
+                if idea_generation
+                else self._config.temperature
+            )
+            text = generate_with_gemini_config(
+                api_key=self._config.gemini_api_key,
                 prompt=prompt,
-                config=self._config,
+                system_rules=self._config.system_rules,
+                model=self._config.genai_model,
+                temperature=temperature,
+                max_output_tokens=self._config.max_output_tokens,
+                thinking_level=self._config.thinking_level,
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM output (gemini): %s", text)
         elif provider == "llama":
+            temperature = (
+                self._config.rag_idea_temperature
+                if idea_generation
+                else self._config.temperature
+            )
             messages = build_llama_messages(
                 query=query,
+                prompt_mode="rag_idea" if idea_generation else "rag",
                 docs=docs,
                 config=self._config,
                 history=history,
                 retry_history=retry_history,
+                include_capabilities_info=include_capabilities_info,
+                circle_basic_info=self._config.circle_basic_info,
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM prompt (llama): %s", messages)
-            text = generate_with_llama(messages=messages, config=self._config)
+            text = generate_with_llama_config(
+                messages=messages,
+                model_path=self._config.llama_model_path,
+                ctx_size=self._config.llama_ctx_size,
+                threads=self._config.llama_threads,
+                gpu_layers=self._config.llama_gpu_layers,
+                temperature=temperature,
+                max_output_tokens=self._config.max_output_tokens,
+                stop=["\n---"],
+            )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM output (llama): %s", text)
         else:
@@ -245,6 +305,7 @@ class RagPipeline:
         query: str,
         retry_history: Sequence[tuple[str, str]] | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
+        include_capabilities_info: bool = True,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
@@ -259,16 +320,18 @@ class RagPipeline:
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
+                prompt_mode="no_rag",
                 docs=docs,
                 history=history,
                 retry_history=retry_history,
-                circle_basic_info=self._config.circle_basic_info,
+                circle_basic_info="",
                 chatbot_capabilities_info=self._config.chatbot_capabilities_info,
+                include_capabilities_info=include_capabilities_info,
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("No-RAG LLM prompt (gemini): %s", prompt)
             text = generate_with_gemini_config(
-                api_key=self._llm_api_key,
+                api_key=self._config.gemini_api_key,
                 prompt=prompt,
                 system_rules=self._config.system_rules,
                 model=self._config.no_rag_genai_model,
@@ -281,10 +344,13 @@ class RagPipeline:
         elif provider == "llama":
             messages = build_llama_messages(
                 query=query,
+                prompt_mode="no_rag",
                 docs=docs,
                 config=self._config,
                 history=history,
                 retry_history=retry_history,
+                include_capabilities_info=include_capabilities_info,
+                circle_basic_info="",
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("No-RAG LLM prompt (llama): %s", messages)
@@ -311,6 +377,80 @@ class RagPipeline:
 
         _raise_if_cancelled(cancel_event)
         return _mask_discord_mentions(text)
+
+    def _generate_refusal(
+        self,
+        *,
+        query: str,
+        history: Sequence[ChatHistoryEntry] | None = None,
+        include_capabilities_info: bool = False,
+        history_scope: str | int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        _raise_if_cancelled(cancel_event)
+        provider = (self._config.refusal_llm_provider or "").lower()
+        if history is None:
+            history = self._history_for_prompt(
+                limit=self._config.prompt_history_default_turns,
+                history_scope=history_scope,
+            )
+        docs: list[Document] = []
+
+        if provider == "gemini":
+            prompt = build_gemini_prompt(
+                query=query,
+                prompt_mode="refusal",
+                docs=docs,
+                history=history,
+                circle_basic_info="",
+                chatbot_capabilities_info=self._config.chatbot_capabilities_info,
+                include_capabilities_info=include_capabilities_info,
+                include_history_sources=False,
+            )
+            text = generate_with_gemini_config(
+                api_key=self._config.gemini_api_key,
+                prompt=prompt,
+                system_rules=self._config.system_rules,
+                model=self._config.refusal_genai_model,
+                temperature=self._config.refusal_temperature,
+                max_output_tokens=self._config.refusal_max_output_tokens,
+                thinking_level=self._config.refusal_thinking_level,
+            )
+        elif provider == "llama":
+            messages = build_llama_messages(
+                query=query,
+                prompt_mode="refusal",
+                docs=docs,
+                config=self._config,
+                history=history,
+                include_capabilities_info=include_capabilities_info,
+                include_history_sources=False,
+                circle_basic_info="",
+            )
+            text = generate_with_llama_config(
+                messages=messages,
+                model_path=self._config.refusal_llama_model_path,
+                ctx_size=self._config.refusal_llama_ctx_size,
+                threads=self._config.llama_threads,
+                gpu_layers=self._config.llama_gpu_layers,
+                temperature=self._config.refusal_temperature,
+                max_output_tokens=self._config.refusal_max_output_tokens,
+                stop=["\n---"],
+            )
+        else:
+            raise ValueError(
+                "Unsupported refusal_llm_provider: "
+                f"{self._config.refusal_llm_provider}. Use 'gemini' or 'llama'."
+            )
+
+        _raise_if_cancelled(cancel_event)
+        parsed_answer, _, is_json, has_answer = self._parse_answer_payload(
+            text,
+            max_source_index=0,
+        )
+        if is_json and has_answer:
+            return _mask_discord_mentions(parsed_answer)
+        return _mask_discord_mentions(text or "")
 
     def answer(
         self,
@@ -347,25 +487,77 @@ class RagPipeline:
         cancel_event: threading.Event | None = None,
     ) -> str:
         _raise_if_cancelled(cancel_event)
+        routing: FunctionRoutingDecision
         if not self._config.function_call_enabled:
-            use_rag = True
+            routing = FunctionRoutingDecision(
+                target_model="rag",
+                idea_generation=False,
+                include_capabilities_info=False,
+                use_additional_memory=False,
+                needs_additional_query=False,
+                additional_queries=[],
+            )
         else:
-            use_rag = decide_tools(query=query, config=self._config)
+            routing = decide_tools(query=query, config=self._config)
         logger.info(
-            "Function-call routing decision: use_rag=%s",
-            use_rag,
+            "Function-call routing decision: %s",
+            routing,
         )
-        docs: list[Document] = []
-        if use_rag:
-            docs = self.retrieve(query, cancel_event=cancel_event)
-        if use_rag:
+
+        if routing.needs_additional_query and routing.use_additional_memory:
+            if on_research_and_memory_start is not None:
+                try:
+                    on_research_and_memory_start()
+                except Exception:
+                    logger.exception(
+                        "Failed to send research+memory start notification"
+                    )
+        elif routing.needs_additional_query:
+            if on_research_start is not None:
+                try:
+                    on_research_start()
+                except Exception:
+                    logger.exception("Failed to send research start notification")
+        elif routing.use_additional_memory:
+            if on_memory_start is not None:
+                try:
+                    on_memory_start()
+                except Exception:
+                    logger.exception("Failed to send memory start notification")
+
+        if routing.target_model == "refusal":
+            answer = self.answer_refusal(
+                query=query,
+                use_additional_history=routing.use_additional_memory,
+                include_capabilities_info=False,
+                history_scope=history_scope,
+                cancel_event=cancel_event,
+            )
+            return answer
+
+        if routing.target_model == "rag":
+            docs = self.retrieve(
+                query,
+                re_search=self._config.function_call_enabled,
+                cancel_event=cancel_event,
+            )
+            if routing.needs_additional_query and routing.additional_queries:
+                retrieved_groups: list[list[Document]] = [docs]
+                for transformed_query in routing.additional_queries:
+                    retrieved_groups.append(
+                        self._retrieve_transformed_query(
+                            transformed_query,
+                            cancel_event=cancel_event,
+                        )
+                    )
+                docs = self._merge_docs(retrieved_groups)
             answer, final, source_ids, used_docs, history_sources = (
                 self._answer_with_docs(
                     query=query,
                     docs=docs,
-                    on_research_start=on_research_start,
-                    on_memory_start=on_memory_start,
-                    on_research_and_memory_start=on_research_and_memory_start,
+                    use_additional_history=routing.use_additional_memory,
+                    include_capabilities_info=routing.include_capabilities_info,
+                    idea_generation=routing.idea_generation,
                     history_scope=history_scope,
                     cancel_event=cancel_event,
                 )
@@ -380,7 +572,8 @@ class RagPipeline:
 
         answer = self.answer_no_rag(
             query,
-            on_memory_start=on_memory_start,
+            use_additional_history=routing.use_additional_memory,
+            include_capabilities_info=routing.include_capabilities_info,
             history_scope=history_scope,
             cancel_event=cancel_event,
         )
@@ -390,15 +583,61 @@ class RagPipeline:
         self,
         query: str,
         *,
-        on_memory_start: Callable[[], None] | None = None,
+        use_additional_history: bool = False,
+        include_capabilities_info: bool = True,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
         answer, _ = self._generate_no_rag_payload(
             query=query,
-            on_memory_start=on_memory_start,
+            use_additional_history=use_additional_history,
+            include_capabilities_info=include_capabilities_info,
             history_scope=history_scope,
             cancel_event=cancel_event,
+        )
+        self._record_history(
+            query=query,
+            answer=answer,
+            sources=[],
+            history_scope=history_scope,
+        )
+        return answer
+
+    def answer_refusal(
+        self,
+        query: str,
+        *,
+        use_additional_history: bool = False,
+        include_capabilities_info: bool = False,
+        history_scope: str | int | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        history = self._history_for_prompt(
+            limit=(
+                self._config.prompt_history_additional_turns
+                if use_additional_history
+                else self._config.prompt_history_default_turns
+            ),
+            include_sources=False,
+            history_scope=history_scope,
+        )
+        fixed_prefix = "安全上の理由により、この質問には回答できません。"
+        supplemental = ""
+        try:
+            supplemental = self._generate_refusal(
+                query=query,
+                history=history,
+                include_capabilities_info=include_capabilities_info,
+                history_scope=history_scope,
+                cancel_event=cancel_event,
+            ).strip()
+        except Exception:
+            logger.exception("Failed to generate refusal supplemental text")
+
+        answer = (
+            fixed_prefix
+            if not supplemental
+            else f"{fixed_prefix}\n\n{supplemental}"
         )
         self._record_history(
             query=query,
@@ -413,18 +652,18 @@ class RagPipeline:
         *,
         query: str,
         docs: list[Document],
-        on_research_start: Callable[[], None] | None = None,
-        on_memory_start: Callable[[], None] | None = None,
-        on_research_and_memory_start: Callable[[], None] | None = None,
+        use_additional_history: bool = False,
+        include_capabilities_info: bool = True,
+        idea_generation: bool = False,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, str, list[int], list[Document], list[str]]:
-        answer, source_ids, used_docs, _ = self._generate_answer_payload(
+        answer, source_ids, used_docs = self._generate_answer_payload(
             query=query,
             docs=docs,
-            on_research_start=on_research_start,
-            on_memory_start=on_memory_start,
-            on_research_and_memory_start=on_research_and_memory_start,
+            use_additional_history=use_additional_history,
+            include_capabilities_info=include_capabilities_info,
+            idea_generation=idea_generation,
             history_scope=history_scope,
             cancel_event=cancel_event,
         )
@@ -450,7 +689,7 @@ class RagPipeline:
         history_scope: str | int | None = None,
     ) -> tuple[str, list[str]]:
         docs = self.retrieve(query)
-        answer, source_ids, used_docs, research_docs = self._generate_answer_payload(
+        answer, source_ids, used_docs = self._generate_answer_payload(
             query=query,
             docs=docs,
             history_scope=history_scope,
@@ -464,8 +703,7 @@ class RagPipeline:
             sources=history_sources,
             history_scope=history_scope,
         )
-        context_docs = research_docs if research_docs else used_docs
-        return answer, [doc_to_context(d) for d in context_docs]
+        return answer, [doc_to_context(d) for d in used_docs]
 
     def refresh_index(self) -> None:
         self._vectorstore.cache_clear()
@@ -869,74 +1107,6 @@ class RagPipeline:
             if len(results) >= k:
                 break
         return results
-
-    def _maybe_transform_query(
-        self, query: str, *, cancel_event: threading.Event | None = None
-    ) -> str:
-        _raise_if_cancelled(cancel_event)
-        if not self._config.query_transform_enabled:
-            return query
-        transformed = self._transform_query_with_llm(
-            query, cancel_event=cancel_event
-        )
-        if transformed:
-            logger.info("Query keywords: %s", transformed)
-            return transformed
-        logger.warning("Query transform failed; fallback to original query.")
-        return query
-
-    def _transform_query_with_llm(
-        self, query: str, *, cancel_event: threading.Event | None = None
-    ) -> str:
-        _raise_if_cancelled(cancel_event)
-        provider = (self._config.query_transform_provider or "").lower()
-        if provider not in {"gemini", "llama"}:
-            logger.warning(
-                "Unsupported query_transform_provider: %s",
-                self._config.query_transform_provider,
-            )
-            return ""
-
-        prompt = build_query_transform_prompt(query=query)
-        model = self._select_query_transform_model(provider)
-        max_retries = max(1, self._config.query_transform_max_retries)
-
-        for attempt in range(1, max_retries + 1):
-            _raise_if_cancelled(cancel_event)
-            try:
-                response = generate_text(
-                    provider=provider,
-                    api_key=self._llm_api_key,
-                    prompt=prompt,
-                    model=model,
-                    system_prompt=QUERY_TRANSFORM_SYSTEM_PROMPT,
-                    llama_model_path=self._config.query_transform_llama_model_path,
-                    llama_ctx_size=self._config.query_transform_llama_ctx_size,
-                    temperature=self._config.query_transform_temperature,
-                    max_output_tokens=self._config.query_transform_max_output_tokens,
-                    thinking_level=self._config.thinking_level,
-                    llama_threads=self._config.llama_threads,
-                    llama_gpu_layers=self._config.llama_gpu_layers,
-                    response_mime_type="text/plain",
-                )
-                normalized = _normalize_query_keywords(response)
-                if normalized:
-                    logger.info("Query transformed: %s -> %s", query, normalized)
-                    return normalized
-                raise ValueError("Empty keyword output.")
-            except Exception as exc:
-                logger.warning(
-                    "Query transform failed (attempt %d/%d): %s",
-                    attempt,
-                    max_retries,
-                    exc,
-                )
-        return ""
-
-    def _select_query_transform_model(self, provider: str) -> str:
-        if provider == "llama":
-            return self._config.query_transform_llama_model
-        return self._config.query_transform_gemini_model
 
     @lru_cache(maxsize=1)
     def _sparse_index(self) -> KeywordInvertedIndex:
@@ -1539,18 +1709,14 @@ class RagPipeline:
         self,
         *,
         query: str,
-        on_memory_start: Callable[[], None] | None = None,
+        use_additional_history: bool = False,
+        include_capabilities_info: bool = True,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, list[int]]:
         max_json_retries = max(0, self._config.answer_json_max_retries)
-        attempt = 0
         last_raw = ""
-        answer = ""
-        use_additional_history = False
-        additional_memory_used = False
-        memory_notified = False
-        while True:
+        for attempt in range(max_json_retries + 1):
             _raise_if_cancelled(cancel_event)
             history = self._history_for_prompt(
                 limit=(
@@ -1564,44 +1730,24 @@ class RagPipeline:
             raw = self._generate_no_rag(
                 query=query,
                 history=history,
+                include_capabilities_info=include_capabilities_info,
                 history_scope=history_scope,
                 cancel_event=cancel_event,
             )
             last_raw = raw
-            (
-                answer,
-                _,
-                _,
-                needs_additional_memory,
-                is_json,
-                has_answer,
-            ) = self._parse_answer_payload(raw, max_source_index=0)
+            answer, _, is_json, has_answer = self._parse_answer_payload(
+                raw,
+                max_source_index=0,
+            )
             _raise_if_cancelled(cancel_event)
             if is_json and has_answer:
-                if needs_additional_memory and not additional_memory_used:
-                    additional_memory_used = True
-                    use_additional_history = True
-                    if on_memory_start is not None and not memory_notified:
-                        memory_notified = True
-                        try:
-                            on_memory_start()
-                        except Exception:
-                            logger.exception(
-                                "Failed to send memory start notification"
-                            )
-                    continue
                 return answer, []
-            if attempt >= max_json_retries:
-                break
-            attempt += 1
-            logger.info(
-                "Invalid JSON from no-rag LLM. Retrying %s/%s",
-                attempt,
-                max_json_retries,
-            )
-
-        if answer:
-            return answer, []
+            if attempt < max_json_retries:
+                logger.info(
+                    "Invalid JSON from no-rag LLM. Retrying %s/%s",
+                    attempt + 1,
+                    max_json_retries,
+                )
         return last_raw, []
 
     def _generate_answer_payload(
@@ -1609,168 +1755,48 @@ class RagPipeline:
         *,
         query: str,
         docs: list[Document],
-        on_research_start: Callable[[], None] | None = None,
-        on_memory_start: Callable[[], None] | None = None,
-        on_research_and_memory_start: Callable[[], None] | None = None,
+        use_additional_history: bool = False,
+        include_capabilities_info: bool = True,
+        idea_generation: bool = False,
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> tuple[str, list[int], list[Document], list[Document]]:
+    ) -> tuple[str, list[int], list[Document]]:
         max_json_retries = max(0, self._config.answer_json_max_retries)
-        max_research_retries = max(
-            0, self._config.answer_research_max_retries
-        )
-        research_attempt = 0
         last_raw = ""
-        retry_history: list[tuple[str, str]] = []
-        seen_queries = {query.strip()}
-        current_docs = docs
-        research_docs: list[Document] = []
-        research_notified = False
-        memory_notified = False
-        research_and_memory_notified = False
-        use_additional_history = False
-        additional_memory_used = False
-
-        while True:
+        for attempt in range(max_json_retries + 1):
             _raise_if_cancelled(cancel_event)
-            attempt = 0
-            payload_ok = False
-            answer = ""
-            source_ids: list[int] = []
-            follow_up_queries: list[str] = []
-            needs_additional_memory = False
-            is_json = False
-            has_answer = False
-
-            while True:
-                _raise_if_cancelled(cancel_event)
-                history = self._history_for_prompt(
-                    limit=(
-                        self._config.prompt_history_additional_turns
-                        if use_additional_history
-                        else self._config.prompt_history_default_turns
-                    ),
-                    include_sources=use_additional_history,
-                    history_scope=history_scope,
-                )
-                raw = self.generate(
-                    query=query,
-                    docs=current_docs,
-                    retry_history=retry_history or None,
-                    history=history,
-                    history_scope=history_scope,
-                    cancel_event=cancel_event,
-                )
-                last_raw = raw
-                (
-                    answer,
-                    source_ids,
-                    follow_up_queries,
-                    needs_additional_memory,
-                    is_json,
-                    has_answer,
-                ) = self._parse_answer_payload(
-                    raw,
-                    max_source_index=len(current_docs),
-                )
-                _raise_if_cancelled(cancel_event)
-                payload_ok = is_json and (has_answer or follow_up_queries)
-                if payload_ok:
-                    break
-                if attempt >= max_json_retries:
-                    break
-                attempt += 1
+            history = self._history_for_prompt(
+                limit=(
+                    self._config.prompt_history_additional_turns
+                    if use_additional_history
+                    else self._config.prompt_history_default_turns
+                ),
+                include_sources=use_additional_history,
+                history_scope=history_scope,
+            )
+            raw = self.generate(
+                query=query,
+                docs=docs,
+                history=history,
+                include_capabilities_info=include_capabilities_info,
+                idea_generation=idea_generation,
+                history_scope=history_scope,
+                cancel_event=cancel_event,
+            )
+            last_raw = raw
+            answer, source_ids, is_json, has_answer = self._parse_answer_payload(
+                raw,
+                max_source_index=len(docs),
+            )
+            if is_json and has_answer:
+                return answer, source_ids, docs
+            if attempt < max_json_retries:
                 logger.info(
                     "Invalid JSON from answer LLM. Retrying %s/%s",
-                    attempt,
+                    attempt + 1,
                     max_json_retries,
                 )
-
-            if payload_ok and needs_additional_memory and not additional_memory_used:
-                additional_memory_used = True
-                use_additional_history = True
-                if follow_up_queries:
-                    if (
-                        on_research_and_memory_start is not None
-                        and not research_and_memory_notified
-                    ):
-                        research_and_memory_notified = True
-                        research_notified = True
-                        memory_notified = True
-                        try:
-                            on_research_and_memory_start()
-                        except Exception:
-                            logger.exception(
-                                "Failed to send research+memory start notification"
-                            )
-                    elif on_memory_start is not None and not memory_notified:
-                        memory_notified = True
-                        try:
-                            on_memory_start()
-                        except Exception:
-                            logger.exception(
-                                "Failed to send memory start notification"
-                            )
-                else:
-                    if on_memory_start is not None and not memory_notified:
-                        memory_notified = True
-                        try:
-                            on_memory_start()
-                        except Exception:
-                            logger.exception(
-                                "Failed to send memory start notification"
-                            )
-                    continue
-                if research_attempt >= max_research_retries:
-                    continue
-
-            if payload_ok and follow_up_queries:
-                if research_attempt < max_research_retries:
-                    follow_up_queries_for_search = follow_up_queries[
-                        :_MAX_FOLLOW_UP_QUERY_COUNT
-                    ]
-                    if len(follow_up_queries_for_search) < len(
-                        follow_up_queries
-                    ):
-                        logger.info(
-                            "Follow-up queries truncated to %s: %s",
-                            _MAX_FOLLOW_UP_QUERY_COUNT,
-                            follow_up_queries_for_search,
-                        )
-                    if on_research_start is not None and not research_notified:
-                        research_notified = True
-                        try:
-                            on_research_start()
-                        except Exception:
-                            logger.exception(
-                                "Failed to send research start notification"
-                            )
-                    logger.info(
-                        "Follow-up queries requested by answer LLM: %s",
-                        follow_up_queries_for_search,
-                    )
-                    previous_answer = answer or "（前回の回答は空でした）"
-                    retry_history.append((query, previous_answer))
-                    current_docs, new_research_docs = (
-                        self._extend_docs_with_queries(
-                            base_docs=current_docs,
-                            queries=follow_up_queries_for_search,
-                            seen_queries=seen_queries,
-                            cancel_event=cancel_event,
-                        )
-                    )
-                    if new_research_docs:
-                        research_docs = self._merge_docs(
-                            [research_docs, new_research_docs]
-                        )
-                    research_attempt += 1
-                    continue
-
-            if is_json and has_answer:
-                return answer, source_ids, current_docs, research_docs
-            if answer:
-                return answer, [], current_docs, research_docs
-            return last_raw, [], current_docs, research_docs
+        return last_raw, [], docs
 
     def _order_source_ids(
         self,
@@ -1847,14 +1873,14 @@ class RagPipeline:
         text: str,
         *,
         max_source_index: int,
-    ) -> tuple[str, list[int], list[str], bool, bool, bool]:
+    ) -> tuple[str, list[int], bool, bool]:
         raw = (text or "").strip()
         if not raw:
-            return "", [], [], False, False, False
+            return "", [], False, False
 
         payload = _load_json_payload(raw)
         if not isinstance(payload, dict):
-            return raw, [], [], False, False, False
+            return raw, [], False, False
 
         answer = str(payload.get("answer") or "").strip()
         sources_raw = payload.get("sources")
@@ -1878,72 +1904,8 @@ class RagPipeline:
                     continue
                 source_ids.append(value)
 
-        follow_up_queries_raw = payload.get("follow_up_queries")
-        follow_up_queries: list[str] = []
-        if isinstance(follow_up_queries_raw, str):
-            candidate = follow_up_queries_raw.strip()
-            if candidate:
-                follow_up_queries.append(candidate)
-        elif isinstance(follow_up_queries_raw, list):
-            for item in follow_up_queries_raw:
-                if not isinstance(item, str):
-                    continue
-                candidate = item.strip()
-                if not candidate:
-                    continue
-                follow_up_queries.append(candidate)
-
-        if follow_up_queries:
-            deduped: list[str] = []
-            seen: set[str] = set()
-            for item in follow_up_queries:
-                if item in seen:
-                    continue
-                seen.add(item)
-                deduped.append(item)
-            follow_up_queries = deduped
-
-        needs_additional_memory = _coerce_bool(
-            payload.get("needs_additional_memory")
-        )
         has_answer = bool(answer)
-        return (
-            answer,
-            source_ids,
-            follow_up_queries,
-            needs_additional_memory,
-            True,
-            has_answer,
-        )
-
-    def _extend_docs_with_queries(
-        self,
-        *,
-        base_docs: list[Document],
-        queries: list[str],
-        seen_queries: set[str],
-        cancel_event: threading.Event | None = None,
-    ) -> tuple[list[Document], list[Document]]:
-        groups: list[list[Document]] = [base_docs]
-        new_groups: list[list[Document]] = []
-        for query in queries:
-            _raise_if_cancelled(cancel_event)
-            cleaned = query.strip()
-            if not cleaned or cleaned in seen_queries:
-                continue
-            seen_queries.add(cleaned)
-            logger.info("Follow-up search query: %s", cleaned)
-            fetched = self.retrieve(
-                cleaned, re_search=True, cancel_event=cancel_event
-            )
-            if fetched:
-                groups.append(fetched)
-                new_groups.append(fetched)
-        if len(groups) == 1:
-            return base_docs, []
-        merged = self._merge_docs(groups)
-        new_docs = self._merge_docs(new_groups) if new_groups else []
-        return merged, new_docs
+        return answer, source_ids, True, has_answer
 
     def _history_for_prompt(
         self,
@@ -2101,20 +2063,6 @@ def _load_json_payload(text: str) -> dict[str, object] | None:
         return None
 
 
-def _coerce_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "yes", "1"}:
-            return True
-        if normalized in {"false", "no", "0"}:
-            return False
-    return False
-
-
 def _strip_code_fence(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
@@ -2125,40 +2073,6 @@ def _strip_code_fence(text: str) -> str:
     if not lines[-1].strip().startswith("```"):
         return text
     return "\n".join(lines[1:-1]).strip()
-
-
-def _normalize_query_keywords(text: str) -> str:
-    cleaned = _strip_code_fence(text).strip()
-    if not cleaned:
-        return ""
-
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        parsed = None
-
-    if isinstance(parsed, list):
-        parts = [str(item).strip() for item in parsed if str(item).strip()]
-        return " ".join(parts)
-    if isinstance(parsed, str):
-        cleaned = parsed.strip()
-
-    cleaned = cleaned.replace(",", " ").replace("\n", " ").replace("\t", " ")
-    cleaned = cleaned.replace("・", " ").replace("•", " ")
-    tokens: list[str] = []
-    for token in cleaned.split():
-        if token in {"-", "・", "•"}:
-            continue
-        tokens.append(token)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for token in tokens:
-        if token in seen:
-            continue
-        seen.add(token)
-        deduped.append(token)
-    return " ".join(deduped)
 
 
 def _mask_discord_mentions(text: str) -> str:

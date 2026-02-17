@@ -13,9 +13,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import (
     AppConfig,
-    LLM_CHUNK_SYSTEM_PROMPT,
     build_proposition_chunk_prompt,
     build_summery_chunk_prompt,
+    get_llm_chunk_system_prompt,
 )
 from indexing.chunks import Chunk, load_chunks, write_chunks
 from indexing.constants import FILE_ID_SEPARATOR, MESSAGE_SEPARATORS
@@ -1193,7 +1193,7 @@ def _run_llm_chunking(
                 api_key=api_key,
                 prompt=prompt,
                 model=model,
-                system_prompt=LLM_CHUNK_SYSTEM_PROMPT,
+                system_prompt=get_llm_chunk_system_prompt(),
                 llama_model_path=llama_model_path,
                 llama_ctx_size=llama_ctx_size,
                 temperature=temperature,
