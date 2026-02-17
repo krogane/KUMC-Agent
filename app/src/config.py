@@ -248,6 +248,7 @@ DEFAULT_INDEX_COMMAND_PREFIX: str = "/ai build-index"
 DEFAULT_AUTO_INDEX_ENABLED: bool = False
 DEFAULT_AUTO_INDEX_TIME: str = "03:00"
 DEFAULT_AUTO_INDEX_WEEKDAYS: str = "mon,tue,wed,thu,fri"
+DEFAULT_WARMUP_INTERVAL_MINUTES: int = 60
 DEFAULT_INDEX_UPDATE_ESTIMATE_MIN_MINUTES: int = 30
 DEFAULT_INDEX_UPDATE_ESTIMATE_MAX_MINUTES: int = 60
 DEFAULT_DISCORD_GUILD_ALLOW_LIST: str = ""
@@ -705,6 +706,7 @@ class AppConfig:
     auto_index_weekdays: tuple[int, ...] = ()
     auto_index_hour: int = 0
     auto_index_minute: int = 0
+    warmup_interval_minutes: int = DEFAULT_WARMUP_INTERVAL_MINUTES
     index_update_estimate_min_minutes: int = (
         DEFAULT_INDEX_UPDATE_ESTIMATE_MIN_MINUTES
     )
@@ -915,6 +917,7 @@ class AppConfig:
         auto_index_enabled: bool | None = None,
         auto_index_weekdays: str | None = None,
         auto_index_time: str | None = None,
+        warmup_interval_minutes: int | None = None,
         index_update_estimate_min_minutes: int | None = None,
         index_update_estimate_max_minutes: int | None = None,
         raptor_enabled: bool | None = None,
@@ -1245,6 +1248,17 @@ class AppConfig:
         )
         auto_index_weekdays_parsed = _parse_weekdays(
             auto_index_weekdays_value, default=DEFAULT_AUTO_INDEX_WEEKDAYS
+        )
+        warmup_interval_minutes_value = max(
+            0,
+            warmup_interval_minutes
+            if warmup_interval_minutes is not None
+            else int(
+                os.getenv(
+                    "WARMUP_INTERVAL_MINUTES",
+                    str(DEFAULT_WARMUP_INTERVAL_MINUTES),
+                )
+            ),
         )
         index_update_estimate_min_minutes_value = max(
             0,
@@ -1839,6 +1853,7 @@ class AppConfig:
             auto_index_weekdays=auto_index_weekdays_parsed,
             auto_index_hour=auto_index_hour,
             auto_index_minute=auto_index_minute,
+            warmup_interval_minutes=warmup_interval_minutes_value,
             index_update_estimate_min_minutes=index_update_estimate_min_minutes_value,
             index_update_estimate_max_minutes=index_update_estimate_max_minutes_value,
             vc_feature_enabled=_env_bool(

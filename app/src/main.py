@@ -15,7 +15,6 @@ from config import AppConfig, EmbeddingFactory
 from indexing.llm_client import generate_text
 from pipeline.function_calling import decide_tools
 from pipeline.llm_clients import (
-    generate_with_gemini_config,
     generate_with_llama_config,
 )
 from pipeline.prompts import (
@@ -44,6 +43,7 @@ AUTO_INDEX_ENABLED = APP_CONFIG.auto_index_enabled
 AUTO_INDEX_WEEKDAYS = APP_CONFIG.auto_index_weekdays
 AUTO_INDEX_HOUR = APP_CONFIG.auto_index_hour
 AUTO_INDEX_MINUTE = APP_CONFIG.auto_index_minute
+WARMUP_INTERVAL_MINUTES = max(0, APP_CONFIG.warmup_interval_minutes)
 MAX_INPUT_CHARACTERS = APP_CONFIG.max_input_characters
 KUMC_AGENT_CHANNEL_NAME = "kumc-agent"
 BOT_MENTION_USER_ID = 1457352598209171520
@@ -84,10 +84,12 @@ indexing_stop_requested = False
 indexing_started_at: datetime | None = None
 auto_index_task: asyncio.Task[None] | None = None
 auto_index_last_run: date | None = None
+periodic_warmup_task: asyncio.Task[None] | None = None
 is_evaluating = False
 evaluating_task: asyncio.Task[None] | None = None
 channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
 channel_cancel_events: dict[int, threading.Event] = {}
+_warmup_lock = threading.Lock()
 voice_meeting_manager = VoiceMeetingManager(
     discord_client=discord_client,
     config=APP_CONFIG,
@@ -176,14 +178,8 @@ def _warmup_function_calling() -> None:
 def _warmup_answer_llm() -> None:
     provider = (APP_CONFIG.llm_provider or "").lower()
     if provider == "gemini":
-        generate_with_gemini_config(
-            api_key=GEMINI_API_KEY or "",
-            prompt="こんにちは",
-            system_rules=APP_CONFIG.system_rules,
-            model=APP_CONFIG.genai_model,
-            temperature=APP_CONFIG.temperature,
-            max_output_tokens=_warmup_max_tokens(APP_CONFIG.max_output_tokens),
-            thinking_level=APP_CONFIG.thinking_level,
+        logger.info(
+            "Warmup: answer LLM skipped (Gemini API warmup is disabled)."
         )
         return
     if provider == "llama":
@@ -207,16 +203,8 @@ def _warmup_answer_llm() -> None:
 def _warmup_no_rag_llm() -> None:
     provider = (APP_CONFIG.no_rag_llm_provider or "").lower()
     if provider == "gemini":
-        generate_with_gemini_config(
-            api_key=GEMINI_API_KEY or "",
-            prompt="こんにちは",
-            system_rules=APP_CONFIG.system_rules,
-            model=APP_CONFIG.no_rag_genai_model,
-            temperature=APP_CONFIG.no_rag_temperature,
-            max_output_tokens=_warmup_max_tokens(
-                APP_CONFIG.no_rag_max_output_tokens
-            ),
-            thinking_level=APP_CONFIG.no_rag_thinking_level,
+        logger.info(
+            "Warmup: no-rag LLM skipped (Gemini API warmup is disabled)."
         )
         return
     if provider == "llama":
@@ -242,23 +230,23 @@ def _warmup_no_rag_llm() -> None:
 
 def _warmup_query_transform_llm() -> None:
     provider = (APP_CONFIG.query_transform_provider or "").lower()
-    if provider not in {"gemini", "llama"}:
+    if provider == "gemini":
+        logger.info(
+            "Warmup: query transform skipped (Gemini API warmup is disabled)."
+        )
+        return
+    if provider != "llama":
         logger.info(
             "Warmup: query transform skipped (unsupported provider=%s).",
             APP_CONFIG.query_transform_provider,
         )
         return
     prompt = build_query_transform_prompt(query="warmup")
-    model = (
-        APP_CONFIG.query_transform_llama_model
-        if provider == "llama"
-        else APP_CONFIG.query_transform_gemini_model
-    )
     generate_text(
         provider=provider,
         api_key=GEMINI_API_KEY or "",
         prompt=prompt,
-        model=model,
+        model=APP_CONFIG.query_transform_llama_model,
         system_prompt=QUERY_TRANSFORM_SYSTEM_PROMPT,
         llama_model_path=APP_CONFIG.query_transform_llama_model_path,
         llama_ctx_size=APP_CONFIG.query_transform_llama_ctx_size,
@@ -273,24 +261,33 @@ def _warmup_query_transform_llm() -> None:
     )
 
 
-def _warmup_models() -> None:
-    logger.info("Warmup started.")
-    steps = [
-        ("embedding", _warmup_embedding),
-        ("faiss_index", _warmup_faiss_index),
-        ("cross_encoder_reranker", _warmup_reranker),
-        ("function_calling", _warmup_function_calling),
-        ("answer_llm", _warmup_answer_llm),
-        ("no_rag_llm", _warmup_no_rag_llm),
-        ("query_transform_llm", _warmup_query_transform_llm),
-    ]
-    for name, action in steps:
-        try:
-            action()
-            logger.info("Warmup complete: %s", name)
-        except Exception:
-            logger.exception("Warmup failed: %s", name)
-    logger.info("Warmup finished.")
+def _warmup_models(*, trigger: str) -> None:
+    if not _warmup_lock.acquire(blocking=False):
+        logger.info(
+            "Warmup skipped (already running). trigger=%s",
+            trigger,
+        )
+        return
+    try:
+        logger.info("Warmup started. trigger=%s", trigger)
+        steps = [
+            ("embedding", _warmup_embedding),
+            ("faiss_index", _warmup_faiss_index),
+            ("cross_encoder_reranker", _warmup_reranker),
+            ("function_calling", _warmup_function_calling),
+            ("answer_llm", _warmup_answer_llm),
+            ("no_rag_llm", _warmup_no_rag_llm),
+            ("query_transform_llm", _warmup_query_transform_llm),
+        ]
+        for name, action in steps:
+            try:
+                action()
+                logger.info("Warmup complete: %s", name)
+            except Exception:
+                logger.exception("Warmup failed: %s", name)
+        logger.info("Warmup finished. trigger=%s", trigger)
+    finally:
+        _warmup_lock.release()
 
 
 async def _send_status(
@@ -426,7 +423,7 @@ async def _run_build_index(
                 stdout.decode("utf-8", errors="replace"),
             )
         rag_pipeline.refresh_index()
-        _warmup_models()
+        await asyncio.to_thread(_warmup_models, trigger="index_update")
         await _send_status(
             channel,
             "インデックス更新が完了しました。クエリ受付を再開します。",
@@ -657,6 +654,24 @@ async def _run_answer(message: discord.Message, query: str) -> None:
         channel_generation_tasks.pop(channel_id, None)
 
 
+def _has_active_answer_generation() -> bool:
+    return any(not task.done() for task in channel_generation_tasks.values())
+
+
+def _warmup_skip_reason() -> str | None:
+    if _warmup_lock.locked():
+        return "warmup already running"
+    if is_indexing or (indexing_task is not None and not indexing_task.done()):
+        return "indexing is running"
+    if is_evaluating or (evaluating_task is not None and not evaluating_task.done()):
+        return "evaluation is running"
+    if _has_active_answer_generation():
+        return "answer generation is running"
+    if voice_meeting_manager.has_model_activity():
+        return "voice model processing is running"
+    return None
+
+
 def _should_run_auto_index(now: datetime) -> bool:
     if not AUTO_INDEX_ENABLED:
         return False
@@ -700,14 +715,39 @@ async def _auto_index_loop() -> None:
         indexing_task = asyncio.create_task(_run_build_index(None))
 
 
+async def _periodic_warmup_loop() -> None:
+    if WARMUP_INTERVAL_MINUTES <= 0:
+        logger.info("Periodic warmup disabled. interval_minutes=%s", WARMUP_INTERVAL_MINUTES)
+        return
+    interval_seconds = WARMUP_INTERVAL_MINUTES * 60
+    logger.info(
+        "Periodic warmup scheduler started. interval_minutes=%s",
+        WARMUP_INTERVAL_MINUTES,
+    )
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            reason = _warmup_skip_reason()
+            if reason:
+                logger.info("Periodic warmup skipped: %s", reason)
+                continue
+            await asyncio.to_thread(_warmup_models, trigger="periodic")
+    except asyncio.CancelledError:
+        return
+
+
 # Discord events
 @discord_client.event
 async def on_ready():
     logger.info("Logged in as %s", discord_client.user)
     await voice_meeting_manager.start()
-    global auto_index_task
+    global auto_index_task, periodic_warmup_task
     if AUTO_INDEX_ENABLED and (auto_index_task is None or auto_index_task.done()):
         auto_index_task = asyncio.create_task(_auto_index_loop())
+    if WARMUP_INTERVAL_MINUTES > 0 and (
+        periodic_warmup_task is None or periodic_warmup_task.done()
+    ):
+        periodic_warmup_task = asyncio.create_task(_periodic_warmup_loop())
 
 
 @discord_client.event
@@ -857,7 +897,7 @@ def main() -> None:
     if not DISCORD_BOT_TOKEN:
         raise RuntimeError("DISCORD_BOT_TOKEN is not set. Please set it in .env")
 
-    _warmup_models()
+    _warmup_models(trigger="startup")
     discord_client.run(DISCORD_BOT_TOKEN, log_handler=None)
 
 

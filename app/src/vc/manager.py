@@ -348,6 +348,15 @@ class VoiceMeetingManager:
     def has_active_session(self) -> bool:
         return any(session.active for session in self._sessions_by_guild.values())
 
+    def has_model_activity(self) -> bool:
+        if self._rag_pause_count > 0:
+            return True
+        if self._asr_pipeline_lock.locked() or self._asr_inference_lock.locked():
+            return True
+        if self._post_worker_current is not None:
+            return True
+        return False
+
     def is_voice_chat_channel(self, channel: object) -> bool:
         return isinstance(channel, discord.VoiceChannel)
 
