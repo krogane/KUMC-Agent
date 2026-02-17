@@ -17,6 +17,8 @@ ragas
 datasets
 numpy
 transformers
+PyMuPDF
+Pillow
 sudachipy
 sudachidict_core
 rank-bm25

@@ -19,6 +19,7 @@ DEFAULT_LLM_MODEL_DIR: str = "app/model/llm"
 DEFAULT_EMBEDDING_MODEL_DIR: str = "app/model/embedding"
 DEFAULT_CROSS_ENCODER_MODEL_DIR: str = "app/model/cross-encoder"
 DEFAULT_WHISPER_MODEL_DIR: str = "app/model/whisper"
+DEFAULT_PDF_OCR_MODEL: str = "app/model/ocr/tencent/HunyuanOCR"
 
 # Answering LLM Settings
 DEFAULT_LLM_PROVIDER: str = "llama" # gemini or llama
@@ -593,6 +594,7 @@ class AppConfig:
     drive_folder_id: str = ""
     google_application_credentials: str = ""
     drive_max_files: int = DEFAULT_DRIVE_MAX_FILES
+    pdf_ocr_model_path: str = DEFAULT_PDF_OCR_MODEL
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     raptor_embedding_model: str = DEFAULT_RAPTOR_EMBEDDING_MODEL
     cross_encoder_model_path: str = DEFAULT_CROSS_ENCODER_MODEL
@@ -840,6 +842,7 @@ class AppConfig:
         drive_folder_id: str | None = None,
         google_application_credentials: str | None = None,
         drive_max_files: int | None = None,
+        pdf_ocr_model: str | None = None,
         llama_model: str | None = None,
         llama_ctx_size: int | None = None,
         llama_gpu_layers: int | None = None,
@@ -967,6 +970,7 @@ class AppConfig:
         whisper_model_dir_path = _resolve_dir(
             whisper_model_dir_value, base_dir=resolved_base
         )
+        ocr_model_dir_path = resolved_base / "app" / "model" / "ocr"
 
         raw_embedding_model_name = (
             embedding_model
@@ -1015,6 +1019,16 @@ class AppConfig:
         resolved_no_rag_llama_model_path = _resolve_model_path(
             model_name=raw_no_rag_llama_model_name,
             model_dir=llm_model_dir_path,
+            base_dir=resolved_base,
+        )
+        raw_pdf_ocr_model_name = (
+            pdf_ocr_model
+            if pdf_ocr_model is not None
+            else os.getenv("PDF_OCR_MODEL", DEFAULT_PDF_OCR_MODEL)
+        )
+        resolved_pdf_ocr_model_path = _resolve_local_model_path(
+            model_name=raw_pdf_ocr_model_name,
+            model_dir=ocr_model_dir_path,
             base_dir=resolved_base,
         )
 
@@ -1343,6 +1357,7 @@ class AppConfig:
             drive_max_files=drive_max_files
             if drive_max_files is not None
             else int(os.getenv("DRIVE_MAX_FILES", str(DEFAULT_DRIVE_MAX_FILES))),
+            pdf_ocr_model_path=resolved_pdf_ocr_model_path,
             embedding_model=resolved_embedding_model,
             raptor_embedding_model=resolved_raptor_embedding_model,
             cross_encoder_model_path=resolved_cross_encoder_model_path,

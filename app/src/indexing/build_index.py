@@ -365,6 +365,7 @@ def main() -> None:
         docs_dir=raw_docs_dir,
         sheets_dir=raw_sheets_dir,
         google_application_credentials=cfg.google_application_credentials,
+        pdf_ocr_model_path=cfg.pdf_ocr_model_path,
         drive_max_files=cfg.drive_max_files,
         skip_existing=not cfg.clear_raw_data,
         update_existing=cfg.update_raw_data,

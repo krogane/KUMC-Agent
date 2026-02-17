@@ -3,7 +3,7 @@ KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収
 ローカルの`llama.cpp`またはGeminiを使った回答生成に対応し、Index構築・評価（ragas）まで一通りの流れが揃っています。
 
 ## 主な機能
-- Google DriveのDocs/SheetsをMarkdown/CSVとして取得（更新差分を判定）
+- Google DriveのDocs/Sheets/Slides/Word/Excel/PowerPoint/PDFを取得し、テキスト化して保存（Office Open XML: `.docx/.xlsx/.pptx`、PDFはPyMuPDF＋OCR対応、更新差分を判定）
 - Discordメッセージログの取得（Botトークンがある場合、ギルド絞り込み可）
 - はてなブログ（`https://kumc.hatenablog.com/`）の記事取得（更新差分を判定）
 - Chunking: First/Second Recursive、Summery（要約）、Proposition、RAPTOR
@@ -17,7 +17,7 @@ KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収
 ### Indexing
 1. (任意) 既存データのクリア
 2. Discordメッセージ取得（`DISCORD_BOT_TOKEN` がある場合）
-3. Google DriveのDocs/Sheets取得（`app/data/raw`）
+3. Google DriveのDocs/Sheets/Word/Excel/Slides/PowerPoint/PDF取得（`app/data/raw`、Officeは`.docx/.xlsx/.pptx`）
 4. はてなブログ記事取得（`app/data/raw/hatenablog`）
 5. First Recursive Chunking（`app/data/first_rec_chunk`）
 6. (任意) Second Recursive Chunking（`app/data/second_rec_chunk`）
@@ -71,6 +71,7 @@ pip install -r requirements.txt
 - `LLM_MODEL_DIR`（既定: `app/model/llm`）
 - `EMBEDDING_MODEL_DIR`（既定: `app/model/embedding`）
 - `CROSS_ENCODER_MODEL_DIR`（既定: `app/model/cross-encoder`）
+- `PDF_OCR_MODEL`（既定: `app/model/ocr/tencent/HunyuanOCR`。画像PDFのOCRに使用）
 
 #### 回答LLM / Embedding
 - `GEMINI_MODEL`（Gemini利用時のモデル名）
@@ -205,7 +206,7 @@ python app/src/eval/evaluate_ragas.py
 - 追加検索・追加メモリ要求時に再検索/再生成
 
 ### Indexing (`app/src/indexing/`)
-- `drive_loader.py`: Google DriveのDocs/Sheetsを取得（Markdown/CSV）
+- `drive_loader.py`: Google DriveのDocs/Sheets/Word/Excel/Slides/PowerPoint/PDFを取得・テキスト化（Officeは`.docx/.xlsx/.pptx`、PDFはPyMuPDF＋OCR）
 - `hatenablog_loader.py`: はてなブログ記事を取得（本文テキスト）
 - `discord_loader.py`: Discordログ取得（URL除去・メンション置換）
 - `chunking.py`: Recursive / Summery / Proposition Chunking
