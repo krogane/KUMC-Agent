@@ -7,10 +7,12 @@ import threading
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 import math
 from pathlib import Path
 from typing import Callable, Sequence
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from langchain_community.vectorstores import FAISS
@@ -18,6 +20,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from config import AppConfig, EmbeddingFactory
+from date_metadata import SOURCE_DATE_UNKNOWN, infer_source_date, source_date_to_date
 from indexing.chunks import load_chunks_from_dirs
 from indexing.keyword_inverted_index import (
     KEYWORD_CORPUS_SECOND_REC_SPARSE,
@@ -54,6 +57,7 @@ _MASKED_MENTION = "（メンション非表示）"
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 _SECOND_REC_SOURCE_DIRS = ("docs", "sheets", "messages", "vc")
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 class GenerationCancelled(RuntimeError):
@@ -96,6 +100,7 @@ class RagPipeline:
         query: str,
         *,
         re_search: bool = False,
+        recency_mode: str = "off",
         cancel_event: threading.Event | None = None,
     ) -> list[Document]:
         _raise_if_cancelled(cancel_event)
@@ -129,6 +134,7 @@ class RagPipeline:
             query=query,
             dense_result=dense_result,
             sparse_docs=sparse_docs,
+            recency_mode=recency_mode,
             cancel_event=cancel_event,
         )
 
@@ -138,13 +144,18 @@ class RagPipeline:
         query: str,
         dense_result: _DenseSearchResult,
         sparse_docs: list[Document],
+        recency_mode: str = "off",
         cancel_event: threading.Event | None = None,
     ) -> list[Document]:
         dense_docs = dense_result.docs
         merged = self._merge_docs([dense_docs, sparse_docs])
         if merged:
             ranked = (
-                self._rerank_docs(query=query, docs=merged)
+                self._rerank_docs(
+                    query=query,
+                    docs=merged,
+                    recency_mode=recency_mode,
+                )
                 if self._config.rerank_enabled
                 else merged
             )
@@ -171,6 +182,7 @@ class RagPipeline:
         self,
         query: str,
         *,
+        recency_mode: str = "off",
         cancel_event: threading.Event | None = None,
     ) -> list[Document]:
         _raise_if_cancelled(cancel_event)
@@ -188,6 +200,7 @@ class RagPipeline:
             query=cleaned,
             dense_result=dense_result,
             sparse_docs=sparse_docs,
+            recency_mode=recency_mode,
             cancel_event=cancel_event,
         )
 
@@ -491,6 +504,7 @@ class RagPipeline:
                 target_model="rag",
                 idea_generation=False,
                 include_capabilities_info=False,
+                recency_mode="off",
                 use_additional_memory=False,
                 needs_additional_query=False,
                 additional_queries=[],
@@ -546,6 +560,7 @@ class RagPipeline:
             docs = self.retrieve(
                 query,
                 re_search=self._config.function_call_enabled,
+                recency_mode=routing.recency_mode,
                 cancel_event=cancel_event,
             )
             if routing.needs_additional_query and routing.additional_queries:
@@ -554,6 +569,7 @@ class RagPipeline:
                     retrieved_groups.append(
                         self._retrieve_transformed_query(
                             transformed_query,
+                            recency_mode=routing.recency_mode,
                             cancel_event=cancel_event,
                         )
                     )
@@ -565,6 +581,7 @@ class RagPipeline:
                     use_additional_history=routing.use_additional_memory,
                     include_capabilities_info=routing.include_capabilities_info,
                     idea_generation=routing.idea_generation,
+                    recency_mode=routing.recency_mode,
                     history_scope=history_scope,
                     cancel_event=cancel_event,
                 )
@@ -662,6 +679,7 @@ class RagPipeline:
         use_additional_history: bool = False,
         include_capabilities_info: bool = True,
         idea_generation: bool = False,
+        recency_mode: str = "off",
         history_scope: str | int | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, str, list[int], list[Document], list[str]]:
@@ -679,6 +697,7 @@ class RagPipeline:
             source_ids=source_ids,
             query=query,
             docs=used_docs,
+            recency_mode=recency_mode,
         )
         final = self._append_sources(
             answer=answer,
@@ -1254,13 +1273,27 @@ class RagPipeline:
                 merged.append(doc)
         return merged
 
-    def _rerank_docs(self, *, query: str, docs: list[Document]) -> list[Document]:
+    def _rerank_docs(
+        self,
+        *,
+        query: str,
+        docs: list[Document],
+        recency_mode: str = "off",
+    ) -> list[Document]:
         if not docs:
             return []
         if not self._config.rerank_enabled:
             return docs
-        scored = self._reranker.score_documents(query=query, docs=docs)
-        self._store_rerank_scores(query=query, scored=scored)
+        scored_base = self._reranker.score_documents(query=query, docs=docs)
+        scored = self._apply_recency_scores(
+            scored=scored_base,
+            recency_mode=recency_mode,
+        )
+        self._store_rerank_scores(
+            query=query,
+            recency_mode=recency_mode,
+            scored=scored,
+        )
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [doc for _, _, doc in scored]
 
@@ -1268,10 +1301,14 @@ class RagPipeline:
         self,
         *,
         query: str,
+        recency_mode: str = "off",
         scored: Sequence[tuple[float, int, Document]],
     ) -> None:
-        normalized_query = (query or "").strip()
-        if not normalized_query or not scored:
+        cache_key = self._rerank_score_cache_key(
+            query=query,
+            recency_mode=recency_mode,
+        )
+        if not cache_key or not scored:
             return
 
         per_doc_scores: dict[tuple[object, ...], float] = {}
@@ -1284,16 +1321,16 @@ class RagPipeline:
             return
 
         with self._rerank_score_cache_lock:
-            cached = self._rerank_scores_by_query.get(normalized_query)
+            cached = self._rerank_scores_by_query.get(cache_key)
             if cached is None:
                 cached = {}
-                self._rerank_scores_by_query[normalized_query] = cached
+                self._rerank_scores_by_query[cache_key] = cached
             cached.update(per_doc_scores)
             try:
-                self._rerank_score_query_order.remove(normalized_query)
+                self._rerank_score_query_order.remove(cache_key)
             except ValueError:
                 pass
-            self._rerank_score_query_order.append(normalized_query)
+            self._rerank_score_query_order.append(cache_key)
             while len(self._rerank_score_query_order) > 16:
                 oldest = self._rerank_score_query_order.popleft()
                 self._rerank_scores_by_query.pop(oldest, None)
@@ -1302,25 +1339,94 @@ class RagPipeline:
         self,
         *,
         query: str,
+        recency_mode: str = "off",
     ) -> dict[tuple[object, ...], float]:
-        normalized_query = (query or "").strip()
-        if not normalized_query:
+        cache_key = self._rerank_score_cache_key(
+            query=query,
+            recency_mode=recency_mode,
+        )
+        if not cache_key:
             return {}
         with self._rerank_score_cache_lock:
-            cached = self._rerank_scores_by_query.get(normalized_query)
+            cached = self._rerank_scores_by_query.get(cache_key)
             if not cached:
                 return {}
             try:
-                self._rerank_score_query_order.remove(normalized_query)
+                self._rerank_score_query_order.remove(cache_key)
             except ValueError:
                 pass
-            self._rerank_score_query_order.append(normalized_query)
+            self._rerank_score_query_order.append(cache_key)
             return dict(cached)
 
     def _clear_rerank_score_cache(self) -> None:
         with self._rerank_score_cache_lock:
             self._rerank_scores_by_query.clear()
             self._rerank_score_query_order.clear()
+
+    def _rerank_score_cache_key(self, *, query: str, recency_mode: str) -> str:
+        normalized_query = (query or "").strip()
+        if not normalized_query:
+            return ""
+        mode = self._normalize_recency_mode(recency_mode)
+        return f"{normalized_query}\t{mode}"
+
+    @staticmethod
+    def _normalize_recency_mode(recency_mode: str | None) -> str:
+        mode = str(recency_mode or "").strip().lower()
+        if mode in {"off", "soft", "hard"}:
+            return mode
+        return "off"
+
+    def _recency_weight_for_mode(self, recency_mode: str) -> float:
+        mode = self._normalize_recency_mode(recency_mode)
+        if mode == "soft":
+            value = float(self._config.recency_weight_soft)
+        elif mode == "hard":
+            value = float(self._config.recency_weight_hard)
+        else:
+            return 0.0
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
+
+    def _apply_recency_scores(
+        self,
+        *,
+        scored: Sequence[tuple[float, int, Document]],
+        recency_mode: str,
+    ) -> list[tuple[float, int, Document]]:
+        if not scored:
+            return []
+
+        weight = self._recency_weight_for_mode(recency_mode)
+        if weight <= 0.0:
+            return list(scored)
+
+        half_life_days = max(0.0001, float(self._config.recency_half_life_days))
+        today = datetime.now(_JST).date()
+        adjusted: list[tuple[float, int, Document]] = []
+        for base_score, original_index, doc in scored:
+            doc_date = self._doc_source_date(doc)
+            if doc_date is None:
+                recency_score = 0.5
+            else:
+                age_days = max(0, (today - doc_date).days)
+                recency_score = 0.5 ** (age_days / half_life_days)
+            final_score = (1.0 - weight) * float(base_score) + weight * recency_score
+            adjusted.append((final_score, original_index, doc))
+        return adjusted
+
+    @staticmethod
+    def _doc_source_date(doc: Document):
+        metadata = doc.metadata or {}
+        source_date_raw = str(metadata.get("source_date") or "").strip()
+        if not source_date_raw:
+            source_date_raw = infer_source_date(metadata=metadata)
+        if source_date_raw == SOURCE_DATE_UNKNOWN:
+            return None
+        return source_date_to_date(source_date_raw)
 
     def _apply_parent_doc_cap(self, docs: list[Document]) -> list[Document]:
         if not docs:
@@ -1808,6 +1914,7 @@ class RagPipeline:
         source_ids: list[int],
         query: str,
         docs: list[Document],
+        recency_mode: str = "off",
     ) -> list[int]:
         max_count = max(0, self._config.source_max_count)
         if not source_ids or not docs or max_count == 0:
@@ -1827,7 +1934,10 @@ class RagPipeline:
         if not self._config.rerank_enabled:
             return unique_ids[:max_count]
 
-        score_by_doc_key = self._rerank_scores_for_query(query=query)
+        score_by_doc_key = self._rerank_scores_for_query(
+            query=query,
+            recency_mode=recency_mode,
+        )
         missing_docs: list[Document] = []
         for idx in unique_ids:
             doc = docs[idx - 1]
@@ -1835,10 +1945,18 @@ class RagPipeline:
             if key not in score_by_doc_key:
                 missing_docs.append(doc)
         if missing_docs:
-            scored_missing = self._reranker.score_documents(
+            scored_missing_base = self._reranker.score_documents(
                 query=query, docs=missing_docs
             )
-            self._store_rerank_scores(query=query, scored=scored_missing)
+            scored_missing = self._apply_recency_scores(
+                scored=scored_missing_base,
+                recency_mode=recency_mode,
+            )
+            self._store_rerank_scores(
+                query=query,
+                recency_mode=recency_mode,
+                scored=scored_missing,
+            )
             for score, _, doc in scored_missing:
                 key = self._doc_key(doc)
                 previous = score_by_doc_key.get(key)

@@ -596,6 +596,9 @@ def _build_summary_metadata(
         "hatenablog_url": common_or_mixed(
             [str(chunk.metadata.get("hatenablog_url", "")) for chunk in chunks]
         ),
+        "source_date": common_or_mixed(
+            [str(chunk.metadata.get("source_date", "")) for chunk in chunks]
+        ),
         "chunk_stage": "raptor",
         "raptor_level": level,
         "raptor_cluster_id": cluster_id,

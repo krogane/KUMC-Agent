@@ -264,6 +264,9 @@ DEFAULT_PARENT_DOC_ENABLED: bool = True
 DEFAULT_PARENT_CHUNK_CAP: int = 2
 DEFAULT_RERANK_ENABLED: bool = True
 DEFAULT_RERANK_POOL_SIZE: int = 20
+DEFAULT_RECENCY_WEIGHT_SOFT: float = 0.3
+DEFAULT_RECENCY_WEIGHT_HARD: float = 0.8
+DEFAULT_RECENCY_HALF_LIFE_DAYS: float = 30.0
 DEFAULT_MMR_LAMBDA: float = 0.5
 DEFAULT_SUDACHI_MODE: str = "B"
 DEFAULT_SPARSE_BM25_K1: float = 1.5
@@ -631,6 +634,9 @@ class AppConfig:
     parent_chunk_cap: int = DEFAULT_PARENT_CHUNK_CAP
     rerank_enabled: bool = DEFAULT_RERANK_ENABLED
     rerank_pool_size: int = DEFAULT_RERANK_POOL_SIZE
+    recency_weight_soft: float = DEFAULT_RECENCY_WEIGHT_SOFT
+    recency_weight_hard: float = DEFAULT_RECENCY_WEIGHT_HARD
+    recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS
     mmr_lambda: float = DEFAULT_MMR_LAMBDA
     sudachi_mode: str = DEFAULT_SUDACHI_MODE
     sparse_bm25_k1: float = DEFAULT_SPARSE_BM25_K1
@@ -852,6 +858,9 @@ class AppConfig:
         parent_chunk_cap: int | None = None,
         rerank_enabled: bool | None = None,
         rerank_pool_size: int | None = None,
+        recency_weight_soft: float | None = None,
+        recency_weight_hard: float | None = None,
+        recency_half_life_days: float | None = None,
         mmr_lambda: float | None = None,
         sudachi_mode: str | None = None,
         sparse_bm25_k1: float | None = None,
@@ -1656,6 +1665,33 @@ class AppConfig:
             if rerank_pool_size is not None
             else int(
                 os.getenv("RERANK_POOL_SIZE", str(DEFAULT_RERANK_POOL_SIZE))
+            ),
+            recency_weight_soft=recency_weight_soft
+            if recency_weight_soft is not None
+            else float(
+                os.getenv(
+                    "RECENCY_WEIGHT_SOFT",
+                    str(DEFAULT_RECENCY_WEIGHT_SOFT),
+                )
+            ),
+            recency_weight_hard=recency_weight_hard
+            if recency_weight_hard is not None
+            else float(
+                os.getenv(
+                    "RECENCY_WEIGHT_HARD",
+                    str(DEFAULT_RECENCY_WEIGHT_HARD),
+                )
+            ),
+            recency_half_life_days=max(
+                0.0001,
+                recency_half_life_days
+                if recency_half_life_days is not None
+                else float(
+                    os.getenv(
+                        "RECENCY_HALF_LIFE_DAYS",
+                        str(DEFAULT_RECENCY_HALF_LIFE_DAYS),
+                    )
+                ),
             ),
             mmr_lambda=mmr_lambda
             if mmr_lambda is not None

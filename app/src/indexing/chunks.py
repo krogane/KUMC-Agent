@@ -26,6 +26,13 @@ def chunk_embedding_text(chunk: Chunk) -> str:
         created_at = str(chunk.metadata.get("hatenablog_created_at") or "").strip()
         if created_at:
             metadata_lines.append(f"hatenablog_created_at: {created_at}")
+        source_date = str(chunk.metadata.get("source_date") or "").strip()
+        if source_date:
+            metadata_lines.append(f"source_date: {source_date}")
+    if source_type in {"docs", "sheets"}:
+        source_date = str(chunk.metadata.get("source_date") or "").strip()
+        if source_date:
+            metadata_lines.append(f"source_date: {source_date}")
     if source_type == "vc_transcript":
         meeting_label = str(chunk.metadata.get("meeting_label") or "").strip()
         if meeting_label:

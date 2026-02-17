@@ -29,7 +29,7 @@ KUMCが保有する情報をGoogle Drive・Discord・はてなブログから収
 ### Query
 1. Function Callingで回答経路（`rag` / `no_rag` / `refusal`）と各フラグを判定（無効化可）
 2. `rag`: originalクエリ + 変換クエリ（最大3）で Dense + Sparse 検索
-3. Cross-Encoderで再ランク、Parent doc補完、MMRで最終選択
+3. Cross-Encoderで再ランク + recency補正、Parent doc補完、MMRで最終選択
 4. 回答LLMで回答生成（JSON出力 → パース）
 5. `refusal`: 固定拒否文 + 拒否LLM補足（任意）
 6. 回答にソースURLを付与（Drive/Discord、refusalは除く）
@@ -86,6 +86,7 @@ pip install -r requirements.txt
 - `FUNCTION_CALL_LLAMA_MODEL`: llama_cpp用のggufパス
 - `FUNCTION_CALL_TEMPERATURE`, `FUNCTION_CALL_MAX_NEW_TOKENS`, `FUNCTION_CALL_MAX_RETRIES`
 - `RAG_IDEA_TEMPERATURE`: RAGアイデア生成モード用
+- `recency_mode`（`off` / `soft` / `hard`）をルーティング結果として返し、RAG検索時の新しさ重視度を制御
 
 ※ Function Calling用モデルが無い場合は `FUNCTION_CALL_ENABLED=false` にしてください。
 
@@ -129,6 +130,7 @@ pip install -r requirements.txt
 - `SPARSE_SEARCH_ORIGINAL_TOP_K`, `SPARSE_SEARCH_TRANSFORM_TOP_K`（再検索時）
 - `PARENT_DOC_ENABLED`, `PARENT_CHUNK_CAP`
 - `RERANK_ENABLED`, `RERANK_POOL_SIZE`, `MMR_LAMBDA`
+- `RECENCY_WEIGHT_SOFT`, `RECENCY_WEIGHT_HARD`, `RECENCY_HALF_LIFE_DAYS`
 - `SUDACHI_MODE` (`A`/`B`/`C`)
 - `SPARSE_BM25_K1`, `SPARSE_BM25_B`
 - `SPARSE_USE_NORMALIZED_FORM`, `SPARSE_REMOVE_SYMBOLS`

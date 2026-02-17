@@ -44,6 +44,9 @@ def _doc_to_context(doc: Document) -> str:
         created_at = str(metadata.get("hatenablog_created_at") or "").strip()
         if created_at:
             lines.append(f"hatenablog_created_at: {created_at}")
+        source_date = str(metadata.get("source_date") or "").strip()
+        if source_date:
+            lines.append(f"source_date: {source_date}")
         url = str(metadata.get("hatenablog_url") or "").strip()
         if url:
             lines.append(f"hatenablog_url: {url}")
@@ -72,13 +75,20 @@ def _doc_to_context(doc: Document) -> str:
         return f"channel_name: {channel_display}\n{doc.page_content}"
     drive_path = str(metadata.get("drive_file_path") or "").strip()
     drive_path_display = drive_path if drive_path else "不明"
+    source_date = str(metadata.get("source_date") or "").strip()
+    source_date_display = source_date if source_date else "不明"
     if first_message_date:
         return (
             f"drive_file_path: {drive_path_display}\n"
+            f"source_date: {source_date_display}\n"
             f"first_message_date: {first_message_date}\n"
             f"{doc.page_content}"
         )
-    return f"drive_file_path: {drive_path_display}\n{doc.page_content}"
+    return (
+        f"drive_file_path: {drive_path_display}\n"
+        f"source_date: {source_date_display}\n"
+        f"{doc.page_content}"
+    )
 
 
 def doc_to_context(doc: Document) -> str:

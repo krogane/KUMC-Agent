@@ -21,6 +21,7 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
     "- target_model: rag | no_rag | refusal\n"
     "- idea_generation: bool\n"
     "- include_capabilities_info: bool\n"
+    "- recency_mode: off | soft | hard\n"
     "- use_additional_memory: bool\n"
     "- needs_additional_query: bool\n"
     "- additional_queries: string[] (max 3)\n\n"
@@ -30,6 +31,7 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
     "- target_model(rag): 質問に「一般的な知識のみでは回答できない」かつ「サークル関連情報が必要」と判断した場合は、target_model=rag とする。ただし、質問が上記のrefusalに少しでも該当する場合は、target_model=refusal とする。\n"
     "- idea_generation: 質問がアイデア（案や計画を含む）の作成を要求するものである場合は、idea_generation=true とする。ただし、target_model=no_rag の場合、idea_generation=false を強制する。\n"
     "- include_capabilities_info: 質問に「アシスタントの情報（機能や能力など）」が必要と判断した場合は、include_capabilities_info=true とする。\n"
+    "- recency_mode: 最新情報の重視度。通常はsoft。最新の情報が重要な質問はhard。時系列を考慮しなくても良い・過去の資料・出来事について質問している場合はoff。target_model=no_rag/refusal の場合は off を選ぶ。\n"
     "- use_additional_memory: 質問に対する回答に追加のチャット履歴があると望ましい場合（例: 質問に指示語が含まれている・質問の文脈が曖昧・質問が過去のチャットに関連する）は use_additional_memory=true とする。\n"
     "- needs_additional_query: 「質問文に、RAG検索に必要最低限の語句が全く含まれていない場合」または「質問への回答に多段階の検索が必須である場合」にのみ、needs_additional_query=true とする。ただし、サークル名などの文脈や、単なるキーワードの抜き出しは追加クエリには不必要である点に留意する。\n"
     "- additional_queries: needs_additional_query=true の場合にのみ、 重複を避けたadditional_queries （文章または空白区切りのキーワード群）を1件出力する。ただし、1件では質問に対して最低限の回答が不可能な場合にのみ2件出力する。クエリを生成する際は、下記の現在の日付も参考にする。needs_additional_query=falseの場合は、additional_queries=[] とする。\n\n"
@@ -45,6 +47,7 @@ class FunctionRoutingDecision:
     target_model: str
     idea_generation: bool
     include_capabilities_info: bool
+    recency_mode: str
     use_additional_memory: bool
     needs_additional_query: bool
     additional_queries: list[str]
@@ -58,6 +61,7 @@ def _default_decision() -> FunctionRoutingDecision:
         target_model="rag",
         idea_generation=False,
         include_capabilities_info=False,
+        recency_mode="off",
         use_additional_memory=False,
         needs_additional_query=False,
         additional_queries=[],
@@ -264,6 +268,9 @@ def _parse_routing_payload(text: str) -> FunctionRoutingDecision | None:
     include_capabilities_info = _coerce_bool(
         payload.get("include_capabilities_info")
     )
+    recency_mode = str(payload.get("recency_mode") or "").strip().lower()
+    if recency_mode not in {"off", "soft", "hard"}:
+        return None
     use_additional_memory = _coerce_bool(payload.get("use_additional_memory"))
     needs_additional_query = _coerce_bool(payload.get("needs_additional_query"))
 
@@ -274,6 +281,7 @@ def _parse_routing_payload(text: str) -> FunctionRoutingDecision | None:
             target_model="refusal",
             idea_generation=False,
             include_capabilities_info=False,
+            recency_mode="off",
             use_additional_memory=use_additional_memory,
             needs_additional_query=False,
             additional_queries=[],
@@ -284,6 +292,7 @@ def _parse_routing_payload(text: str) -> FunctionRoutingDecision | None:
             target_model="no_rag",
             idea_generation=False,
             include_capabilities_info=include_capabilities_info,
+            recency_mode="off",
             use_additional_memory=use_additional_memory,
             needs_additional_query=False,
             additional_queries=[],
@@ -298,6 +307,7 @@ def _parse_routing_payload(text: str) -> FunctionRoutingDecision | None:
         target_model="rag",
         idea_generation=idea_generation,
         include_capabilities_info=include_capabilities_info,
+        recency_mode=recency_mode,
         use_additional_memory=use_additional_memory,
         needs_additional_query=needs_additional_query,
         additional_queries=additional_queries,
@@ -342,6 +352,10 @@ def _routing_schema() -> dict[str, object]:
             },
             "idea_generation": {"type": "boolean"},
             "include_capabilities_info": {"type": "boolean"},
+            "recency_mode": {
+                "type": "string",
+                "enum": ["off", "soft", "hard"],
+            },
             "use_additional_memory": {"type": "boolean"},
             "needs_additional_query": {"type": "boolean"},
             "additional_queries": {
@@ -354,6 +368,7 @@ def _routing_schema() -> dict[str, object]:
             "target_model",
             "idea_generation",
             "include_capabilities_info",
+            "recency_mode",
             "use_additional_memory",
             "needs_additional_query",
             "additional_queries",

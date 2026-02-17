@@ -17,6 +17,11 @@ from config import (
     build_summery_chunk_prompt,
     get_llm_chunk_system_prompt,
 )
+from date_metadata import (
+    SOURCE_DATE_UNKNOWN,
+    infer_source_date,
+    source_date_from_vc_path,
+)
 from indexing.chunks import Chunk, load_chunks, write_chunks
 from indexing.constants import FILE_ID_SEPARATOR, MESSAGE_SEPARATORS
 from indexing.llm_client import generate_text
@@ -29,6 +34,7 @@ logger = logging.getLogger(__name__)
 _METADATA_KEYS = (
     "source_file_name",
     "source_type",
+    "source_date",
     "meeting_date",
     "meeting_label",
     "guild_id",
@@ -101,9 +107,10 @@ def _build_base_metadata(
         "drive_file_path", ""
     )
 
-    return {
+    metadata: dict[str, object] = {
         "source_file_name": source_file_name,
         "source_type": source_type,
+        "source_date": SOURCE_DATE_UNKNOWN,
         "meeting_date": "",
         "meeting_label": "",
         "drive_file_name": drive_file_name,
@@ -114,6 +121,8 @@ def _build_base_metadata(
         "hatenablog_created_at": drive_metadata.get("hatenablog_created_at", ""),
         "hatenablog_url": drive_metadata.get("hatenablog_url", ""),
     }
+    metadata["source_date"] = infer_source_date(metadata=metadata)
+    return metadata
 
 
 def _build_vc_meeting_metadata(path: Path) -> dict[str, str]:
@@ -125,6 +134,7 @@ def _build_vc_meeting_metadata(path: Path) -> dict[str, str]:
     return {
         "meeting_date": meeting_date,
         "meeting_label": f"{meeting_date} 例会",
+        "source_date": meeting_date,
     }
 
 
@@ -198,6 +208,7 @@ def _load_message_lines(
                     "channel_name": str(metadata.get("channel_name") or ""),
                     "source_file_name": str(metadata.get("source_file_name") or ""),
                     "source_type": "messages",
+                    "source_date": SOURCE_DATE_UNKNOWN,
                 }
 
             message_id: str | None = None
@@ -494,6 +505,8 @@ def recursive_chunk_dir(
             base_metadata["source_file_name"] = (
                 f"vc/{str(rel_path).replace(os.sep, '/')}"
             )
+            if not str(base_metadata.get("source_date") or "").strip():
+                base_metadata["source_date"] = source_date_from_vc_path(path)
 
         docs = splitter.split_text(text)
         output_chunks: list[Chunk] = []
@@ -594,6 +607,7 @@ def message_chunk_jsonl_dir(
         if not base_metadata.get("source_file_name") and guild_id and channel_id:
             base_metadata["source_file_name"] = f"discord/{guild_id}/{channel_id}"
         base_metadata.setdefault("source_type", "messages")
+        base_metadata.setdefault("source_date", SOURCE_DATE_UNKNOWN)
 
         out_name = sanitize_filename(f"{guild_id}__{channel_id}.jsonl")
         expected_output_names.add(out_name)
@@ -641,7 +655,9 @@ def message_chunk_jsonl_dir(
                 )
                 if first_message_date:
                     metadata["first_message_date"] = first_message_date
+                    metadata["source_date"] = first_message_date
                 search_pos = max(search_pos, end)
+            metadata.setdefault("source_date", SOURCE_DATE_UNKNOWN)
             metadata["chunk_id"] = output_index
             metadata = _with_stage(metadata, stage)
             output_chunks.append(Chunk(text=doc, metadata=metadata))
