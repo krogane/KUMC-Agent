@@ -294,12 +294,55 @@ def _warmup_models() -> None:
 
 
 async def _send_status(
-    channel: discord.abc.Messageable | None, message: str
+    channel: discord.abc.Messageable | None,
+    message: str,
+    *,
+    history_scope: str | int | None = None,
+    history_query: str | None = None,
 ) -> None:
     if channel is None:
         logger.info(message)
         return
     await channel.send(message)
+    query = (history_query or "").strip()
+    response = (message or "").strip()
+    if not query or not response:
+        return
+    rag_pipeline._record_history(
+        query=query,
+        answer=response,
+        sources=[],
+        history_scope=history_scope,
+    )
+
+
+def _history_query_from_message(
+    message: discord.Message,
+    *,
+    fallback: str | None = None,
+) -> str:
+    if fallback:
+        query = fallback.strip()
+        if query:
+            return query
+    extracted = _extract_query_from_message(message)
+    if extracted:
+        return extracted
+    return (message.content or "").strip()
+
+
+async def _send_message_with_history(
+    message: discord.Message,
+    response: str,
+    *,
+    query: str | None = None,
+) -> None:
+    await _send_status(
+        message.channel,
+        response,
+        history_scope=_history_scope_for_message(message),
+        history_query=_history_query_from_message(message, fallback=query),
+    )
 
 
 def _format_jst_timestamp(value: datetime) -> str:
@@ -327,14 +370,24 @@ def _build_indexing_blocked_message() -> str:
     )
 
 
-async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
+async def _run_build_index(
+    channel: discord.abc.Messageable | None,
+    *,
+    history_scope: str | int | None = None,
+    history_query: str | None = None,
+) -> None:
     global is_indexing, indexing_task, indexing_process, indexing_stop_requested
     global indexing_started_at
     is_indexing = True
     if indexing_started_at is None:
         indexing_started_at = datetime.now(AUTO_INDEX_TIMEZONE)
     try:
-        await _send_status(channel, "インデックス更新を開始します。")
+        await _send_status(
+            channel,
+            "インデックス更新を開始します。",
+            history_scope=history_scope,
+            history_query=history_query,
+        )
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             str(BUILD_INDEX_PATH),
@@ -346,7 +399,12 @@ async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
             process.terminate()
         stdout, stderr = await process.communicate()
         if indexing_stop_requested:
-            await _send_status(channel, "インデックス更新を中止しました。")
+            await _send_status(
+                channel,
+                "インデックス更新を中止しました。",
+                history_scope=history_scope,
+                history_query=history_query,
+            )
             return
         if process.returncode != 0:
             logger.error(
@@ -355,7 +413,10 @@ async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
                 (stderr or b"").decode("utf-8", errors="replace"),
             )
             await _send_status(
-                channel, "インデックス更新に失敗しました。ログを確認してください。"
+                channel,
+                "インデックス更新に失敗しました。ログを確認してください。",
+                history_scope=history_scope,
+                history_query=history_query,
             )
             return
 
@@ -367,12 +428,18 @@ async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
         rag_pipeline.refresh_index()
         _warmup_models()
         await _send_status(
-            channel, "インデックス更新が完了しました。クエリ受付を再開します。"
+            channel,
+            "インデックス更新が完了しました。クエリ受付を再開します。",
+            history_scope=history_scope,
+            history_query=history_query,
         )
     except Exception:
         logger.exception("Failed to run build_index")
         await _send_status(
-            channel, "インデックス更新に失敗しました。ログを確認してください。"
+            channel,
+            "インデックス更新に失敗しました。ログを確認してください。",
+            history_scope=history_scope,
+            history_query=history_query,
         )
     finally:
         is_indexing = False
@@ -422,11 +489,21 @@ def _format_eval_metrics(metrics: dict[str, float]) -> str:
     return ", ".join(parts)
 
 
-async def _run_eval(channel: discord.abc.Messageable | None) -> None:
+async def _run_eval(
+    channel: discord.abc.Messageable | None,
+    *,
+    history_scope: str | int | None = None,
+    history_query: str | None = None,
+) -> None:
     global is_evaluating, evaluating_task
     is_evaluating = True
     try:
-        await _send_status(channel, "評価を開始します。")
+        await _send_status(
+            channel,
+            "評価を開始します。",
+            history_scope=history_scope,
+            history_query=history_query,
+        )
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             str(EVAL_SCRIPT_PATH),
@@ -440,7 +517,12 @@ async def _run_eval(channel: discord.abc.Messageable | None) -> None:
                 process.returncode,
                 (stderr or b"").decode("utf-8", errors="replace"),
             )
-            await _send_status(channel, "評価に失敗しました。ログを確認してください。")
+            await _send_status(
+                channel,
+                "評価に失敗しました。ログを確認してください。",
+                history_scope=history_scope,
+                history_query=history_query,
+            )
             return
 
         if stdout:
@@ -454,12 +536,24 @@ async def _run_eval(channel: discord.abc.Messageable | None) -> None:
             await _send_status(
                 channel,
                 f"評価が完了しました。最終指標: {_format_eval_metrics(metrics)}",
+                history_scope=history_scope,
+                history_query=history_query,
             )
         else:
-            await _send_status(channel, "評価が完了しました。")
+            await _send_status(
+                channel,
+                "評価が完了しました。",
+                history_scope=history_scope,
+                history_query=history_query,
+            )
     except Exception:
         logger.exception("Failed to run evaluate_ragas")
-        await _send_status(channel, "評価に失敗しました。ログを確認してください。")
+        await _send_status(
+            channel,
+            "評価に失敗しました。ログを確認してください。",
+            history_scope=history_scope,
+            history_query=history_query,
+        )
     finally:
         is_evaluating = False
         evaluating_task = None
@@ -479,7 +573,12 @@ async def _run_answer(message: discord.Message, query: str) -> None:
             if channel is None:
                 return
             future = asyncio.run_coroutine_threadsafe(
-                channel.send("詳細な検索を行っています…"),
+                _send_status(
+                    channel,
+                    "詳細な検索を行っています…",
+                    history_scope=history_scope,
+                    history_query=query,
+                ),
                 loop,
             )
             future.add_done_callback(_handle_research_status)
@@ -494,7 +593,12 @@ async def _run_answer(message: discord.Message, query: str) -> None:
             if channel is None:
                 return
             future = asyncio.run_coroutine_threadsafe(
-                channel.send("過去のチャットを思い出しています…"),
+                _send_status(
+                    channel,
+                    "過去のチャットを思い出しています…",
+                    history_scope=history_scope,
+                    history_query=query,
+                ),
                 loop,
             )
             future.add_done_callback(_handle_memory_status)
@@ -509,8 +613,11 @@ async def _run_answer(message: discord.Message, query: str) -> None:
             if channel is None:
                 return
             future = asyncio.run_coroutine_threadsafe(
-                channel.send(
-                    "詳細な検索を行っています…\n過去のチャットを思い出しています…"
+                _send_status(
+                    channel,
+                    "詳細な検索を行っています…\n過去のチャットを思い出しています…",
+                    history_scope=history_scope,
+                    history_query=query,
                 ),
                 loop,
             )
@@ -538,7 +645,12 @@ async def _run_answer(message: discord.Message, query: str) -> None:
         return
     except Exception as e:
         logger.exception("Failed to handle /llm request")
-        await channel.send(f"エラーが発生しました: {type(e).__name__}: {e}")
+        await _send_status(
+            channel,
+            f"エラーが発生しました: {type(e).__name__}: {e}",
+            history_scope=history_scope,
+            history_query=query,
+        )
     finally:
         voice_meeting_manager.notify_rag_finished()
         channel_cancel_events.pop(channel_id, None)
@@ -624,35 +736,65 @@ async def on_message(message: discord.Message):
         handled = await voice_meeting_manager.maybe_join_from_command(message)
         if handled:
             return
-        await message.channel.send("`/ai join` はVCのチャット欄でのみ有効です。")
+        await _send_message_with_history(
+            message,
+            "`/ai join` はVCのチャット欄でのみ有効です。",
+            query=content,
+        )
         return
     if lower_content == QUIT_COMMAND:
         handled = await voice_meeting_manager.maybe_quit_from_command(message)
         if handled:
             return
-        await message.channel.send("`/ai quit` はVCのチャット欄でのみ有効です。")
+        await _send_message_with_history(
+            message,
+            "`/ai quit` はVCのチャット欄でのみ有効です。",
+            query=content,
+        )
         return
 
     if content == BUILD_INDEX_COMMAND:
         if voice_meeting_manager.has_active_session():
-            await message.channel.send(
-                "VC参加中のため、新規のインデックス更新は開始できません。"
+            await _send_message_with_history(
+                message,
+                "VC参加中のため、新規のインデックス更新は開始できません。",
+                query=content,
             )
             return
         if indexing_task and not indexing_task.done():
-            await message.channel.send("インデックス更新は既に実行中です。")
+            await _send_message_with_history(
+                message,
+                "インデックス更新は既に実行中です。",
+                query=content,
+            )
             return
         indexing_stop_requested = False
         is_indexing = True
         indexing_started_at = datetime.now(AUTO_INDEX_TIMEZONE)
-        indexing_task = asyncio.create_task(_run_build_index(message.channel))
+        indexing_task = asyncio.create_task(
+            _run_build_index(
+                message.channel,
+                history_scope=_history_scope_for_message(message),
+                history_query=content,
+            )
+        )
         return
     if content == EVAL_COMMAND:
         if evaluating_task and not evaluating_task.done():
-            await message.channel.send("評価は既に実行中です。")
+            await _send_message_with_history(
+                message,
+                "評価は既に実行中です。",
+                query=content,
+            )
             return
         is_evaluating = True
-        evaluating_task = asyncio.create_task(_run_eval(message.channel))
+        evaluating_task = asyncio.create_task(
+            _run_eval(
+                message.channel,
+                history_scope=_history_scope_for_message(message),
+                history_query=content,
+            )
+        )
         return
     if content == STOP_COMMAND:
         channel_id = message.channel.id
@@ -670,28 +812,41 @@ async def on_message(message: discord.Message):
             actions.append("インデックス更新を中止します。")
         if not actions:
             actions.append("停止対象の処理は実行中ではありません。")
-        await message.channel.send("\n".join(actions))
+        await _send_message_with_history(
+            message,
+            "\n".join(actions),
+            query=content,
+        )
         return
 
     if is_indexing:
-        if _extract_query_from_message(message):
-            await message.channel.send(_build_indexing_blocked_message())
+        query = _extract_query_from_message(message)
+        if query:
+            await _send_message_with_history(
+                message,
+                _build_indexing_blocked_message(),
+                query=query,
+            )
         return
 
     query = _extract_query_from_message(message)
     if not query:
         return
     if MAX_INPUT_CHARACTERS > 0 and len(query) > MAX_INPUT_CHARACTERS:
-        await message.channel.send(
-            f"入力できる最大文字数を超えています。（{MAX_INPUT_CHARACTERS}）以下で入力してください。"
+        await _send_message_with_history(
+            message,
+            f"入力できる最大文字数を超えています。（{MAX_INPUT_CHARACTERS}）以下で入力してください。",
+            query=query,
         )
         return
 
     channel_id = message.channel.id
     existing = channel_generation_tasks.get(channel_id)
     if existing and not existing.done():
-        await message.channel.send(
-            "回答生成は既に実行中です。中止する場合は /ai stop を実行してください。"
+        await _send_message_with_history(
+            message,
+            "回答生成は既に実行中です。中止する場合は /ai stop を実行してください。",
+            query=query,
         )
         return
     task = asyncio.create_task(_run_answer(message, query))
