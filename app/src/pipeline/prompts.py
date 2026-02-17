@@ -171,9 +171,23 @@ def history_to_messages(
             messages.append({"role": "assistant", "content": assistant_value})
     return messages
 
+
+def _format_question_block(*, query: str, question_author: str | None = None) -> str:
+    query_value = (query or "").strip()
+    author_value = " ".join(
+        segment.strip()
+        for segment in str(question_author or "").splitlines()
+        if segment.strip()
+    )
+    if author_value:
+        return f"author: {author_value}\n{query_value}"
+    return query_value
+
+
 def build_gemini_prompt(
     *,
     query: str,
+    question_author: str | None = None,
     prompt_mode: PromptMode,
     docs: list[Document],
     history: Sequence[ChatHistoryEntry] | None = None,
@@ -218,13 +232,17 @@ def build_gemini_prompt(
         f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_INSTRUCTIONS')}\n"
         f"{format_mode_instructions(mode=prompt_mode)}"
     )
-    sections.append(f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_QUESTION')}\n{query}")
+    sections.append(
+        f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_QUESTION')}\n"
+        f"{_format_question_block(query=query, question_author=question_author)}"
+    )
     return "\n\n".join(sections)
 
 
 def build_llama_messages(
     *,
     query: str,
+    question_author: str | None = None,
     prompt_mode: PromptMode,
     docs: list[Document],
     config: AppConfig,
@@ -234,10 +252,14 @@ def build_llama_messages(
     circle_basic_info: str | None = None,
 ) -> list[dict[str, str]]:
     context = format_doc_context(docs)
+    question_block = _format_question_block(
+        query=query,
+        question_author=question_author,
+    )
     system = "\n".join(config.system_rules)
     user_sections = [
         get_required_prompt_env("PROMPT_LLAMA_HEADER_QUESTION"),
-        f"{query}",
+        question_block,
     ]
     if retry_history:
         user_sections.extend(

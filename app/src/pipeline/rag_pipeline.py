@@ -226,6 +226,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         docs: list[Document],
         retry_history: Sequence[tuple[str, str]] | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
@@ -244,6 +245,7 @@ class RagPipeline:
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
+                question_author=question_author,
                 prompt_mode="rag_idea" if idea_generation else "rag",
                 docs=docs,
                 history=history,
@@ -278,6 +280,7 @@ class RagPipeline:
             )
             messages = build_llama_messages(
                 query=query,
+                question_author=question_author,
                 prompt_mode="rag_idea" if idea_generation else "rag",
                 docs=docs,
                 config=self._config,
@@ -316,6 +319,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         retry_history: Sequence[tuple[str, str]] | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
         include_capabilities_info: bool = True,
@@ -333,6 +337,7 @@ class RagPipeline:
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
+                question_author=question_author,
                 prompt_mode="no_rag",
                 docs=docs,
                 history=history,
@@ -357,6 +362,7 @@ class RagPipeline:
         elif provider == "llama":
             messages = build_llama_messages(
                 query=query,
+                question_author=question_author,
                 prompt_mode="no_rag",
                 docs=docs,
                 config=self._config,
@@ -395,6 +401,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
         include_capabilities_info: bool = False,
         history_scope: str | int | None = None,
@@ -412,6 +419,7 @@ class RagPipeline:
         if provider == "gemini":
             prompt = build_gemini_prompt(
                 query=query,
+                question_author=question_author,
                 prompt_mode="refusal",
                 docs=docs,
                 history=history,
@@ -431,6 +439,7 @@ class RagPipeline:
         elif provider == "llama":
             messages = build_llama_messages(
                 query=query,
+                question_author=question_author,
                 prompt_mode="refusal",
                 docs=docs,
                 config=self._config,
@@ -491,6 +500,7 @@ class RagPipeline:
         self,
         query: str,
         *,
+        question_author: str | None = None,
         on_research_start: Callable[[], None] | None = None,
         on_memory_start: Callable[[], None] | None = None,
         on_research_and_memory_start: Callable[[], None] | None = None,
@@ -517,6 +527,7 @@ class RagPipeline:
             )
             routing = decide_tools(
                 query=query,
+                question_author=question_author,
                 config=self._config,
                 history=routing_history,
             )
@@ -549,6 +560,7 @@ class RagPipeline:
         if routing.target_model == "refusal":
             answer = self.answer_refusal(
                 query=query,
+                question_author=question_author,
                 use_additional_history=routing.use_additional_memory,
                 include_capabilities_info=False,
                 history_scope=history_scope,
@@ -577,6 +589,7 @@ class RagPipeline:
             answer, final, source_ids, used_docs, history_sources = (
                 self._answer_with_docs(
                     query=query,
+                    question_author=question_author,
                     docs=docs,
                     use_additional_history=routing.use_additional_memory,
                     include_capabilities_info=routing.include_capabilities_info,
@@ -596,6 +609,7 @@ class RagPipeline:
 
         answer = self.answer_no_rag(
             query,
+            question_author=question_author,
             use_additional_history=routing.use_additional_memory,
             include_capabilities_info=routing.include_capabilities_info,
             history_scope=history_scope,
@@ -607,6 +621,7 @@ class RagPipeline:
         self,
         query: str,
         *,
+        question_author: str | None = None,
         use_additional_history: bool = False,
         include_capabilities_info: bool = True,
         history_scope: str | int | None = None,
@@ -614,6 +629,7 @@ class RagPipeline:
     ) -> str:
         answer, _ = self._generate_no_rag_payload(
             query=query,
+            question_author=question_author,
             use_additional_history=use_additional_history,
             include_capabilities_info=include_capabilities_info,
             history_scope=history_scope,
@@ -631,6 +647,7 @@ class RagPipeline:
         self,
         query: str,
         *,
+        question_author: str | None = None,
         use_additional_history: bool = False,
         include_capabilities_info: bool = False,
         history_scope: str | int | None = None,
@@ -650,6 +667,7 @@ class RagPipeline:
         try:
             supplemental = self._generate_refusal(
                 query=query,
+                question_author=question_author,
                 history=history,
                 include_capabilities_info=include_capabilities_info,
                 history_scope=history_scope,
@@ -675,6 +693,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         docs: list[Document],
         use_additional_history: bool = False,
         include_capabilities_info: bool = True,
@@ -685,6 +704,7 @@ class RagPipeline:
     ) -> tuple[str, str, list[int], list[Document], list[str]]:
         answer, source_ids, used_docs = self._generate_answer_payload(
             query=query,
+            question_author=question_author,
             docs=docs,
             use_additional_history=use_additional_history,
             include_capabilities_info=include_capabilities_info,
@@ -1819,6 +1839,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         use_additional_history: bool = False,
         include_capabilities_info: bool = True,
         history_scope: str | int | None = None,
@@ -1839,6 +1860,7 @@ class RagPipeline:
             )
             raw = self._generate_no_rag(
                 query=query,
+                question_author=question_author,
                 history=history,
                 include_capabilities_info=include_capabilities_info,
                 history_scope=history_scope,
@@ -1864,6 +1886,7 @@ class RagPipeline:
         self,
         *,
         query: str,
+        question_author: str | None = None,
         docs: list[Document],
         use_additional_history: bool = False,
         include_capabilities_info: bool = True,
@@ -1886,6 +1909,7 @@ class RagPipeline:
             )
             raw = self.generate(
                 query=query,
+                question_author=question_author,
                 docs=docs,
                 history=history,
                 include_capabilities_info=include_capabilities_info,

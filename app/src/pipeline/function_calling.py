@@ -71,6 +71,7 @@ def _default_decision() -> FunctionRoutingDecision:
 def decide_tools(
     *,
     query: str,
+    question_author: str | None = None,
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
 ) -> FunctionRoutingDecision:
@@ -79,6 +80,7 @@ def decide_tools(
     for attempt in range(max_retries + 1):
         raw = _generate_routing_payload(
             query=query,
+            question_author=question_author,
             config=config,
             history=history,
         )
@@ -107,6 +109,7 @@ def decide_tools(
 def _generate_routing_payload(
     *,
     query: str,
+    question_author: str | None = None,
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
 ) -> str:
@@ -114,12 +117,14 @@ def _generate_routing_payload(
     if provider == "gemini":
         return _generate_routing_payload_gemini(
             query=query,
+            question_author=question_author,
             config=config,
             history=history,
         )
     if provider in {"llama_cpp", "llama"}:
         return _generate_routing_payload_llama(
             query=query,
+            question_author=question_author,
             config=config,
             history=history,
         )
@@ -155,20 +160,30 @@ def _format_routing_history(
 def _routing_user_prompt(
     *,
     query: str,
+    question_author: str | None = None,
     history: Sequence[ChatHistoryEntry] | None,
 ) -> str:
     history_text = _format_routing_history(history)
+    author_value = " ".join(
+        segment.strip()
+        for segment in str(question_author or "").splitlines()
+        if segment.strip()
+    )
+    question_block = (query or "").strip()
+    if author_value:
+        question_block = f"author: {author_value}\n{question_block}"
     return (
         "## それまでのチャット履歴\n"
         f"{history_text}\n\n"
         "## 今回の質問\n"
-        f"{(query or '').strip()}"
+        f"{question_block}"
     )
 
 
 def _generate_routing_payload_gemini(
     *,
     query: str,
+    question_author: str | None = None,
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
 ) -> str:
@@ -194,6 +209,7 @@ def _generate_routing_payload_gemini(
                     {
                         "text": _routing_user_prompt(
                             query=query,
+                            question_author=question_author,
                             history=history,
                         )
                     }
@@ -215,6 +231,7 @@ def _generate_routing_payload_gemini(
 def _generate_routing_payload_llama(
     *,
     query: str,
+    question_author: str | None = None,
     config: AppConfig,
     history: Sequence[ChatHistoryEntry] | None = None,
 ) -> str:
@@ -241,6 +258,7 @@ def _generate_routing_payload_llama(
                 "role": "user",
                 "content": _routing_user_prompt(
                     query=query,
+                    question_author=question_author,
                     history=history,
                 ),
             },

@@ -128,6 +128,20 @@ def _extract_query_from_message(message: discord.Message) -> str:
     return ""
 
 
+def _question_author_from_message(message: discord.Message) -> str:
+    author = getattr(message, "author", None)
+    display_name = str(getattr(author, "display_name", "") or "").strip()
+    user_name = str(getattr(author, "name", "") or "").strip()
+    if display_name and user_name:
+        return f"{display_name} (@{user_name})"
+    if display_name:
+        return display_name
+    if user_name:
+        return f"@{user_name}"
+    author_id = str(getattr(author, "id", "") or "").strip()
+    return author_id or "unknown"
+
+
 def _history_scope_for_message(message: discord.Message) -> str:
     guild = getattr(message, "guild", None)
     guild_id = getattr(guild, "id", None)
@@ -573,6 +587,7 @@ async def _run_eval(
 async def _run_answer(message: discord.Message, query: str) -> None:
     channel = message.channel
     channel_id = channel.id
+    question_author = _question_author_from_message(message)
     history_scope = _history_scope_for_message(message)
     cancel_event = threading.Event()
     channel_cancel_events[channel_id] = cancel_event
@@ -643,6 +658,7 @@ async def _run_answer(message: discord.Message, query: str) -> None:
         answer = await asyncio.to_thread(
             rag_pipeline.answer_with_routing,
             query,
+            question_author=question_author,
             on_research_start=_notify_research_start,
             on_memory_start=_notify_memory_start,
             on_research_and_memory_start=_notify_research_and_memory_start,
