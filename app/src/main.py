@@ -3,7 +3,7 @@ import json
 import logging
 import sys
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -81,6 +81,7 @@ is_indexing = False
 indexing_task: asyncio.Task[None] | None = None
 indexing_process: asyncio.subprocess.Process | None = None
 indexing_stop_requested = False
+indexing_started_at: datetime | None = None
 auto_index_task: asyncio.Task[None] | None = None
 auto_index_last_run: date | None = None
 is_evaluating = False
@@ -301,9 +302,37 @@ async def _send_status(
     await channel.send(message)
 
 
+def _format_jst_timestamp(value: datetime) -> str:
+    return value.astimezone(AUTO_INDEX_TIMEZONE).strftime("%Y/%m/%d %H:%M")
+
+
+def _build_indexing_blocked_message() -> str:
+    started_at = indexing_started_at or datetime.now(AUTO_INDEX_TIMEZONE)
+    min_minutes = APP_CONFIG.index_update_estimate_min_minutes
+    max_minutes = APP_CONFIG.index_update_estimate_max_minutes
+    min_end = started_at + timedelta(minutes=min_minutes)
+    max_end = started_at + timedelta(minutes=max_minutes)
+
+    if min_minutes == max_minutes:
+        estimate_text = _format_jst_timestamp(min_end)
+    else:
+        estimate_text = (
+            f"{_format_jst_timestamp(min_end)}〜"
+            f"{_format_jst_timestamp(max_end)}"
+        )
+    return (
+        "インデックス更新中のため、クエリ受付を停止しています。\n"
+        f"更新開始時刻: {_format_jst_timestamp(started_at)} (JST)\n"
+        f"終了目安: {estimate_text} (JST)"
+    )
+
+
 async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
     global is_indexing, indexing_task, indexing_process, indexing_stop_requested
+    global indexing_started_at
     is_indexing = True
+    if indexing_started_at is None:
+        indexing_started_at = datetime.now(AUTO_INDEX_TIMEZONE)
     try:
         await _send_status(channel, "インデックス更新を開始します。")
         process = await asyncio.create_subprocess_exec(
@@ -350,6 +379,7 @@ async def _run_build_index(channel: discord.abc.Messageable | None) -> None:
         indexing_task = None
         indexing_process = None
         indexing_stop_requested = False
+        indexing_started_at = None
 
 
 def _parse_eval_metrics(output: bytes) -> dict[str, float] | None:
@@ -529,6 +559,7 @@ def _should_run_auto_index(now: datetime) -> bool:
 
 async def _auto_index_loop() -> None:
     global auto_index_last_run, indexing_task, is_indexing, indexing_stop_requested
+    global indexing_started_at
     logger.info(
         "Auto index scheduler started. enabled=%s time=%02d:%02d weekdays=%s timezone=%s",
         AUTO_INDEX_ENABLED,
@@ -552,6 +583,7 @@ async def _auto_index_loop() -> None:
             continue
         is_indexing = True
         indexing_stop_requested = False
+        indexing_started_at = now
         auto_index_last_run = now.date()
         indexing_task = asyncio.create_task(_run_build_index(None))
 
@@ -578,6 +610,7 @@ async def on_voice_state_update(
 @discord_client.event
 async def on_message(message: discord.Message):
     global evaluating_task, indexing_process, indexing_stop_requested, indexing_task
+    global indexing_started_at
     global is_evaluating, is_indexing
     if message.author.bot:
         return
@@ -611,6 +644,7 @@ async def on_message(message: discord.Message):
             return
         indexing_stop_requested = False
         is_indexing = True
+        indexing_started_at = datetime.now(AUTO_INDEX_TIMEZONE)
         indexing_task = asyncio.create_task(_run_build_index(message.channel))
         return
     if content == EVAL_COMMAND:
@@ -641,7 +675,7 @@ async def on_message(message: discord.Message):
 
     if is_indexing:
         if _extract_query_from_message(message):
-            await message.channel.send("インデックス更新中のため、クエリ受付を停止しています。")
+            await message.channel.send(_build_indexing_blocked_message())
         return
 
     query = _extract_query_from_message(message)

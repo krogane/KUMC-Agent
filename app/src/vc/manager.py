@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes.util
 import json
 import logging
 import math
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -174,6 +176,8 @@ if voice_recv is not None:
             with self._decoder_lock:
                 decoder = self._opus_decoders.get(stream_key)
                 if decoder is None:
+                    if not _ensure_opus_loaded():
+                        raise RuntimeError("Opus library is not loaded.")
                     decoder = discord.opus.Decoder()
                     self._opus_decoders[stream_key] = decoder
                 return decoder
@@ -310,6 +314,12 @@ class VoiceMeetingManager:
         if hf_pipeline is None or AutoProcessor is None or AutoModelForSpeechSeq2Seq is None:
             logger.warning(
                 "VC feature enabled, but transformers ASR dependencies are unavailable."
+            )
+            return
+        if not _ensure_opus_loaded():
+            logger.warning(
+                "VC feature enabled, but Opus library is unavailable. "
+                "Install libopus and/or set VC_OPUS_LIBRARY."
             )
             return
 
@@ -543,6 +553,12 @@ class VoiceMeetingManager:
 
         if voice_recv is None:
             await voice_channel.send("voice_recv依存が見つからないため参加できません。")
+            return
+        if not _ensure_opus_loaded():
+            await voice_channel.send(
+                "Opusライブラリが見つからないため、音声を受信できません。"
+                "実行環境にlibopusを導入し、必要ならVC_OPUS_LIBRARYを設定してください。"
+            )
             return
 
         meeting_dir, meeting_key, meeting_date, meeting_label = self._allocate_meeting_dir()
@@ -1478,6 +1494,57 @@ def _resolve_torch_device(device_name: str) -> str:
     if requested == "cuda" and torch.cuda.is_available():
         return "cuda:0"
     return requested
+
+
+def _ensure_opus_loaded() -> bool:
+    if discord.opus.is_loaded():
+        return True
+
+    for candidate in _opus_library_candidates():
+        try:
+            discord.opus.load_opus(candidate)
+        except Exception:
+            continue
+        if discord.opus.is_loaded():
+            logger.info("Loaded Opus library: %s", candidate)
+            return True
+    return discord.opus.is_loaded()
+
+
+def _opus_library_candidates() -> list[str]:
+    candidates: list[str] = []
+    for key in ("VC_OPUS_LIBRARY", "DISCORD_OPUS_LIBRARY", "OPUS_LIBRARY"):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            candidates.append(value)
+
+    found = ctypes.util.find_library("opus")
+    if found:
+        candidates.append(found)
+
+    candidates.extend(
+        [
+            "opus",
+            "libopus",
+            "libopus.so.0",
+            "libopus.so",
+            "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+            "/usr/local/lib/libopus.so.0",
+            "/opt/homebrew/lib/libopus.dylib",
+            "/usr/local/lib/libopus.dylib",
+            "libopus.dylib",
+            "opus.dll",
+        ]
+    )
+
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item in seen:
+            continue
+        uniq.append(item)
+        seen.add(item)
+    return uniq
 
 
 def _resolve_torch_dtype(*, dtype_name: str, device_str: str):

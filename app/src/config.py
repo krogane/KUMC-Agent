@@ -247,6 +247,8 @@ DEFAULT_INDEX_COMMAND_PREFIX: str = "/ai build-index"
 DEFAULT_AUTO_INDEX_ENABLED: bool = False
 DEFAULT_AUTO_INDEX_TIME: str = "03:00"
 DEFAULT_AUTO_INDEX_WEEKDAYS: str = "mon,tue,wed,thu,fri"
+DEFAULT_INDEX_UPDATE_ESTIMATE_MIN_MINUTES: int = 30
+DEFAULT_INDEX_UPDATE_ESTIMATE_MAX_MINUTES: int = 60
 DEFAULT_DISCORD_GUILD_ALLOW_LIST: str = ""
 DEFAULT_MAX_INPUT_CHARACTERS: int = 0
 DEFAULT_PROMPT_FULL_LOG_ENABLED: bool = True
@@ -701,6 +703,12 @@ class AppConfig:
     auto_index_weekdays: tuple[int, ...] = ()
     auto_index_hour: int = 0
     auto_index_minute: int = 0
+    index_update_estimate_min_minutes: int = (
+        DEFAULT_INDEX_UPDATE_ESTIMATE_MIN_MINUTES
+    )
+    index_update_estimate_max_minutes: int = (
+        DEFAULT_INDEX_UPDATE_ESTIMATE_MAX_MINUTES
+    )
     vc_feature_enabled: bool = DEFAULT_VC_FEATURE_ENABLED
     vc_auto_join_enabled: bool = DEFAULT_VC_AUTO_JOIN_ENABLED
     vc_auto_join_weekdays: tuple[int, ...] = ()
@@ -904,6 +912,8 @@ class AppConfig:
         auto_index_enabled: bool | None = None,
         auto_index_weekdays: str | None = None,
         auto_index_time: str | None = None,
+        index_update_estimate_min_minutes: int | None = None,
+        index_update_estimate_max_minutes: int | None = None,
         raptor_enabled: bool | None = None,
         raptor_cluster_max_tokens: int | None = None,
         raptor_summery_max_tokens: int | None = None,
@@ -1221,6 +1231,28 @@ class AppConfig:
         )
         auto_index_weekdays_parsed = _parse_weekdays(
             auto_index_weekdays_value, default=DEFAULT_AUTO_INDEX_WEEKDAYS
+        )
+        index_update_estimate_min_minutes_value = max(
+            0,
+            index_update_estimate_min_minutes
+            if index_update_estimate_min_minutes is not None
+            else int(
+                os.getenv(
+                    "INDEX_UPDATE_ESTIMATE_MIN_MINUTES",
+                    str(DEFAULT_INDEX_UPDATE_ESTIMATE_MIN_MINUTES),
+                )
+            ),
+        )
+        index_update_estimate_max_minutes_value = max(
+            index_update_estimate_min_minutes_value,
+            index_update_estimate_max_minutes
+            if index_update_estimate_max_minutes is not None
+            else int(
+                os.getenv(
+                    "INDEX_UPDATE_ESTIMATE_MAX_MINUTES",
+                    str(DEFAULT_INDEX_UPDATE_ESTIMATE_MAX_MINUTES),
+                )
+            ),
         )
         vc_auto_join_time_value = os.getenv(
             "VC_AUTO_JOIN_TIME",
@@ -1792,6 +1824,8 @@ class AppConfig:
             auto_index_weekdays=auto_index_weekdays_parsed,
             auto_index_hour=auto_index_hour,
             auto_index_minute=auto_index_minute,
+            index_update_estimate_min_minutes=index_update_estimate_min_minutes_value,
+            index_update_estimate_max_minutes=index_update_estimate_max_minutes_value,
             vc_feature_enabled=_env_bool(
                 os.getenv("VC_FEATURE_ENABLED"), DEFAULT_VC_FEATURE_ENABLED
             ),

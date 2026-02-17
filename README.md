@@ -139,6 +139,7 @@ pip install -r requirements.txt
 - `DISCORD_GUILD_ALLOW_LIST`（カンマ区切りID。空なら全ギルド）
 - `DRIVE_MAX_FILES`（0で無制限）
 - `AUTO_INDEX_ENABLED`, `AUTO_INDEX_TIME`（例: `03:00`）, `AUTO_INDEX_WEEKDAYS`（例: `mon,tue,...` or `0-6`）
+- `INDEX_UPDATE_ESTIMATE_MIN_MINUTES`, `INDEX_UPDATE_ESTIMATE_MAX_MINUTES`（更新中に案内する終了目安レンジ。既定: `30`〜`60`）
 
 #### その他
 - `COMMAND_PREFIX`（質問用プレフィックス）
