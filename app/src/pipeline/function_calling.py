@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
+from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from config import AppConfig
@@ -49,6 +50,9 @@ class FunctionRoutingDecision:
     additional_queries: list[str]
 
 
+ChatHistoryEntry = tuple[str, str, Sequence[str]]
+
+
 def _default_decision() -> FunctionRoutingDecision:
     return FunctionRoutingDecision(
         target_model="rag",
@@ -60,11 +64,20 @@ def _default_decision() -> FunctionRoutingDecision:
     )
 
 
-def decide_tools(*, query: str, config: AppConfig) -> FunctionRoutingDecision:
+def decide_tools(
+    *,
+    query: str,
+    config: AppConfig,
+    history: Sequence[ChatHistoryEntry] | None = None,
+) -> FunctionRoutingDecision:
     max_retries = max(0, config.function_call_max_retries)
     last_raw = ""
     for attempt in range(max_retries + 1):
-        raw = _generate_routing_payload(query=query, config=config)
+        raw = _generate_routing_payload(
+            query=query,
+            config=config,
+            history=history,
+        )
         last_raw = raw
         if config.function_call_log_enabled:
             logger.info("Function-calling raw output: %s", raw)
@@ -87,12 +100,25 @@ def decide_tools(*, query: str, config: AppConfig) -> FunctionRoutingDecision:
     return _default_decision()
 
 
-def _generate_routing_payload(*, query: str, config: AppConfig) -> str:
+def _generate_routing_payload(
+    *,
+    query: str,
+    config: AppConfig,
+    history: Sequence[ChatHistoryEntry] | None = None,
+) -> str:
     provider = (config.function_call_provider or "").lower()
     if provider == "gemini":
-        return _generate_routing_payload_gemini(query=query, config=config)
+        return _generate_routing_payload_gemini(
+            query=query,
+            config=config,
+            history=history,
+        )
     if provider in {"llama_cpp", "llama"}:
-        return _generate_routing_payload_llama(query=query, config=config)
+        return _generate_routing_payload_llama(
+            query=query,
+            config=config,
+            history=history,
+        )
     raise ValueError(
         "Unsupported FUNCTION_CALL_PROVIDER: "
         f"{config.function_call_provider}. Use 'gemini' or 'llama_cpp'."
@@ -106,7 +132,42 @@ def _routing_system_prompt() -> str:
     return _DEFAULT_ROUTING_SYSTEM_PROMPT.format(today_label=today_label)
 
 
-def _generate_routing_payload_gemini(*, query: str, config: AppConfig) -> str:
+def _format_routing_history(
+    history: Sequence[ChatHistoryEntry] | None,
+) -> str:
+    if not history:
+        return "（履歴なし）"
+    lines: list[str] = []
+    for user_text, assistant_text, _ in history:
+        user_value = (user_text or "").strip()
+        assistant_value = (assistant_text or "").strip()
+        if user_value:
+            lines.append(f"ユーザー: {user_value}")
+        if assistant_value:
+            lines.append(f"アシスタント: {assistant_value}")
+    return "\n".join(lines) if lines else "（履歴なし）"
+
+
+def _routing_user_prompt(
+    *,
+    query: str,
+    history: Sequence[ChatHistoryEntry] | None,
+) -> str:
+    history_text = _format_routing_history(history)
+    return (
+        "## それまでのチャット履歴\n"
+        f"{history_text}\n\n"
+        "## 今回の質問\n"
+        f"{(query or '').strip()}"
+    )
+
+
+def _generate_routing_payload_gemini(
+    *,
+    query: str,
+    config: AppConfig,
+    history: Sequence[ChatHistoryEntry] | None = None,
+) -> str:
     if not config.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set. Please set it in .env")
 
@@ -125,7 +186,14 @@ def _generate_routing_payload_gemini(*, query: str, config: AppConfig) -> str:
             },
             {
                 "role": "user",
-                "parts": [{"text": query or ""}],
+                "parts": [
+                    {
+                        "text": _routing_user_prompt(
+                            query=query,
+                            history=history,
+                        )
+                    }
+                ],
             },
         ],
         config=genai.types.GenerateContentConfig(
@@ -140,7 +208,12 @@ def _generate_routing_payload_gemini(*, query: str, config: AppConfig) -> str:
     return (response.text or "").strip()
 
 
-def _generate_routing_payload_llama(*, query: str, config: AppConfig) -> str:
+def _generate_routing_payload_llama(
+    *,
+    query: str,
+    config: AppConfig,
+    history: Sequence[ChatHistoryEntry] | None = None,
+) -> str:
     if not config.function_call_llama_model_path:
         raise RuntimeError(
             "FUNCTION_CALL_LLAMA_MODEL is not set. Please set it to a gguf model path in .env"
@@ -162,7 +235,10 @@ def _generate_routing_payload_llama(*, query: str, config: AppConfig) -> str:
             },
             {
                 "role": "user",
-                "content": query or "",
+                "content": _routing_user_prompt(
+                    query=query,
+                    history=history,
+                ),
             },
         ],
         max_tokens=max(1, int(config.function_call_max_new_tokens)),

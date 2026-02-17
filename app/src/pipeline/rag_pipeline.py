@@ -405,7 +405,6 @@ class RagPipeline:
                 circle_basic_info="",
                 chatbot_capabilities_info=self._config.chatbot_capabilities_info,
                 include_capabilities_info=include_capabilities_info,
-                include_history_sources=False,
             )
             text = generate_with_gemini_config(
                 api_key=self._config.gemini_api_key,
@@ -424,7 +423,6 @@ class RagPipeline:
                 config=self._config,
                 history=history,
                 include_capabilities_info=include_capabilities_info,
-                include_history_sources=False,
                 circle_basic_info="",
             )
             text = generate_with_llama_config(
@@ -498,7 +496,16 @@ class RagPipeline:
                 additional_queries=[],
             )
         else:
-            routing = decide_tools(query=query, config=self._config)
+            routing_history = self._history_for_prompt(
+                limit=self._config.prompt_history_default_turns,
+                include_sources=False,
+                history_scope=history_scope,
+            )
+            routing = decide_tools(
+                query=query,
+                config=self._config,
+                history=routing_history,
+            )
         logger.info(
             "Function-call routing decision: %s",
             routing,
@@ -667,9 +674,7 @@ class RagPipeline:
             history_scope=history_scope,
             cancel_event=cancel_event,
         )
-        history_sources = self._sources_for_history(
-            docs=used_docs, source_ids=source_ids
-        )
+        history_sources: list[str] = []
         source_ids = self._order_source_ids(
             source_ids=source_ids,
             query=query,
@@ -694,13 +699,10 @@ class RagPipeline:
             docs=docs,
             history_scope=history_scope,
         )
-        history_sources = self._sources_for_history(
-            docs=used_docs, source_ids=source_ids
-        )
         self._record_history(
             query=query,
             answer=answer,
-            sources=history_sources,
+            sources=[],
             history_scope=history_scope,
         )
         return answer, [doc_to_context(d) for d in used_docs]
@@ -1535,20 +1537,22 @@ class RagPipeline:
             ]
             candidate_groups = [future.result() for future in futures]
 
-        seen_doc_keys = {self._doc_key(doc) for doc in docs}
-        added: list[Document] = []
-        for candidates in candidate_groups:
+        # Keep parent-related context adjacent to the originating chunk so
+        # second_recursive / proposition style chunks and their summaries stay paired.
+        ordered: list[Document] = []
+        seen_doc_keys: set[tuple[object, ...]] = set()
+        for doc, candidates in zip(docs, candidate_groups):
+            doc_key = self._doc_key(doc)
+            if doc_key not in seen_doc_keys:
+                seen_doc_keys.add(doc_key)
+                ordered.append(doc)
             for candidate in candidates:
                 candidate_key = self._doc_key(candidate)
                 if candidate_key in seen_doc_keys:
                     continue
                 seen_doc_keys.add(candidate_key)
-                added.append(candidate)
-
-        if not added:
-            return docs
-        added.reverse()
-        return docs + added
+                ordered.append(candidate)
+        return ordered
 
     def _parent_candidates_for_doc(self, doc: Document) -> list[Document]:
         metadata = doc.metadata or {}
@@ -1724,7 +1728,7 @@ class RagPipeline:
                     if use_additional_history
                     else self._config.prompt_history_default_turns
                 ),
-                include_sources=use_additional_history,
+                include_sources=False,
                 history_scope=history_scope,
             )
             raw = self._generate_no_rag(
@@ -1771,7 +1775,7 @@ class RagPipeline:
                     if use_additional_history
                     else self._config.prompt_history_default_turns
                 ),
-                include_sources=use_additional_history,
+                include_sources=False,
                 history_scope=history_scope,
             )
             raw = self.generate(
@@ -1927,24 +1931,6 @@ class RagPipeline:
             (user_text, assistant_text, [])
             for user_text, assistant_text, _ in selected
         ]
-
-    def _sources_for_history(
-        self,
-        *,
-        docs: list[Document],
-        source_ids: list[int],
-    ) -> list[str]:
-        if not docs or not source_ids:
-            return []
-        contexts: list[str] = []
-        seen: set[int] = set()
-        for idx in source_ids:
-            if idx in seen:
-                continue
-            if 1 <= idx <= len(docs):
-                contexts.append(doc_to_context(docs[idx - 1]))
-                seen.add(idx)
-        return contexts
 
     def _record_history(
         self,

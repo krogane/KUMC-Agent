@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Literal, Sequence
 
 from langchain_core.documents import Document
@@ -53,12 +52,17 @@ def _doc_to_context(doc: Document) -> str:
             return f"{header}\n{doc.page_content}"
         return doc.page_content
     first_message_date = str(metadata.get("first_message_date") or "").strip()
+    guild_name = str(metadata.get("guild_name") or "").strip()
     category_name = str(metadata.get("category_name") or "").strip()
     channel_name = str(metadata.get("channel_name") or "").strip()
     if channel_name:
-        channel_display = (
-            f"{category_name} / {channel_name}" if category_name else channel_name
-        )
+        channel_parts: list[str] = []
+        if guild_name:
+            channel_parts.append(guild_name)
+        if category_name:
+            channel_parts.append(category_name)
+        channel_parts.append(channel_name)
+        channel_display = " / ".join(channel_parts)
         if first_message_date:
             return (
                 f"channel_name: {channel_display}\n"
@@ -103,30 +107,13 @@ def format_mode_instructions(*, mode: PromptMode) -> str:
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
 
 
-_HISTORY_SOURCE_INDEX_PATTERN = re.compile(r"^\[\d+\]\s*\n?")
-
-
-def _clean_history_sources(sources: Sequence[str]) -> list[str]:
-    cleaned_sources: list[str] = []
-    for source in sources:
-        cleaned = (source or "").strip()
-        if not cleaned:
-            continue
-        cleaned = _HISTORY_SOURCE_INDEX_PATTERN.sub("", cleaned, count=1).strip()
-        if cleaned:
-            cleaned_sources.append(cleaned)
-    return cleaned_sources
-
-
 def format_chat_history(
     history: Sequence[ChatHistoryEntry],
-    *,
-    include_sources: bool = True,
 ) -> str:
     if not history:
         return get_required_prompt_env("PROMPT_EMPTY_HISTORY")
     parts: list[str] = []
-    for user_text, assistant_text, sources in history:
+    for user_text, assistant_text, _ in history:
         user_value = (user_text or "").strip()
         assistant_value = (assistant_text or "").strip()
         turn_parts: list[str] = []
@@ -138,11 +125,6 @@ def format_chat_history(
             turn_parts.append(
                 f"{get_required_prompt_env('PROMPT_HISTORY_ASSISTANT_PREFIX')}{assistant_value}"
             )
-        if include_sources and sources:
-            cleaned_sources = _clean_history_sources(sources)
-            if cleaned_sources:
-                turn_parts.append(get_required_prompt_env("PROMPT_HISTORY_SOURCES_LABEL"))
-                turn_parts.append("\n\n---\n\n".join(cleaned_sources))
         if turn_parts:
             parts.append("\n".join(turn_parts))
     return "\n\n".join(parts) if parts else get_required_prompt_env("PROMPT_EMPTY_HISTORY")
@@ -168,29 +150,15 @@ def format_retry_history(history: Sequence[tuple[str, str]]) -> str:
 
 def history_to_messages(
     history: Sequence[ChatHistoryEntry],
-    *,
-    include_sources: bool = True,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
-    for user_text, assistant_text, sources in history:
+    for user_text, assistant_text, _ in history:
         user_value = (user_text or "").strip()
         assistant_value = (assistant_text or "").strip()
         if user_value:
             messages.append({"role": "user", "content": user_value})
-        if assistant_value or (include_sources and sources):
-            assistant_parts: list[str] = []
-            if assistant_value:
-                assistant_parts.append(assistant_value)
-            if include_sources and sources:
-                cleaned_sources = _clean_history_sources(sources)
-                if cleaned_sources:
-                    assistant_parts.append(
-                        f"{get_required_prompt_env('PROMPT_HISTORY_SOURCES_LABEL')}\n"
-                        + "\n\n---\n\n".join(cleaned_sources)
-                    )
-            messages.append(
-                {"role": "assistant", "content": "\n\n".join(assistant_parts)}
-            )
+        if assistant_value:
+            messages.append({"role": "assistant", "content": assistant_value})
     return messages
 
 def build_gemini_prompt(
@@ -203,14 +171,13 @@ def build_gemini_prompt(
     circle_basic_info: str = "",
     chatbot_capabilities_info: str = "",
     include_capabilities_info: bool = True,
-    include_history_sources: bool = True,
 ) -> str:
     context = format_doc_context(docs)
     sections: list[str] = []
     if history is not None:
         sections.append(
             f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_CHAT_HISTORY')}\n"
-            f"{format_chat_history(history, include_sources=include_history_sources)}"
+            f"{format_chat_history(history)}"
         )
     if retry_history:
         sections.append(
@@ -254,7 +221,6 @@ def build_llama_messages(
     history: Sequence[ChatHistoryEntry] | None = None,
     retry_history: Sequence[tuple[str, str]] | None = None,
     include_capabilities_info: bool = True,
-    include_history_sources: bool = True,
     circle_basic_info: str | None = None,
 ) -> list[dict[str, str]]:
     context = format_doc_context(docs)
@@ -313,11 +279,6 @@ def build_llama_messages(
     user = "\n".join(user_sections)
     messages = [{"role": "system", "content": system}]
     if history is not None:
-        messages.extend(
-            history_to_messages(
-                history,
-                include_sources=include_history_sources,
-            )
-        )
+        messages.extend(history_to_messages(history))
     messages.append({"role": "user", "content": user})
     return messages
