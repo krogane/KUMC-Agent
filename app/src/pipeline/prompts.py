@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal, Sequence
 
 from langchain_core.documents import Document
@@ -24,18 +25,54 @@ _MODE_INSTRUCTIONS_ENV_BY_MODE: dict[PromptMode, str] = {
     "refusal": "PROMPT_MODE_INSTRUCTIONS_REFUSAL",
 }
 
+_DISCORD_DATE_LINE_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
+_RAG_DISCORD_SUBSOURCE_INSTRUCTION = (
+    "When citing Discord context, write each item in sources as "
+    "\"source_index-sub_index\"."
+)
 
-def _doc_to_context(doc: Document) -> str:
+
+def _is_discord_message_line(line: str) -> bool:
+    value = (line or "").strip()
+    if not value:
+        return False
+    return _DISCORD_DATE_LINE_RE.fullmatch(value) is None
+
+
+def _annotate_discord_subsources(*, text: str, source_index: int) -> str:
+    if not text:
+        return ""
+    annotated: list[str] = []
+    sub_index = 1
+    for raw_line in text.splitlines():
+        if _is_discord_message_line(raw_line):
+            annotated.append(f"[{source_index}-{sub_index}] {raw_line}")
+            sub_index += 1
+        else:
+            annotated.append(raw_line)
+    return "\n".join(annotated)
+
+
+def _doc_to_context(doc: Document, *, source_index: int | None = None) -> str:
     metadata = doc.metadata or {}
     source_type = str(metadata.get("source_type") or "").strip().lower()
+    annotated_content = doc.page_content
+    if (
+        source_index is not None
+        and source_type in {"messages", "discord_message"}
+    ):
+        annotated_content = _annotate_discord_subsources(
+            text=doc.page_content,
+            source_index=source_index,
+        )
     if source_type == "vc_transcript":
         meeting_label = str(metadata.get("meeting_label") or "").strip()
         if meeting_label:
-            return f"meeting: {meeting_label}\n{doc.page_content}"
+            return f"meeting: {meeting_label}\n{annotated_content}"
         meeting_date = str(metadata.get("meeting_date") or "").strip()
         if meeting_date:
-            return f"meeting_date: {meeting_date}\n{doc.page_content}"
-        return doc.page_content
+            return f"meeting_date: {meeting_date}\n{annotated_content}"
+        return annotated_content
     if source_type == "hatenablog":
         lines: list[str] = []
         title = str(metadata.get("hatenablog_title") or "").strip()
@@ -52,8 +89,26 @@ def _doc_to_context(doc: Document) -> str:
             lines.append(f"hatenablog_url: {url}")
         if lines:
             header = "\n".join(lines)
-            return f"{header}\n{doc.page_content}"
-        return doc.page_content
+            return f"{header}\n{annotated_content}"
+        return annotated_content
+    if source_type == "crafters_colony":
+        lines: list[str] = []
+        title = str(metadata.get("crafters_colony_title") or "").strip()
+        if title:
+            lines.append(f"crafters_colony_title: {title}")
+        published_at = str(metadata.get("crafters_colony_published_at") or "").strip()
+        if published_at:
+            lines.append(f"crafters_colony_published_at: {published_at}")
+        source_date = str(metadata.get("source_date") or "").strip()
+        if source_date:
+            lines.append(f"source_date: {source_date}")
+        url = str(metadata.get("crafters_colony_article_url") or "").strip()
+        if url:
+            lines.append(f"crafters_colony_article_url: {url}")
+        if lines:
+            header = "\n".join(lines)
+            return f"{header}\n{annotated_content}"
+        return annotated_content
     first_message_date = str(metadata.get("first_message_date") or "").strip()
     guild_name = str(metadata.get("guild_name") or "").strip()
     category_name = str(metadata.get("category_name") or "").strip()
@@ -70,9 +125,9 @@ def _doc_to_context(doc: Document) -> str:
             return (
                 f"channel_name: {channel_display}\n"
                 f"first_message_date: {first_message_date}\n"
-                f"{doc.page_content}"
+                f"{annotated_content}"
             )
-        return f"channel_name: {channel_display}\n{doc.page_content}"
+        return f"channel_name: {channel_display}\n{annotated_content}"
     drive_path = str(metadata.get("drive_file_path") or "").strip()
     drive_path_display = drive_path if drive_path else "不明"
     source_date = str(metadata.get("source_date") or "").strip()
@@ -82,12 +137,12 @@ def _doc_to_context(doc: Document) -> str:
             f"drive_file_path: {drive_path_display}\n"
             f"source_date: {source_date_display}\n"
             f"first_message_date: {first_message_date}\n"
-            f"{doc.page_content}"
+            f"{annotated_content}"
         )
     return (
         f"drive_file_path: {drive_path_display}\n"
         f"source_date: {source_date_display}\n"
-        f"{doc.page_content}"
+        f"{annotated_content}"
     )
 
 
@@ -100,18 +155,32 @@ def format_doc_context(docs: Sequence[Document]) -> str:
         return get_required_prompt_env("PROMPT_EMPTY_CONTEXT")
     parts: list[str] = []
     for idx, doc in enumerate(docs, start=1):
-        parts.append(f"[{idx}]\n{doc_to_context(doc)}")
+        parts.append(f"[{idx}]\n{_doc_to_context(doc, source_index=idx)}")
     return "\n\n---\n\n".join(parts)
 
 
 def format_output_instructions(*, mode: PromptMode) -> str:
     common = get_required_prompt_env("PROMPT_OUTPUT_INSTRUCTIONS_COMMON")
     mode_specific = get_required_prompt_env(_OUTPUT_INSTRUCTIONS_ENV_BY_MODE[mode])
+    if mode == "rag":
+        mode_specific = (
+            f"{mode_specific}\n{_RAG_DISCORD_SUBSOURCE_INSTRUCTION}"
+            if mode_specific
+            else _RAG_DISCORD_SUBSOURCE_INSTRUCTION
+        )
     return f"{common}\n{mode_specific}"
 
 
-def format_mode_instructions(*, mode: PromptMode) -> str:
-    return get_required_prompt_env(_MODE_INSTRUCTIONS_ENV_BY_MODE[mode])
+def format_mode_instructions(
+    *,
+    mode: PromptMode,
+    extra_mode_instruction: str | None = None,
+) -> str:
+    base = get_required_prompt_env(_MODE_INSTRUCTIONS_ENV_BY_MODE[mode])
+    extra = (extra_mode_instruction or "").strip()
+    if not extra:
+        return base
+    return f"{base}\n{extra}" if base else extra
 
 
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
@@ -195,6 +264,7 @@ def build_gemini_prompt(
     circle_basic_info: str = "",
     chatbot_capabilities_info: str = "",
     include_capabilities_info: bool = True,
+    extra_mode_instruction: str | None = None,
 ) -> str:
     context = format_doc_context(docs)
     sections: list[str] = []
@@ -230,7 +300,7 @@ def build_gemini_prompt(
     )
     sections.append(
         f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_INSTRUCTIONS')}\n"
-        f"{format_mode_instructions(mode=prompt_mode)}"
+        f"{format_mode_instructions(mode=prompt_mode, extra_mode_instruction=extra_mode_instruction)}"
     )
     sections.append(
         f"{get_required_prompt_env('PROMPT_GEMINI_HEADER_QUESTION')}\n"
@@ -250,6 +320,7 @@ def build_llama_messages(
     retry_history: Sequence[tuple[str, str]] | None = None,
     include_capabilities_info: bool = True,
     circle_basic_info: str | None = None,
+    extra_mode_instruction: str | None = None,
 ) -> list[dict[str, str]]:
     context = format_doc_context(docs)
     question_block = _format_question_block(
@@ -304,7 +375,7 @@ def build_llama_messages(
             f"{format_output_instructions(mode=prompt_mode)}",
             "",
             get_required_prompt_env("PROMPT_LLAMA_HEADER_INSTRUCTIONS"),
-            f"{format_mode_instructions(mode=prompt_mode)}",
+            f"{format_mode_instructions(mode=prompt_mode, extra_mode_instruction=extra_mode_instruction)}",
             "",
         ]
     )

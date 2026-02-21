@@ -28,7 +28,10 @@ from indexing.constants import DOCS_SEPARATORS, MESSAGE_SEPARATORS, SHEETS_SEPAR
 from indexing.discord_loader import download_discord_messages
 from indexing.drive_loader import download_drive_markdown
 from indexing.faiss_index import build_faiss_index
+from indexing.crafters_colony_loader import download_crafters_colony_articles
 from indexing.hatenablog_loader import download_hatenablog_articles
+from indexing.x_loader import convert_x_tweets_js_to_jsonl
+from indexing.material_catalog import build_and_save_material_catalog
 from indexing.keyword_inverted_index import (
     KEYWORD_CORPUS_SECOND_REC_SPARSE,
     KEYWORD_CORPUS_SPARSE,
@@ -60,19 +63,42 @@ def _clear_dir_contents(target: Path) -> None:
 
 def _reset_output_dirs(cfg: AppConfig) -> None:
     if cfg.clear_raw_data:
-        for name in ("docs", "sheets", "messages", "vc", "hatenablog"):
+        for name in (
+            "docs",
+            "sheets",
+            "messages",
+            "x",
+            "vc",
+            "hatenablog",
+            "crafters_colony",
+        ):
             target = cfg.raw_data_dir / name
             if target.exists():
                 _clear_dir_contents(target)
 
     if cfg.clear_first_rec_chunk_data:
-        for name in ("docs", "sheets", "messages", "hatenablog"):
+        for name in (
+            "docs",
+            "sheets",
+            "messages",
+            "x",
+            "hatenablog",
+            "crafters_colony",
+        ):
             target = cfg.first_rec_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
 
     if cfg.clear_second_rec_chunk_data:
-        for name in ("docs", "sheets", "messages", "vc", "hatenablog"):
+        for name in (
+            "docs",
+            "sheets",
+            "messages",
+            "x",
+            "vc",
+            "hatenablog",
+            "crafters_colony",
+        ):
             target = cfg.second_rec_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
@@ -81,13 +107,21 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
                 _clear_dir_contents(sparse_target)
 
     if cfg.clear_summery_chunk_data:
-        for name in ("docs", "sheets", "messages", "vc", "hatenablog"):
+        for name in (
+            "docs",
+            "sheets",
+            "messages",
+            "x",
+            "vc",
+            "hatenablog",
+            "crafters_colony",
+        ):
             target = cfg.summery_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
 
     if cfg.clear_prop_chunk_data:
-        for name in ("docs", "sheets", "hatenablog"):
+        for name in ("docs", "sheets", "hatenablog", "crafters_colony"):
             target = cfg.prop_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
@@ -175,29 +209,42 @@ def main() -> None:
     raw_docs_dir = cfg.raw_data_dir / "docs"
     raw_sheets_dir = cfg.raw_data_dir / "sheets"
     raw_messages_dir = cfg.raw_data_dir / "messages"
+    raw_x_dir = cfg.raw_data_dir / "x"
     raw_vc_dir = cfg.raw_data_dir / "vc"
     raw_hatenablog_dir = cfg.raw_data_dir / "hatenablog"
+    raw_crafters_colony_dir = cfg.raw_data_dir / "crafters_colony"
     first_rec_docs_dir = cfg.first_rec_chunk_dir / "docs"
     first_rec_sheets_dir = cfg.first_rec_chunk_dir / "sheets"
     first_rec_messages_dir = cfg.first_rec_chunk_dir / "messages"
+    first_rec_x_dir = cfg.first_rec_chunk_dir / "x"
     first_rec_hatenablog_dir = cfg.first_rec_chunk_dir / "hatenablog"
+    first_rec_crafters_colony_dir = cfg.first_rec_chunk_dir / "crafters_colony"
     second_rec_docs_dir = cfg.second_rec_chunk_dir / "docs"
     second_rec_sheets_dir = cfg.second_rec_chunk_dir / "sheets"
     second_rec_messages_dir = cfg.second_rec_chunk_dir / "messages"
+    second_rec_x_dir = cfg.second_rec_chunk_dir / "x"
     second_rec_vc_dir = cfg.second_rec_chunk_dir / "vc"
     second_rec_hatenablog_dir = cfg.second_rec_chunk_dir / "hatenablog"
+    second_rec_crafters_colony_dir = cfg.second_rec_chunk_dir / "crafters_colony"
     sparse_second_rec_docs_dir = cfg.sparse_second_rec_chunk_dir / "docs"
     sparse_second_rec_sheets_dir = cfg.sparse_second_rec_chunk_dir / "sheets"
     sparse_second_rec_messages_dir = cfg.sparse_second_rec_chunk_dir / "messages"
+    sparse_second_rec_x_dir = cfg.sparse_second_rec_chunk_dir / "x"
     sparse_second_rec_vc_dir = cfg.sparse_second_rec_chunk_dir / "vc"
     sparse_second_rec_hatenablog_dir = cfg.sparse_second_rec_chunk_dir / "hatenablog"
+    sparse_second_rec_crafters_colony_dir = (
+        cfg.sparse_second_rec_chunk_dir / "crafters_colony"
+    )
     summery_docs_dir = cfg.summery_chunk_dir / "docs"
     summery_sheets_dir = cfg.summery_chunk_dir / "sheets"
     summery_messages_dir = cfg.summery_chunk_dir / "messages"
+    summery_x_dir = cfg.summery_chunk_dir / "x"
     summery_hatenablog_dir = cfg.summery_chunk_dir / "hatenablog"
+    summery_crafters_colony_dir = cfg.summery_chunk_dir / "crafters_colony"
     prop_docs_dir = cfg.prop_chunk_dir / "docs"
     prop_sheets_dir = cfg.prop_chunk_dir / "sheets"
     prop_hatenablog_dir = cfg.prop_chunk_dir / "hatenablog"
+    prop_crafters_colony_dir = cfg.prop_chunk_dir / "crafters_colony"
 
     def _llm_label(provider: str, gemini_model: str, llama_model_path: str, llama_model: str) -> str:
         if (provider or "").lower() == "gemini":
@@ -217,6 +264,7 @@ def main() -> None:
         "DRIVE_MAX     : %s",
         cfg.drive_max_files if cfg.drive_max_files > 0 else "unlimited",
     )
+    logger.info("CRAFTERS_AUTHOR : %s", cfg.crafters_colony_author_url or "disabled")
     logger.info("CLEAR_RAW     : %s", "yes" if cfg.clear_raw_data else "no")
     logger.info(
         "CLEAR_FIRST_REC : %s",
@@ -378,11 +426,44 @@ def main() -> None:
         update_existing=cfg.update_raw_data,
         sync_deleted=cfg.update_raw_data,
     )
+    download_crafters_colony_articles(
+        author_url=cfg.crafters_colony_author_url,
+        output_dir=raw_crafters_colony_dir,
+        max_pages=cfg.crafters_colony_max_pages,
+        max_articles=cfg.crafters_colony_max_articles,
+        skip_existing=not cfg.clear_raw_data,
+        update_existing=cfg.update_raw_data,
+        sync_deleted=cfg.update_raw_data,
+    )
+    x_stats = convert_x_tweets_js_to_jsonl(
+        raw_x_dir=raw_x_dir,
+        output_path=raw_x_dir / "posts.jsonl",
+        skip_existing=not cfg.clear_raw_data,
+        update_existing=cfg.update_raw_data,
+        sync_deleted=cfg.update_raw_data,
+    )
+    logger.info(
+        "X            : converted posts=%d files=%d skipped=%d",
+        x_stats.posts,
+        x_stats.files,
+        x_stats.skipped_invalid,
+    )
 
     if raw_messages_dir.exists():
         message_chunk_jsonl_dir(
             raw_messages_dir=raw_messages_dir,
             chunk_dir=first_rec_messages_dir,
+            chunk_size=cfg.first_rec_chunk_size,
+            chunk_overlap=cfg.first_rec_chunk_overlap,
+            stage="first_recursive",
+            skip_existing=not cfg.clear_first_rec_chunk_data,
+            update_existing=cfg.update_first_rec_chunk_data,
+            sync_deleted=cfg.update_first_rec_chunk_data,
+        )
+    if raw_x_dir.exists():
+        message_chunk_jsonl_dir(
+            raw_messages_dir=raw_x_dir,
+            chunk_dir=first_rec_x_dir,
             chunk_size=cfg.first_rec_chunk_size,
             chunk_overlap=cfg.first_rec_chunk_overlap,
             stage="first_recursive",
@@ -424,7 +505,20 @@ def main() -> None:
         separators=DOCS_SEPARATORS,
         source_type="hatenablog",
         stage="first_recursive",
-        file_extensions=(".txt",),
+        file_extensions=(".md",),
+        skip_existing=not cfg.clear_first_rec_chunk_data,
+        update_existing=cfg.update_first_rec_chunk_data,
+        sync_deleted=cfg.update_first_rec_chunk_data,
+    )
+    recursive_chunk_dir(
+        raw_data_dir=raw_crafters_colony_dir,
+        chunk_dir=first_rec_crafters_colony_dir,
+        chunk_size=cfg.first_rec_chunk_size,
+        chunk_overlap=cfg.first_rec_chunk_overlap,
+        separators=DOCS_SEPARATORS,
+        source_type="crafters_colony",
+        stage="first_recursive",
+        file_extensions=(".md",),
         skip_existing=not cfg.clear_first_rec_chunk_data,
         update_existing=cfg.update_first_rec_chunk_data,
         sync_deleted=cfg.update_first_rec_chunk_data,
@@ -465,10 +559,34 @@ def main() -> None:
                 update_existing=cfg.update_second_rec_chunk_data,
                 sync_deleted=cfg.update_second_rec_chunk_data,
             )
+        if first_rec_x_dir.exists():
+            recursive_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_x_dir,
+                output_chunk_dir=second_rec_x_dir,
+                chunk_size=cfg.second_rec_chunk_size,
+                chunk_overlap=cfg.second_rec_chunk_overlap,
+                separators=MESSAGE_SEPARATORS,
+                stage="second_recursive",
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_second_rec_chunk_data,
+                sync_deleted=cfg.update_second_rec_chunk_data,
+            )
         if first_rec_hatenablog_dir.exists():
             recursive_chunk_jsonl_dir(
                 input_chunk_dir=first_rec_hatenablog_dir,
                 output_chunk_dir=second_rec_hatenablog_dir,
+                chunk_size=cfg.second_rec_chunk_size,
+                chunk_overlap=cfg.second_rec_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                stage="second_recursive",
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_second_rec_chunk_data,
+                sync_deleted=cfg.update_second_rec_chunk_data,
+            )
+        if first_rec_crafters_colony_dir.exists():
+            recursive_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_crafters_colony_dir,
+                output_chunk_dir=second_rec_crafters_colony_dir,
                 chunk_size=cfg.second_rec_chunk_size,
                 chunk_overlap=cfg.second_rec_chunk_overlap,
                 separators=DOCS_SEPARATORS,
@@ -502,10 +620,28 @@ def main() -> None:
                 update_existing=cfg.update_sparse_second_rec_chunk_data,
                 sync_deleted=cfg.update_sparse_second_rec_chunk_data,
             )
+        if second_rec_x_dir.exists():
+            sparse_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_x_dir,
+                output_chunk_dir=sparse_second_rec_x_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_sparse_second_rec_chunk_data,
+                sync_deleted=cfg.update_sparse_second_rec_chunk_data,
+            )
         if second_rec_hatenablog_dir.exists():
             sparse_chunk_jsonl_dir(
                 input_chunk_dir=second_rec_hatenablog_dir,
                 output_chunk_dir=sparse_second_rec_hatenablog_dir,
+                config=cfg,
+                skip_existing=not cfg.clear_second_rec_chunk_data,
+                update_existing=cfg.update_sparse_second_rec_chunk_data,
+                sync_deleted=cfg.update_sparse_second_rec_chunk_data,
+            )
+        if second_rec_crafters_colony_dir.exists():
+            sparse_chunk_jsonl_dir(
+                input_chunk_dir=second_rec_crafters_colony_dir,
+                output_chunk_dir=sparse_second_rec_crafters_colony_dir,
                 config=cfg,
                 skip_existing=not cfg.clear_second_rec_chunk_data,
                 update_existing=cfg.update_sparse_second_rec_chunk_data,
@@ -540,6 +676,7 @@ def main() -> None:
         summery_chunk_jsonl_dir(
             input_chunk_dir=first_rec_docs_dir,
             output_chunk_dir=summery_docs_dir,
+            second_chunk_dir=second_rec_docs_dir if cfg.second_rec_enabled else None,
             config=cfg,
             skip_existing=not cfg.clear_summery_chunk_data,
             update_existing=cfg.update_summery_chunk_data,
@@ -548,6 +685,7 @@ def main() -> None:
         summery_chunk_jsonl_dir(
             input_chunk_dir=first_rec_sheets_dir,
             output_chunk_dir=summery_sheets_dir,
+            second_chunk_dir=second_rec_sheets_dir if cfg.second_rec_enabled else None,
             config=cfg,
             skip_existing=not cfg.clear_summery_chunk_data,
             update_existing=cfg.update_summery_chunk_data,
@@ -557,6 +695,19 @@ def main() -> None:
             summery_chunk_jsonl_dir(
                 input_chunk_dir=first_rec_messages_dir,
                 output_chunk_dir=summery_messages_dir,
+                second_chunk_dir=(
+                    second_rec_messages_dir if cfg.second_rec_enabled else None
+                ),
+                config=cfg,
+                skip_existing=not cfg.clear_summery_chunk_data,
+                update_existing=cfg.update_summery_chunk_data,
+                sync_deleted=cfg.update_summery_chunk_data,
+            )
+        if first_rec_x_dir.exists():
+            summery_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_x_dir,
+                output_chunk_dir=summery_x_dir,
+                second_chunk_dir=(second_rec_x_dir if cfg.second_rec_enabled else None),
                 config=cfg,
                 skip_existing=not cfg.clear_summery_chunk_data,
                 update_existing=cfg.update_summery_chunk_data,
@@ -566,6 +717,21 @@ def main() -> None:
             summery_chunk_jsonl_dir(
                 input_chunk_dir=first_rec_hatenablog_dir,
                 output_chunk_dir=summery_hatenablog_dir,
+                second_chunk_dir=(
+                    second_rec_hatenablog_dir if cfg.second_rec_enabled else None
+                ),
+                config=cfg,
+                skip_existing=not cfg.clear_summery_chunk_data,
+                update_existing=cfg.update_summery_chunk_data,
+                sync_deleted=cfg.update_summery_chunk_data,
+            )
+        if first_rec_crafters_colony_dir.exists():
+            summery_chunk_jsonl_dir(
+                input_chunk_dir=first_rec_crafters_colony_dir,
+                output_chunk_dir=summery_crafters_colony_dir,
+                second_chunk_dir=(
+                    second_rec_crafters_colony_dir if cfg.second_rec_enabled else None
+                ),
                 config=cfg,
                 skip_existing=not cfg.clear_summery_chunk_data,
                 update_existing=cfg.update_summery_chunk_data,
@@ -603,6 +769,15 @@ def main() -> None:
                     update_existing=cfg.update_prop_chunk_data,
                     sync_deleted=cfg.update_prop_chunk_data,
                 )
+            if second_rec_crafters_colony_dir.exists():
+                proposition_chunk_jsonl_dir(
+                    input_chunk_dir=second_rec_crafters_colony_dir,
+                    output_chunk_dir=prop_crafters_colony_dir,
+                    config=cfg,
+                    skip_existing=not cfg.clear_prop_chunk_data,
+                    update_existing=cfg.update_prop_chunk_data,
+                    sync_deleted=cfg.update_prop_chunk_data,
+                )
 
     if cfg.raptor_enabled:
         if cfg.summery_enabled:
@@ -610,18 +785,21 @@ def main() -> None:
                 summery_docs_dir,
                 summery_sheets_dir,
                 summery_hatenablog_dir,
+                summery_crafters_colony_dir,
             ]
         elif cfg.second_rec_enabled:
             raptor_input_dirs = [
                 second_rec_docs_dir,
                 second_rec_sheets_dir,
                 second_rec_hatenablog_dir,
+                second_rec_crafters_colony_dir,
             ]
         else:
             raptor_input_dirs = [
                 first_rec_docs_dir,
                 first_rec_sheets_dir,
                 first_rec_hatenablog_dir,
+                first_rec_crafters_colony_dir,
             ]
         raptor_chunk_global(
             input_chunk_dirs=raptor_input_dirs,
@@ -636,23 +814,44 @@ def main() -> None:
     base_chunk_dirs = []
     if cfg.second_rec_enabled:
         base_chunk_dirs.extend(
-            [second_rec_docs_dir, second_rec_sheets_dir, second_rec_hatenablog_dir]
+            [
+                second_rec_docs_dir,
+                second_rec_sheets_dir,
+                second_rec_hatenablog_dir,
+                second_rec_crafters_colony_dir,
+            ]
         )
         if second_rec_messages_dir.exists():
             base_chunk_dirs.append(second_rec_messages_dir)
+        if second_rec_x_dir.exists():
+            base_chunk_dirs.append(second_rec_x_dir)
     else:
         base_chunk_dirs.extend(
-            [first_rec_docs_dir, first_rec_sheets_dir, first_rec_hatenablog_dir]
+            [
+                first_rec_docs_dir,
+                first_rec_sheets_dir,
+                first_rec_hatenablog_dir,
+                first_rec_crafters_colony_dir,
+            ]
         )
         if first_rec_messages_dir.exists():
             base_chunk_dirs.append(first_rec_messages_dir)
+        if first_rec_x_dir.exists():
+            base_chunk_dirs.append(first_rec_x_dir)
     if base_chunk_dirs:
         index_chunks.extend(load_chunks_from_dirs(base_chunk_dirs))
     if second_rec_vc_dir.exists():
         index_chunks.extend(load_chunks_from_dirs([second_rec_vc_dir]))
     if cfg.prop_enabled and cfg.second_rec_enabled:
         index_chunks.extend(
-            load_chunks_from_dirs([prop_docs_dir, prop_sheets_dir, prop_hatenablog_dir])
+            load_chunks_from_dirs(
+                [
+                    prop_docs_dir,
+                    prop_sheets_dir,
+                    prop_hatenablog_dir,
+                    prop_crafters_colony_dir,
+                ]
+            )
         )
     if cfg.raptor_enabled:
         index_chunks.extend(load_chunks_from_dirs([cfg.raptor_chunk_dir]))
@@ -663,6 +862,7 @@ def main() -> None:
         index_dir=cfg.index_dir,
     )
     _build_keyword_inverted_indexes(cfg)
+    build_and_save_material_catalog(cfg)
 
 
 if __name__ == "__main__":

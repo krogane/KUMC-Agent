@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes.util
+import io
 import json
 import logging
 import math
@@ -12,7 +13,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import discord
@@ -20,9 +21,10 @@ import numpy as np
 
 from config import AppConfig
 from indexing.llm_client import generate_text
+from vc.google_docs_minutes import GoogleDocsMinutesClient, MinutesDocument
 from vc.prompts import (
-    build_end_judgement_prompt,
     build_final_summary_prompt,
+    build_minutes_edit_prompt,
     build_summary_prompt,
 )
 
@@ -57,7 +59,7 @@ _MAX_TRANSCRIBE_GAP_SECONDS = 1.0
 _MIN_AUDIO_BLOCK_SECONDS = 0.35
 _FINAL_SUMMARY_CHANNEL = "kumc-agent"
 _SUMMARY_SYSTEM_PROMPT = "You are a concise meeting summarization assistant."
-_END_JUDGEMENT_SYSTEM_PROMPT = "You are a meeting end-judgement assistant."
+_MINUTES_EDIT_SYSTEM_PROMPT = "You are a precise meeting minutes editor."
 _FINAL_SUMMARY_SYSTEM_PROMPT = "You are a concise meeting minutes assistant."
 _ANSWER_DISCLAIMER = (
     "※回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。"
@@ -114,17 +116,25 @@ class _LLMConfig:
 
 
 @dataclass
+class _MinutesEditResult:
+    summary: str
+    revised_markdown: str
+    edits: list[dict[str, Any]]
+
+
+@dataclass
 class _MeetingArchive:
     meeting_key: str
     guild_id: int
     meeting_date: str
     meeting_label: str
     summary_chunk_path: Path
+    minutes_doc_id: str = ""
+    minutes_doc_url: str = ""
+    minutes_failure_notified: bool = False
     pending_summary_texts: list[str] = field(default_factory=list)
     pending_summary_seconds: float = 0.0
     pending_summary_last_index: int = 0
-    pending_end_judge_texts: list[str] = field(default_factory=list)
-    pending_end_judge_seconds: float = 0.0
 
 
 @dataclass
@@ -255,6 +265,7 @@ class VoiceMeetingManager:
         self._post_jobs_cond = asyncio.Condition()
         self._rag_pause_count = 0
         self._post_worker_current: _PostProcessJob | None = None
+        self._summary_generation_count = 0
 
         self._asr_pipeline = None
         self._asr_pipeline_lock = threading.Lock()
@@ -273,18 +284,18 @@ class VoiceMeetingManager:
             max_output_tokens=self._config.vc_summary_max_output_tokens,
             thinking_level=self._config.vc_summary_thinking_level,
         )
-        self._end_llm_cfg = _LLMConfig(
-            provider=(self._config.vc_end_judge_llm_provider or "").lower(),
+        self._minutes_edit_llm_cfg = _LLMConfig(
+            provider=(self._config.vc_minutes_edit_llm_provider or "").lower(),
             model=self._select_llm_model(
-                provider=(self._config.vc_end_judge_llm_provider or "").lower(),
-                gemini_model=self._config.vc_end_judge_gemini_model,
-                llama_model=self._config.vc_end_judge_llama_model,
+                provider=(self._config.vc_minutes_edit_llm_provider or "").lower(),
+                gemini_model=self._config.vc_minutes_edit_gemini_model,
+                llama_model=self._config.vc_minutes_edit_llama_model,
             ),
-            llama_model_path=self._config.vc_end_judge_llama_model_path,
-            llama_ctx_size=self._config.vc_end_judge_llama_ctx_size,
-            temperature=self._config.vc_end_judge_temperature,
-            max_output_tokens=self._config.vc_end_judge_max_output_tokens,
-            thinking_level=self._config.vc_end_judge_thinking_level,
+            llama_model_path=self._config.vc_minutes_edit_llama_model_path,
+            llama_ctx_size=self._config.vc_minutes_edit_llama_ctx_size,
+            temperature=self._config.vc_minutes_edit_temperature,
+            max_output_tokens=self._config.vc_minutes_edit_max_output_tokens,
+            thinking_level=self._config.vc_minutes_edit_thinking_level,
         )
         self._final_llm_cfg = _LLMConfig(
             provider=(self._config.vc_final_summary_llm_provider or "").lower(),
@@ -298,6 +309,11 @@ class VoiceMeetingManager:
             temperature=self._config.vc_final_summary_temperature,
             max_output_tokens=self._config.vc_final_summary_max_output_tokens,
             thinking_level=self._config.vc_final_summary_thinking_level,
+        )
+        self._minutes_client = GoogleDocsMinutesClient(
+            drive_folder_id=self._config.drive_folder_id,
+            google_application_credentials=self._config.google_application_credentials,
+            minutes_drive_dir=self._config.vc_minutes_drive_dir,
         )
 
     async def start(self) -> None:
@@ -356,6 +372,12 @@ class VoiceMeetingManager:
         if self._post_worker_current is not None:
             return True
         return False
+
+    def is_transcript_summary_generating(self) -> bool:
+        return self._summary_generation_count > 0
+
+    def should_use_fast_model_for_query(self) -> bool:
+        return self.has_active_session() and self.is_transcript_summary_generating()
 
     def is_voice_chat_channel(self, channel: object) -> bool:
         return isinstance(channel, discord.VoiceChannel)
@@ -594,9 +616,8 @@ class VoiceMeetingManager:
             start_monotonic=time.monotonic(),
             meeting_dir=meeting_dir,
             summary_chunk_path=summary_chunk_path,
-            transcript_interval_seconds=min(
-                max(30, self._config.vc_summary_transcribe_interval_seconds),
-                max(30, self._config.vc_end_judge_transcribe_interval_seconds),
+            transcript_interval_seconds=max(
+                30, self._config.vc_summary_transcribe_interval_seconds
             ),
         )
 
@@ -1086,7 +1107,6 @@ class VoiceMeetingManager:
                     meeting_key=job.meeting_key,
                     archive=archive,
                 )
-                self._reset_pending_end_judge(archive)
             return
 
         transcript_text = (job.transcript_path.read_text(encoding="utf-8") or "").strip()
@@ -1096,7 +1116,6 @@ class VoiceMeetingManager:
                     meeting_key=job.meeting_key,
                     archive=archive,
                 )
-                self._reset_pending_end_judge(archive)
             return
 
         chunk_seconds = max(
@@ -1107,11 +1126,6 @@ class VoiceMeetingManager:
             archive=archive,
             transcript_text=transcript_text,
             transcript_index=job.transcript_index,
-            chunk_seconds=chunk_seconds,
-        )
-        self._queue_pending_end_judge(
-            archive=archive,
-            transcript_text=transcript_text,
             chunk_seconds=chunk_seconds,
         )
 
@@ -1127,99 +1141,82 @@ class VoiceMeetingManager:
 
         self._ensure_post_worker_not_paused()
 
-        if job.is_final_chunk:
-            self._reset_pending_end_judge(archive)
-            return
-
-        should_run_end_judge = (
-            archive.pending_end_judge_seconds
-            >= self._config.vc_end_judge_transcribe_interval_seconds
-        )
-        if not should_run_end_judge:
-            return
-
-        pending_end_text = self._build_pending_transcript_text(
-            archive.pending_end_judge_texts
-        )
-        if not pending_end_text:
-            self._reset_pending_end_judge(archive)
-            return
-
-        end_prompt = build_end_judgement_prompt(transcript_text=pending_end_text)
-        end_result = await asyncio.to_thread(
-            self._generate_text_with_cfg,
-            cfg=self._end_llm_cfg,
-            prompt=end_prompt,
-            system_prompt=_END_JUDGEMENT_SYSTEM_PROMPT,
-            response_mime_type="text/plain",
-        )
-        self._reset_pending_end_judge(archive)
-
-        is_end = _parse_boolean_output(end_result)
-        if not is_end:
-            return
-
-        if not self._config.vc_auto_quit_enabled:
-            return
-
-        session = self._find_active_session_by_meeting_key(job.meeting_key)
-        if session is None:
-            return
-
-        await self._leave_session(
-            session,
-            reason="auto_end_detected",
-            process_final_transcript=True,
-        )
-
     async def _generate_summary_from_pending(
         self,
         *,
         meeting_key: str,
         archive: _MeetingArchive,
     ) -> None:
-        if archive.pending_summary_last_index <= 0:
-            self._reset_pending_summary(archive)
-            return
+        self._summary_generation_count += 1
+        try:
+            if archive.pending_summary_last_index <= 0:
+                self._reset_pending_summary(archive)
+                return
 
-        pending_summary_text = self._build_pending_transcript_text(
-            archive.pending_summary_texts
-        )
-        if not pending_summary_text:
-            self._reset_pending_summary(archive)
-            return
+            pending_summary_text = self._build_pending_transcript_text(
+                archive.pending_summary_texts
+            )
+            if not pending_summary_text:
+                self._reset_pending_summary(archive)
+                return
 
-        transcript_index = archive.pending_summary_last_index
-        summary_text = self._load_existing_summary_for_transcript(
-            summary_chunk_path=archive.summary_chunk_path,
-            transcript_index=transcript_index,
-        )
-        if not summary_text:
-            previous_summaries = self._load_recent_summaries(
+            transcript_index = archive.pending_summary_last_index
+            summary_text = self._load_existing_summary_for_transcript(
                 summary_chunk_path=archive.summary_chunk_path,
-                limit=self._config.vc_summary_previous_max,
+                transcript_index=transcript_index,
             )
-            summary_prompt = build_summary_prompt(
-                transcript_text=pending_summary_text,
-                previous_summaries=previous_summaries,
-                target_characters=self._config.vc_summary_target_characters,
-            )
-            summary_text = await asyncio.to_thread(
-                self._generate_text_with_cfg,
-                cfg=self._summary_llm_cfg,
-                prompt=summary_prompt,
-                system_prompt=_SUMMARY_SYSTEM_PROMPT,
-                response_mime_type="text/plain",
-            )
-            summary_text = (summary_text or "").strip()
-            if summary_text:
-                self._append_summary_chunk(
-                    meeting_key=meeting_key,
-                    transcript_index=transcript_index,
-                    summary_text=summary_text,
+            if not summary_text:
+                summary_history_limit = max(0, self._config.vc_summary_previous_max)
+                minutes_history_limit = (
+                    max(0, self._config.vc_minutes_history_summary_max)
+                    if self._config.vc_minutes_enabled
+                    else 0
                 )
+                load_limit = max(summary_history_limit, minutes_history_limit)
+                previous_summaries = self._load_recent_summaries(
+                    summary_chunk_path=archive.summary_chunk_path,
+                    limit=load_limit,
+                )
+                summary_text = await self._try_generate_summary_with_minutes_edit(
+                    meeting_key=meeting_key,
+                    archive=archive,
+                    pending_summary_text=pending_summary_text,
+                    previous_summaries=(
+                        previous_summaries[-minutes_history_limit:]
+                        if minutes_history_limit > 0
+                        else []
+                    ),
+                )
+                if not summary_text:
+                    summary_prompt = build_summary_prompt(
+                        transcript_text=pending_summary_text,
+                        previous_summaries=(
+                            previous_summaries[-summary_history_limit:]
+                            if summary_history_limit > 0
+                            else []
+                        ),
+                        target_characters=self._config.vc_summary_target_characters,
+                    )
+                    summary_text = await asyncio.to_thread(
+                        self._generate_text_with_cfg,
+                        cfg=self._summary_llm_cfg,
+                        prompt=summary_prompt,
+                        system_prompt=_SUMMARY_SYSTEM_PROMPT,
+                        response_mime_type="text/plain",
+                    )
+                    summary_text = (summary_text or "").strip()
+                if summary_text:
+                    self._append_summary_chunk(
+                        meeting_key=meeting_key,
+                        transcript_index=transcript_index,
+                        summary_text=summary_text,
+                    )
 
-        self._reset_pending_summary(archive)
+            self._reset_pending_summary(archive)
+        finally:
+            self._summary_generation_count = max(
+                0, self._summary_generation_count - 1
+            )
 
     def _queue_pending_summary(
         self,
@@ -1233,24 +1230,165 @@ class VoiceMeetingManager:
         archive.pending_summary_seconds += max(0.0, chunk_seconds)
         archive.pending_summary_last_index = transcript_index
 
-    def _queue_pending_end_judge(
+    async def _try_generate_summary_with_minutes_edit(
+        self,
+        *,
+        meeting_key: str,
+        archive: _MeetingArchive,
+        pending_summary_text: str,
+        previous_summaries: list[str],
+    ) -> str:
+        if not self._config.vc_minutes_enabled:
+            return ""
+
+        try:
+            minutes_doc = self._resolve_minutes_document_with_retries(archive=archive)
+            if minutes_doc is None:
+                raise RuntimeError("minutes document not found")
+
+            markdown_text = self._fetch_minutes_markdown_with_retries(doc_id=minutes_doc.doc_id)
+            numbered_minutes = self._numbered_lines(markdown_text)
+            prompt = build_minutes_edit_prompt(
+                recent_transcript_text=pending_summary_text,
+                previous_summaries=previous_summaries,
+                numbered_minutes_markdown=numbered_minutes,
+            )
+            edit_result = await self._generate_minutes_edit_with_retries(prompt=prompt)
+            self._apply_minutes_markdown_with_retries(
+                doc_id=minutes_doc.doc_id,
+                markdown=edit_result.revised_markdown,
+            )
+            self._clear_minutes_failure_notification(archive)
+            return edit_result.summary
+        except Exception:
+            logger.exception("Minutes auto-edit failed: meeting=%s", meeting_key)
+            await self._notify_minutes_failure_once(
+                meeting_key=meeting_key,
+                archive=archive,
+                text=(
+                    "議事録の取得または反映に失敗しました。"
+                    "復旧まで文字起こし要約のみ継続します。"
+                ),
+            )
+            return ""
+
+    def _resolve_minutes_document_with_retries(
         self,
         *,
         archive: _MeetingArchive,
-        transcript_text: str,
-        chunk_seconds: float,
-    ) -> None:
-        archive.pending_end_judge_texts.append(transcript_text)
-        archive.pending_end_judge_seconds += max(0.0, chunk_seconds)
+    ) -> MinutesDocument | None:
+        retries = max(0, int(self._config.vc_minutes_fetch_max_retries))
+        last_error: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                doc = self._minutes_client.resolve_today_minutes_document(
+                    cached_doc_id=archive.minutes_doc_id
+                )
+            except Exception as exc:
+                last_error = exc
+                continue
+            if doc is None:
+                continue
+            archive.minutes_doc_id = doc.doc_id
+            archive.minutes_doc_url = doc.web_view_link
+            return doc
+        if last_error is not None:
+            raise last_error
+        return None
+
+    def _fetch_minutes_markdown_with_retries(self, *, doc_id: str) -> str:
+        retries = max(0, int(self._config.vc_minutes_fetch_max_retries))
+        last_error: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                return self._minutes_client.export_markdown(doc_id=doc_id)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        return ""
+
+    def _fetch_minutes_pdf_with_retries(self, *, doc_id: str) -> bytes:
+        retries = max(0, int(self._config.vc_minutes_fetch_max_retries))
+        last_error: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                return self._minutes_client.export_pdf(doc_id=doc_id)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        return b""
+
+    async def _generate_minutes_edit_with_retries(
+        self,
+        *,
+        prompt: str,
+    ) -> _MinutesEditResult:
+        retries = max(0, int(self._config.vc_minutes_llm_max_retries))
+        last_error: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                raw = await asyncio.to_thread(
+                    self._generate_text_with_cfg,
+                    cfg=self._minutes_edit_llm_cfg,
+                    prompt=prompt,
+                    system_prompt=_MINUTES_EDIT_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                )
+                return _parse_minutes_edit_response(raw)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("minutes edit generation failed")
+
+    def _apply_minutes_markdown_with_retries(self, *, doc_id: str, markdown: str) -> None:
+        retries = max(0, int(self._config.vc_minutes_apply_max_retries))
+        last_error: Exception | None = None
+        for _ in range(retries + 1):
+            try:
+                self._minutes_client.replace_document_with_plain_text(
+                    doc_id=doc_id,
+                    text=markdown,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
 
     def _reset_pending_summary(self, archive: _MeetingArchive) -> None:
         archive.pending_summary_texts.clear()
         archive.pending_summary_seconds = 0.0
         archive.pending_summary_last_index = 0
 
-    def _reset_pending_end_judge(self, archive: _MeetingArchive) -> None:
-        archive.pending_end_judge_texts.clear()
-        archive.pending_end_judge_seconds = 0.0
+    async def _notify_minutes_failure_once(
+        self,
+        *,
+        meeting_key: str,
+        archive: _MeetingArchive,
+        text: str,
+    ) -> None:
+        if archive.minutes_failure_notified:
+            return
+        archive.minutes_failure_notified = True
+        session = self._find_active_session_by_meeting_key(meeting_key)
+        if session is None:
+            return
+        try:
+            await session.voice_channel.send(text)
+        except Exception:
+            logger.exception("Failed to send minutes failure notice: %s", meeting_key)
+
+    @staticmethod
+    def _clear_minutes_failure_notification(archive: _MeetingArchive) -> None:
+        archive.minutes_failure_notified = False
+
+    @staticmethod
+    def _numbered_lines(text: str) -> str:
+        lines = (text or "").splitlines()
+        return "\n".join(f"{idx:04d}: {line}" for idx, line in enumerate(lines, start=1))
 
     def _build_pending_transcript_text(self, chunks: list[str]) -> str:
         return "\n".join(item.strip() for item in chunks if (item or "").strip()).strip()
@@ -1320,7 +1458,49 @@ class VoiceMeetingManager:
             )
             return
 
-        await channel.send(f"{text}\n\n{_ANSWER_DISCLAIMER}")
+        send_text = f"{text}\n\n{_ANSWER_DISCLAIMER}"
+        files_to_send: list[discord.File] = []
+        if self._config.vc_minutes_enabled:
+            try:
+                minutes_doc = self._resolve_minutes_document_with_retries(archive=archive)
+                if minutes_doc is not None:
+                    archive.minutes_doc_id = minutes_doc.doc_id
+                    archive.minutes_doc_url = minutes_doc.web_view_link
+                    send_text = (
+                        f"{send_text}\n\n議事録: {archive.minutes_doc_url}"
+                    )
+                    pdf_bytes = self._fetch_minutes_pdf_with_retries(
+                        doc_id=minutes_doc.doc_id
+                    )
+                    page_pngs = self._minutes_client.pdf_to_png_pages(pdf_bytes)
+                    for idx, image_bytes in enumerate(page_pngs, start=1):
+                        files_to_send.append(
+                            discord.File(
+                                fp=io.BytesIO(image_bytes),
+                                filename=f"{meeting_key}_minutes_{idx:03d}.png",
+                            )
+                        )
+            except Exception:
+                logger.exception(
+                    "Minutes link/image preparation failed for final summary: %s",
+                    meeting_key,
+                )
+
+        try:
+            await channel.send(send_text)
+
+            if files_to_send:
+                batch_size = max(1, int(self._config.vc_minutes_image_batch_size))
+                for batch in _split_into_batches(
+                    files_to_send, batch_size=batch_size
+                ):
+                    await channel.send(files=batch)
+        finally:
+            for attachment in files_to_send:
+                try:
+                    attachment.close()
+                except Exception:
+                    continue
 
     def _load_existing_summary_for_transcript(
         self,
@@ -1706,24 +1886,71 @@ def _format_elapsed(seconds: float) -> str:
 
 
 
-def _parse_boolean_output(text: str) -> bool:
-    raw = (text or "").strip().lower()
-    if not raw:
-        return False
-    if raw.startswith("true"):
-        return True
-    if raw.startswith("false"):
-        return False
+def _split_into_batches(items: list[Any], *, batch_size: int) -> list[list[Any]]:
+    size = max(1, int(batch_size))
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
-    if raw.startswith("{"):
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return False
-        if isinstance(payload, dict):
-            value = payload.get("ended")
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.strip().lower() in {"true", "1", "yes"}
-    return False
+
+def _parse_minutes_edit_response(raw_text: str) -> _MinutesEditResult:
+    payload = _load_json_object(raw_text)
+    summary = str(payload.get("summary") or "").strip()
+    revised_markdown = str(payload.get("revised_markdown") or "").strip()
+    edits_obj = payload.get("edits")
+    if not summary:
+        raise ValueError("minutes edit response missing 'summary'")
+    if not revised_markdown:
+        raise ValueError("minutes edit response missing 'revised_markdown'")
+    if not isinstance(edits_obj, list):
+        raise ValueError("minutes edit response missing 'edits' list")
+
+    edits: list[dict[str, Any]] = []
+    for item in edits_obj:
+        if not isinstance(item, dict):
+            continue
+        line_value = item.get("line")
+        op_value = str(item.get("op") or "").strip()
+        if not isinstance(line_value, int):
+            continue
+        if op_value not in {"replace", "insert_after", "delete"}:
+            continue
+        edits.append(
+            {
+                "line": int(line_value),
+                "op": op_value,
+                "text": str(item.get("text") or ""),
+            }
+        )
+    return _MinutesEditResult(
+        summary=summary,
+        revised_markdown=revised_markdown,
+        edits=edits,
+    )
+
+
+def _load_json_object(raw_text: str) -> dict[str, Any]:
+    text = (raw_text or "").strip()
+    if not text:
+        raise ValueError("empty JSON response")
+    if text.startswith("```"):
+        text = _strip_markdown_fence(text)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end < start:
+            raise
+        obj = json.loads(text[start : end + 1])
+    if not isinstance(obj, dict):
+        raise ValueError("response JSON is not an object")
+    return obj
+
+
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith("```"):
+        return "\n".join(lines[1:-1]).strip()
+    return stripped

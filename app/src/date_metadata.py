@@ -62,6 +62,11 @@ def source_date_from_hatenablog_created_at(hatenablog_created_at: str | None) ->
     return normalized or SOURCE_DATE_UNKNOWN
 
 
+def source_date_from_crafters_colony_published_at(value: str | None) -> str:
+    normalized = normalize_source_date(value)
+    return normalized or SOURCE_DATE_UNKNOWN
+
+
 def source_date_from_vc_path(path: Path | str | None) -> str:
     if path is None:
         return SOURCE_DATE_UNKNOWN
@@ -124,7 +129,7 @@ def infer_source_date(
         return existing
 
     source_type = str(meta.get("source_type") or "").strip().lower()
-    if source_type in {"messages", "discord_message"}:
+    if source_type in {"messages", "discord_message", "x_posts"}:
         first_message_date = normalize_source_date(str(meta.get("first_message_date") or ""))
         if first_message_date is not None:
             return first_message_date
@@ -133,6 +138,11 @@ def infer_source_date(
     if source_type == "hatenablog":
         return source_date_from_hatenablog_created_at(
             str(meta.get("hatenablog_created_at") or "")
+        )
+
+    if source_type == "crafters_colony":
+        return source_date_from_crafters_colony_published_at(
+            str(meta.get("crafters_colony_published_at") or "")
         )
 
     if source_type == "vc_transcript":

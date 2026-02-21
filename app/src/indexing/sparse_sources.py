@@ -4,8 +4,23 @@ from pathlib import Path
 
 from config import AppConfig
 
-BASE_SOURCE_DIRS = ("docs", "sheets", "messages", "hatenablog")
-SECOND_REC_SOURCE_DIRS = ("docs", "sheets", "messages", "vc", "hatenablog")
+BASE_SOURCE_DIRS = (
+    "docs",
+    "sheets",
+    "messages",
+    "x",
+    "hatenablog",
+    "crafters_colony",
+)
+SECOND_REC_SOURCE_DIRS = (
+    "docs",
+    "sheets",
+    "messages",
+    "x",
+    "vc",
+    "hatenablog",
+    "crafters_colony",
+)
 
 
 def first_rec_chunk_dirs(config: AppConfig) -> list[Path]:
@@ -85,7 +100,7 @@ def sparse_chunk_dirs(config: AppConfig) -> list[Path]:
                 dirs.append(vc_second)
 
     if config.prop_enabled and config.second_rec_enabled:
-        for name in ("docs", "sheets", "hatenablog"):
+        for name in ("docs", "sheets", "hatenablog", "crafters_colony"):
             candidate = config.prop_chunk_dir / name
             if candidate.exists():
                 dirs.append(candidate)

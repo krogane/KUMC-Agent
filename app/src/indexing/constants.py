@@ -41,7 +41,8 @@ DRIVE_POWERPOINT_MIMES: Sequence[str] = (
     "application/vnd.ms-powerpoint",
 )
 GOOGLE_SCOPES: Sequence[str] = (
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/documents",
 )
 FILE_ID_SEPARATOR: str = "__"

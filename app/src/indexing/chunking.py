@@ -52,6 +52,10 @@ _METADATA_KEYS = (
     "hatenablog_title",
     "hatenablog_created_at",
     "hatenablog_url",
+    "crafters_colony_title",
+    "crafters_colony_published_at",
+    "crafters_colony_article_url",
+    "x_author_handle",
 )
 
 
@@ -86,6 +90,9 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
         "hatenablog_title",
         "hatenablog_created_at",
         "hatenablog_url",
+        "crafters_colony_title",
+        "crafters_colony_published_at",
+        "crafters_colony_article_url",
     ):
         value = data.get(key)
         if isinstance(value, str) and value:
@@ -120,6 +127,15 @@ def _build_base_metadata(
         "hatenablog_title": drive_metadata.get("hatenablog_title", ""),
         "hatenablog_created_at": drive_metadata.get("hatenablog_created_at", ""),
         "hatenablog_url": drive_metadata.get("hatenablog_url", ""),
+        "crafters_colony_title": drive_metadata.get("crafters_colony_title", ""),
+        "crafters_colony_published_at": drive_metadata.get(
+            "crafters_colony_published_at",
+            "",
+        ),
+        "crafters_colony_article_url": drive_metadata.get(
+            "crafters_colony_article_url",
+            "",
+        ),
     }
     metadata["source_date"] = infer_source_date(metadata=metadata)
     return metadata
@@ -199,6 +215,12 @@ def _load_message_lines(
                 continue
 
             if not base_metadata:
+                source_type = str(metadata.get("source_type") or "").strip()
+                if not source_type:
+                    source_type = "messages"
+                source_date = str(metadata.get("source_date") or "").strip()
+                if not source_date:
+                    source_date = SOURCE_DATE_UNKNOWN
                 base_metadata = {
                     "guild_id": str(metadata.get("guild_id") or ""),
                     "guild_name": str(metadata.get("guild_name") or ""),
@@ -207,8 +229,9 @@ def _load_message_lines(
                     "channel_id": str(metadata.get("channel_id") or ""),
                     "channel_name": str(metadata.get("channel_name") or ""),
                     "source_file_name": str(metadata.get("source_file_name") or ""),
-                    "source_type": "messages",
-                    "source_date": SOURCE_DATE_UNKNOWN,
+                    "source_type": source_type,
+                    "source_date": source_date,
+                    "x_author_handle": str(metadata.get("x_author_handle") or ""),
                 }
 
             message_id: str | None = None
@@ -605,7 +628,11 @@ def message_chunk_jsonl_dir(
             base_metadata["channel_id"] = channel_id
 
         if not base_metadata.get("source_file_name") and guild_id and channel_id:
-            base_metadata["source_file_name"] = f"discord/{guild_id}/{channel_id}"
+            source_type = str(base_metadata.get("source_type") or "").strip().lower()
+            if source_type in {"messages", "discord_message"}:
+                base_metadata["source_file_name"] = f"discord/{guild_id}/{channel_id}"
+            else:
+                base_metadata["source_file_name"] = f"{guild_id}/{channel_id}"
         base_metadata.setdefault("source_type", "messages")
         base_metadata.setdefault("source_date", SOURCE_DATE_UNKNOWN)
 
@@ -742,9 +769,18 @@ def recursive_chunk_jsonl_dir(
                 base_metadata["parent_chunk_id"] = parent_chunk_id
 
             docs = splitter.split_text(source_text)
+            skip_parent_context = (
+                stage == "second_recursive"
+                and _is_passthrough_second_recursive(
+                    source_text=source_text,
+                    second_chunk_texts=docs,
+                )
+            )
             for doc in docs:
                 metadata = dict(base_metadata)
                 metadata["chunk_id"] = output_index
+                if skip_parent_context:
+                    metadata["skip_parent_context"] = True
                 metadata = _with_stage(metadata, stage)
                 output_chunks.append(Chunk(text=doc, metadata=metadata))
                 output_index += 1
@@ -853,6 +889,7 @@ def summery_chunk_jsonl_dir(
     *,
     input_chunk_dir: Path,
     output_chunk_dir: Path,
+    second_chunk_dir: Path | None = None,
     config: AppConfig,
     skip_existing: bool = False,
     update_existing: bool = True,
@@ -898,12 +935,29 @@ def summery_chunk_jsonl_dir(
             logger.warning("Empty chunk file: %s", path.name)
             continue
 
+        skip_parent_chunk_ids: set[int] = set()
+        if second_chunk_dir is not None:
+            second_path = second_chunk_dir / path.name
+            if second_path.exists():
+                second_chunks = load_chunks(second_path)
+                skip_parent_chunk_ids = _skip_parent_chunk_ids_from_second_chunks(
+                    second_chunks
+                )
+
         output_chunks: list[Chunk] = []
         output_index = 0
 
         for chunk in chunks:
             source_text = chunk.text
             if not source_text:
+                continue
+            first_chunk_id = _normalize_chunk_id(chunk.metadata.get("chunk_id"))
+            if first_chunk_id is not None and first_chunk_id in skip_parent_chunk_ids:
+                logger.info(
+                    "Skip summery chunking for %s (first_chunk_id=%s, unchanged second recursive chunk)",
+                    path.name,
+                    first_chunk_id,
+                )
                 continue
             base_metadata = _strip_chunk_metadata(chunk.metadata)
             parent_chunk_id = chunk.metadata.get("chunk_id")
@@ -1022,6 +1076,8 @@ def proposition_chunk_jsonl_dir(
             if not source_text:
                 continue
             base_metadata = _strip_chunk_metadata(chunk.metadata)
+            if _metadata_flag_enabled(chunk.metadata.get("skip_parent_context")):
+                base_metadata["skip_parent_context"] = True
             parent_chunk_id = chunk.metadata.get("chunk_id")
             if parent_chunk_id is not None:
                 base_metadata["parent_chunk_id"] = parent_chunk_id
@@ -1087,6 +1143,55 @@ def _select_model_for_provider(
 def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
     cleaned = {k: metadata.get(k, "") for k in _METADATA_KEYS}
     return cleaned
+
+
+def _normalize_chunk_id(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _metadata_flag_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _normalize_text_for_comparison(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _is_passthrough_second_recursive(
+    *,
+    source_text: str,
+    second_chunk_texts: Sequence[str],
+) -> bool:
+    if len(second_chunk_texts) != 1:
+        return False
+    return _normalize_text_for_comparison(
+        source_text
+    ) == _normalize_text_for_comparison(second_chunk_texts[0])
+
+
+def _skip_parent_chunk_ids_from_second_chunks(chunks: Sequence[Chunk]) -> set[int]:
+    parent_ids: set[int] = set()
+    for chunk in chunks:
+        if not _metadata_flag_enabled(chunk.metadata.get("skip_parent_context")):
+            continue
+        parent_chunk_id = _normalize_chunk_id(chunk.metadata.get("parent_chunk_id"))
+        if parent_chunk_id is None:
+            continue
+        parent_ids.add(parent_chunk_id)
+    return parent_ids
 
 
 def _strip_code_fences(text: str) -> str:

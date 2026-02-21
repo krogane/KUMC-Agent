@@ -228,3 +228,10 @@ docker compose up --build
 {"question": "質問文", "ground_truth": "正解文"}
 {"question": "質問文", "ground_truths": ["正解1", "正解2"]}
 ```
+
+## Crafters Colony source
+- Raw output directory: `app/data/raw/crafters_colony`
+- Author URL is configurable via `.env`:
+  - `CRAFTERS_COLONY_AUTHOR_URL`
+  - `CRAFTERS_COLONY_MAX_PAGES`
+  - `CRAFTERS_COLONY_MAX_ARTICLES`

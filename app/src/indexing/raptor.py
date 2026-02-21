@@ -596,6 +596,21 @@ def _build_summary_metadata(
         "hatenablog_url": common_or_mixed(
             [str(chunk.metadata.get("hatenablog_url", "")) for chunk in chunks]
         ),
+        "crafters_colony_title": common_or_mixed(
+            [str(chunk.metadata.get("crafters_colony_title", "")) for chunk in chunks]
+        ),
+        "crafters_colony_published_at": common_or_mixed(
+            [
+                str(chunk.metadata.get("crafters_colony_published_at", ""))
+                for chunk in chunks
+            ]
+        ),
+        "crafters_colony_article_url": common_or_mixed(
+            [
+                str(chunk.metadata.get("crafters_colony_article_url", ""))
+                for chunk in chunks
+            ]
+        ),
         "source_date": common_or_mixed(
             [str(chunk.metadata.get("source_date", "")) for chunk in chunks]
         ),
@@ -613,6 +628,9 @@ def _format_chunk_for_prompt(*, chunk: Chunk, include_drive_path: bool) -> str:
     hatenablog_title = str(chunk.metadata.get("hatenablog_title") or "").strip()
     if hatenablog_title:
         text = f"{text}\nhatenablog_title: {hatenablog_title}"
+    crafters_colony_title = str(chunk.metadata.get("crafters_colony_title") or "").strip()
+    if crafters_colony_title:
+        text = f"{text}\ncrafters_colony_title: {crafters_colony_title}"
     if not include_drive_path:
         return text
     drive_path = str(chunk.metadata.get("drive_file_path") or "")

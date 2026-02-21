@@ -29,6 +29,19 @@ def chunk_embedding_text(chunk: Chunk) -> str:
         source_date = str(chunk.metadata.get("source_date") or "").strip()
         if source_date:
             metadata_lines.append(f"source_date: {source_date}")
+    if source_type == "crafters_colony":
+        title = str(chunk.metadata.get("crafters_colony_title") or "").strip()
+        if title:
+            metadata_lines.append(f"crafters_colony_title: {title}")
+        published_at = str(chunk.metadata.get("crafters_colony_published_at") or "").strip()
+        if published_at:
+            metadata_lines.append(f"crafters_colony_published_at: {published_at}")
+        article_url = str(chunk.metadata.get("crafters_colony_article_url") or "").strip()
+        if article_url:
+            metadata_lines.append(f"crafters_colony_article_url: {article_url}")
+        source_date = str(chunk.metadata.get("source_date") or "").strip()
+        if source_date:
+            metadata_lines.append(f"source_date: {source_date}")
     if source_type in {"docs", "sheets"}:
         source_date = str(chunk.metadata.get("source_date") or "").strip()
         if source_date:

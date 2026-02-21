@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 import threading
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,8 +12,9 @@ import discord
 from langchain_core.documents import Document
 
 from pipeline.rag_pipeline import GenerationCancelled, RagPipeline
+from pipeline.prompts import ChatHistoryEntry
 from config import AppConfig, EmbeddingFactory
-from pipeline.function_calling import decide_tools
+from pipeline.function_calling import FunctionRoutingDecision, decide_tools
 from pipeline.llm_clients import (
     generate_with_llama_config,
 )
@@ -31,6 +33,8 @@ BUILD_INDEX_COMMAND = APP_CONFIG.index_command_prefix
 BUILD_INDEX_PATH = APP_CONFIG.base_dir / "app" / "src" / "indexing" / "build_index.py"
 EVAL_COMMAND = "/ai eval"
 STOP_COMMAND = "/ai stop"
+FAST_QUERY_PREFIX = "fast"
+FAST_MODEL_NOTICE = "※負荷軽減のために軽量モデルを使用しました。"
 EVAL_SCRIPT_PATH = APP_CONFIG.base_dir / "app" / "src" / "eval" / "evaluate_ragas.py"
 EVAL_METRICS_PREFIX = "EVAL_METRICS_JSON:"
 AUTO_INDEX_TIMEZONE = ZoneInfo("Asia/Tokyo")
@@ -40,11 +44,19 @@ AUTO_INDEX_HOUR = APP_CONFIG.auto_index_hour
 AUTO_INDEX_MINUTE = APP_CONFIG.auto_index_minute
 WARMUP_INTERVAL_MINUTES = max(0, APP_CONFIG.warmup_interval_minutes)
 MAX_INPUT_CHARACTERS = APP_CONFIG.max_input_characters
+SPECIAL_CHANNEL_HISTORY_LIMIT = max(0, APP_CONFIG.special_channel_history_limit)
 KUMC_AGENT_CHANNEL_NAME = "kumc-agent"
 BOT_MENTION_USER_ID = 1457352598209171520
+MAINTENANCE_COMMAND_AUTHOR_ID_SET = set(APP_CONFIG.maintenance_command_author_ids)
 
 DISCORD_BOT_TOKEN = APP_CONFIG.discord_bot_token
 GEMINI_API_KEY = APP_CONFIG.gemini_api_key
+_answer_record_log_path_candidate = Path(APP_CONFIG.answer_record_log_path).expanduser()
+ANSWER_RECORD_LOG_PATH = (
+    _answer_record_log_path_candidate
+    if _answer_record_log_path_candidate.is_absolute()
+    else APP_CONFIG.base_dir / _answer_record_log_path_candidate
+)
 
 
 # Bootstrap
@@ -85,6 +97,7 @@ evaluating_task: asyncio.Task[None] | None = None
 channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
 channel_cancel_events: dict[int, threading.Event] = {}
 _warmup_lock = threading.Lock()
+_answer_record_log_lock = threading.Lock()
 voice_meeting_manager = VoiceMeetingManager(
     discord_client=discord_client,
     config=APP_CONFIG,
@@ -122,10 +135,46 @@ def _extract_query_from_message(message: discord.Message) -> str:
     if content.startswith(COMMAND_PREFIX):
         return content[len(COMMAND_PREFIX) :].strip()
 
+    if getattr(message, "guild", None) is None:
+        return content
+
     channel_name = str(getattr(message.channel, "name", "") or "").strip()
     if channel_name == KUMC_AGENT_CHANNEL_NAME:
         return content
     return ""
+
+
+def _strip_fast_prefix(query: str) -> tuple[str, bool]:
+    normalized = (query or "").strip()
+    if not normalized:
+        return "", False
+    parts = normalized.split(maxsplit=1)
+    head = parts[0].strip().lower()
+    if head != FAST_QUERY_PREFIX:
+        return normalized, False
+    if len(parts) == 1:
+        return "", True
+    return parts[1].strip(), True
+
+
+def _has_explicit_fast_prefix(message: discord.Message) -> bool:
+    content = (message.content or "").strip()
+    if not content:
+        return False
+    for prefix in _bot_mention_prefixes():
+        if content.startswith(prefix):
+            content = content[len(prefix) :].strip()
+            break
+    command_prefix = COMMAND_PREFIX.strip().lower()
+    if not command_prefix:
+        return False
+    lowered = content.lower()
+    if not lowered.startswith(command_prefix):
+        return False
+    rest = content[len(command_prefix) :].strip()
+    if not rest:
+        return False
+    return rest.split(maxsplit=1)[0].strip().lower() == FAST_QUERY_PREFIX
 
 
 def _question_author_from_message(message: discord.Message) -> str:
@@ -142,12 +191,201 @@ def _question_author_from_message(message: discord.Message) -> str:
     return author_id or "unknown"
 
 
+def _question_user_id_from_message(message: discord.Message) -> str:
+    author = getattr(message, "author", None)
+    author_id = getattr(author, "id", None)
+    if author_id is None:
+        return "unknown"
+    return str(author_id)
+
+
+def _question_username_from_message(message: discord.Message) -> str:
+    author = getattr(message, "author", None)
+    username = str(getattr(author, "name", "") or "").strip()
+    if username:
+        return username
+    display_name = str(getattr(author, "display_name", "") or "").strip()
+    if display_name:
+        return display_name
+    return "unknown"
+
+
+def _is_special_channel_invocation(message: discord.Message) -> bool:
+    if getattr(message, "guild", None) is None:
+        return False
+    channel_name = str(getattr(message.channel, "name", "") or "").strip()
+    if channel_name == KUMC_AGENT_CHANNEL_NAME:
+        return False
+    content = (message.content or "").strip()
+    if not content:
+        return False
+    if any(content.startswith(prefix) for prefix in _bot_mention_prefixes()):
+        return True
+    return content.startswith(COMMAND_PREFIX)
+
+
+def _history_entry_from_channel_message(
+    message: discord.Message,
+) -> ChatHistoryEntry | None:
+    text = (message.content or "").strip()
+    if not text:
+        return None
+    author = _question_author_from_message(message)
+    return (f"author: {author}\n{text}", "", [])
+
+
+async def _resolve_referenced_message(
+    message: discord.Message,
+    *,
+    reference_cache: dict[int, discord.Message | None],
+) -> discord.Message | None:
+    reference = getattr(message, "reference", None)
+    if reference is None:
+        return None
+    referenced_message_id = getattr(reference, "message_id", None)
+    if referenced_message_id is None:
+        return None
+    try:
+        message_id = int(referenced_message_id)
+    except (TypeError, ValueError):
+        return None
+    if message_id in reference_cache:
+        return reference_cache[message_id]
+
+    resolved = getattr(reference, "resolved", None)
+    if isinstance(resolved, discord.Message):
+        reference_cache[message_id] = resolved
+        return resolved
+
+    guild = getattr(message, "guild", None)
+    channel_id = getattr(reference, "channel_id", None)
+    fetch_channel = None
+    if guild is not None and channel_id is not None:
+        try:
+            channel_id_int = int(channel_id)
+        except (TypeError, ValueError):
+            channel_id_int = None
+        if channel_id_int is not None:
+            fetch_channel = guild.get_channel_or_thread(channel_id_int)
+        if fetch_channel is None:
+            try:
+                if channel_id_int is not None:
+                    fetch_channel = await guild.fetch_channel(channel_id_int)
+            except Exception:
+                fetch_channel = None
+    if fetch_channel is None:
+        fetch_channel = message.channel
+
+    fetch_message = getattr(fetch_channel, "fetch_message", None)
+    if not callable(fetch_message):
+        reference_cache[message_id] = None
+        return None
+
+    try:
+        referenced = await fetch_message(message_id)
+    except Exception as exc:
+        logger.info(
+            "Failed to fetch referenced message. channel_id=%s message_id=%s error=%s",
+            getattr(fetch_channel, "id", "unknown"),
+            message_id,
+            exc,
+        )
+        reference_cache[message_id] = None
+        return None
+
+    reference_cache[message_id] = referenced
+    return referenced
+
+
+async def _collect_special_channel_history(
+    message: discord.Message,
+    *,
+    history_limit: int,
+) -> tuple[list[ChatHistoryEntry], int, int]:
+    if history_limit <= 0:
+        return [], 0, 0
+
+    primary_messages: list[discord.Message] = []
+    seen_primary_ids: set[int] = set()
+
+    def _add_primary(candidate: discord.Message) -> None:
+        text = (candidate.content or "").strip()
+        if not text:
+            return
+        candidate_id = int(getattr(candidate, "id", 0))
+        if candidate_id <= 0 or candidate_id in seen_primary_ids:
+            return
+        seen_primary_ids.add(candidate_id)
+        primary_messages.append(candidate)
+
+    _add_primary(message)
+    try:
+        async for item in message.channel.history(limit=None, oldest_first=False):
+            _add_primary(item)
+            if len(primary_messages) >= history_limit:
+                break
+    except Exception:
+        logger.exception(
+            "Failed to collect special-channel history. channel_id=%s",
+            message.channel.id,
+        )
+
+    if len(primary_messages) > history_limit:
+        primary_messages = primary_messages[:history_limit]
+
+    reference_cache: dict[int, discord.Message | None] = {}
+    all_messages: dict[int, discord.Message] = {
+        int(item.id): item for item in primary_messages
+    }
+    expanded_reference_count = 0
+
+    for root in primary_messages:
+        current = root
+        visited_chain_ids: set[int] = set()
+        while True:
+            referenced = await _resolve_referenced_message(
+                current,
+                reference_cache=reference_cache,
+            )
+            if referenced is None:
+                break
+            referenced_id = int(getattr(referenced, "id", 0))
+            if referenced_id <= 0 or referenced_id in visited_chain_ids:
+                break
+            visited_chain_ids.add(referenced_id)
+            if referenced_id not in all_messages and (referenced.content or "").strip():
+                all_messages[referenced_id] = referenced
+                expanded_reference_count += 1
+            current = referenced
+
+    ordered_messages = sorted(
+        all_messages.values(),
+        key=lambda item: (item.created_at, int(item.id)),
+    )
+    history_entries: list[ChatHistoryEntry] = []
+    for item in ordered_messages:
+        entry = _history_entry_from_channel_message(item)
+        if entry is not None:
+            history_entries.append(entry)
+
+    return history_entries, len(primary_messages), expanded_reference_count
+
+
 def _history_scope_for_message(message: discord.Message) -> str:
     guild = getattr(message, "guild", None)
     guild_id = getattr(guild, "id", None)
     if guild_id is not None:
         return f"guild:{guild_id}"
     return f"channel:{message.channel.id}"
+
+
+def _is_maintenance_command_authorized(message: discord.Message) -> bool:
+    if not MAINTENANCE_COMMAND_AUTHOR_ID_SET:
+        return False
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    if author_id is None:
+        return False
+    return int(author_id) in MAINTENANCE_COMMAND_AUTHOR_ID_SET
 
 
 def _warmup_embedding() -> None:
@@ -354,6 +592,42 @@ def _history_query_from_message(
     if extracted:
         return extracted
     return (message.content or "").strip()
+
+
+def _append_answer_record(
+    *,
+    message: discord.Message,
+    query: str,
+    routing_decision: FunctionRoutingDecision | None,
+    answer: str,
+) -> None:
+    if not APP_CONFIG.answer_record_log_enabled:
+        return
+
+    query_text = (query or "").strip()
+    answer_text = (answer or "").strip()
+    if not query_text or not answer_text:
+        return
+
+    record = {
+        "timestamp": datetime.now(AUTO_INDEX_TIMEZONE).isoformat(timespec="seconds"),
+        "questioner_user_id": _question_user_id_from_message(message),
+        "questioner_username": _question_username_from_message(message),
+        "question": query_text,
+        "routing_result": asdict(routing_decision) if routing_decision is not None else None,
+        "answer": answer_text,
+    }
+
+    try:
+        with _answer_record_log_lock:
+            ANSWER_RECORD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with ANSWER_RECORD_LOG_PATH.open("a", encoding="utf-8") as fw:
+                fw.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.exception(
+            "Failed to write answer record log. path=%s",
+            ANSWER_RECORD_LOG_PATH,
+        )
 
 
 async def _send_message_with_history(
@@ -584,7 +858,12 @@ async def _run_eval(
         evaluating_task = None
 
 
-async def _run_answer(message: discord.Message, query: str) -> None:
+async def _run_answer(
+    message: discord.Message,
+    query: str,
+    *,
+    force_fast_mode: bool = False,
+) -> None:
     channel = message.channel
     channel_id = channel.id
     question_author = _question_author_from_message(message)
@@ -593,80 +872,69 @@ async def _run_answer(message: discord.Message, query: str) -> None:
     channel_cancel_events[channel_id] = cancel_event
     voice_meeting_manager.notify_rag_started()
     try:
-        loop = asyncio.get_running_loop()
+        routing_decision: FunctionRoutingDecision | None = None
 
-        def _notify_research_start() -> None:
-            if channel is None:
-                return
-            future = asyncio.run_coroutine_threadsafe(
-                _send_status(
-                    channel,
-                    "詳細な検索を行っています…",
-                    history_scope=history_scope,
-                    history_query=query,
-                ),
-                loop,
+        def _capture_routing_decision(decision: FunctionRoutingDecision) -> None:
+            nonlocal routing_decision
+            routing_decision = decision
+
+        special_channel_mode = _is_special_channel_invocation(message)
+        routing_history_override: list[ChatHistoryEntry] | None = None
+        generation_history_override: list[ChatHistoryEntry] | None = None
+        force_disable_additional_memory = False
+        append_sources_to_response = True
+        extra_mode_instruction: str | None = None
+        if special_channel_mode:
+            (
+                special_history,
+                primary_message_count,
+                expanded_reference_count,
+            ) = await _collect_special_channel_history(
+                message,
+                history_limit=SPECIAL_CHANNEL_HISTORY_LIMIT,
             )
-            future.add_done_callback(_handle_research_status)
-
-        def _handle_research_status(fut: asyncio.Future) -> None:
-            try:
-                fut.result()
-            except Exception:
-                logger.exception("Failed to send research status")
-
-        def _notify_memory_start() -> None:
-            if channel is None:
-                return
-            future = asyncio.run_coroutine_threadsafe(
-                _send_status(
-                    channel,
-                    "過去のチャットを思い出しています…",
-                    history_scope=history_scope,
-                    history_query=query,
-                ),
-                loop,
+            routing_history_override = special_history
+            generation_history_override = special_history
+            force_disable_additional_memory = True
+            append_sources_to_response = False
+            extra_mode_instruction = APP_CONFIG.special_channel_custom_instruction
+            logger.info(
+                "Special channel mode applied. channel_id=%s primary_messages=%s history_turns=%s expanded_references=%s custom_instruction=%s",
+                channel_id,
+                primary_message_count,
+                len(special_history),
+                expanded_reference_count,
+                bool((extra_mode_instruction or "").strip()),
             )
-            future.add_done_callback(_handle_memory_status)
-
-        def _handle_memory_status(fut: asyncio.Future) -> None:
-            try:
-                fut.result()
-            except Exception:
-                logger.exception("Failed to send memory status")
-
-        def _notify_research_and_memory_start() -> None:
-            if channel is None:
-                return
-            future = asyncio.run_coroutine_threadsafe(
-                _send_status(
-                    channel,
-                    "詳細な検索を行っています…\n過去のチャットを思い出しています…",
-                    history_scope=history_scope,
-                    history_query=query,
-                ),
-                loop,
-            )
-            future.add_done_callback(_handle_research_and_memory_status)
-
-        def _handle_research_and_memory_status(fut: asyncio.Future) -> None:
-            try:
-                fut.result()
-            except Exception:
-                logger.exception("Failed to send research+memory status")
 
         answer = await asyncio.to_thread(
             rag_pipeline.answer_with_routing,
             query,
             question_author=question_author,
-            on_research_start=_notify_research_start,
-            on_memory_start=_notify_memory_start,
-            on_research_and_memory_start=_notify_research_and_memory_start,
+            on_routing_decided=_capture_routing_decision,
             history_scope=history_scope,
+            routing_history_override=routing_history_override,
+            generation_history_override=generation_history_override,
+            force_disable_additional_memory=force_disable_additional_memory,
+            append_sources_to_response=append_sources_to_response,
+            extra_mode_instruction=extra_mode_instruction,
+            force_fast_mode=force_fast_mode,
             cancel_event=cancel_event,
         )
         if cancel_event.is_set():
             return
+        if force_fast_mode:
+            answer = (
+                FAST_MODEL_NOTICE
+                if not answer
+                else f"{FAST_MODEL_NOTICE}\n\n{answer}"
+            )
+        _append_answer_record(
+            message=message,
+            query=query,
+            routing_decision=routing_decision,
+            answer=answer,
+        )
         await channel.send(answer)
     except GenerationCancelled:
         return
@@ -824,6 +1092,13 @@ async def on_message(message: discord.Message):
         return
 
     if content == BUILD_INDEX_COMMAND:
+        if not _is_maintenance_command_authorized(message):
+            await _send_message_with_history(
+                message,
+                "このコマンドを実行する権限がありません。",
+                query=content,
+            )
+            return
         if voice_meeting_manager.has_active_session():
             await _send_message_with_history(
                 message,
@@ -850,6 +1125,13 @@ async def on_message(message: discord.Message):
         )
         return
     if content == EVAL_COMMAND:
+        if not _is_maintenance_command_authorized(message):
+            await _send_message_with_history(
+                message,
+                "このコマンドを実行する権限がありません。",
+                query=content,
+            )
+            return
         if evaluating_task and not evaluating_task.done():
             await _send_message_with_history(
                 message,
@@ -902,6 +1184,13 @@ async def on_message(message: discord.Message):
     query = _extract_query_from_message(message)
     if not query:
         return
+    has_fast_prefix = _has_explicit_fast_prefix(message)
+    if has_fast_prefix:
+        query, _ = _strip_fast_prefix(query)
+    if not query:
+        return
+    vc_summary_fast_mode = voice_meeting_manager.should_use_fast_model_for_query()
+    force_fast_mode = has_fast_prefix or vc_summary_fast_mode
     if MAX_INPUT_CHARACTERS > 0 and len(query) > MAX_INPUT_CHARACTERS:
         await _send_message_with_history(
             message,
@@ -919,7 +1208,13 @@ async def on_message(message: discord.Message):
             query=query,
         )
         return
-    task = asyncio.create_task(_run_answer(message, query))
+    task = asyncio.create_task(
+        _run_answer(
+            message,
+            query,
+            force_fast_mode=force_fast_mode,
+        )
+    )
     channel_generation_tasks[channel_id] = task
 
 

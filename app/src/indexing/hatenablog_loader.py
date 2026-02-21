@@ -5,7 +5,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -29,112 +28,6 @@ class HatenablogEntry:
     created_at: str
     updated_at: str
     content_html: str
-
-
-class _ArticleTextExtractor(HTMLParser):
-    _SKIP_TAGS = {
-        "script",
-        "style",
-        "noscript",
-        "template",
-        "svg",
-        "img",
-        "picture",
-        "source",
-        "figure",
-        "figcaption",
-        "nav",
-        "header",
-        "footer",
-        "aside",
-        "form",
-    }
-    _BLOCK_TAGS = {
-        "article",
-        "section",
-        "div",
-        "p",
-        "br",
-        "li",
-        "ul",
-        "ol",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "table",
-        "tr",
-        "td",
-        "th",
-        "blockquote",
-        "pre",
-        "hr",
-    }
-    _VOID_SKIP_TAGS = {"img", "source"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-        self._skip_stack: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag_name = tag.lower()
-        if tag_name in self._SKIP_TAGS or self._has_comment_marker(attrs):
-            if tag_name not in self._VOID_SKIP_TAGS:
-                self._skip_stack.append(tag_name)
-            return
-        if self._skip_stack:
-            return
-        if tag_name in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag_name = tag.lower()
-        if self._skip_stack:
-            if tag_name == self._skip_stack[-1]:
-                self._skip_stack.pop()
-            return
-        if tag_name in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_stack:
-            return
-        if not data:
-            return
-        self._parts.append(data)
-
-    @staticmethod
-    def _has_comment_marker(attrs: list[tuple[str, str | None]]) -> bool:
-        for key, value in attrs:
-            if key not in {"class", "id"}:
-                continue
-            if not value:
-                continue
-            if "comment" in value.lower():
-                return True
-        return False
-
-    def text(self) -> str:
-        return _normalize_text("".join(self._parts))
-
-
-def _normalize_text(text: str) -> str:
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    cleaned_lines: list[str] = []
-    previous_blank = False
-    for line in lines:
-        if not line:
-            if previous_blank:
-                continue
-            cleaned_lines.append("")
-            previous_blank = True
-            continue
-        cleaned_lines.append(line)
-        previous_blank = False
-    return "\n".join(cleaned_lines).strip()
 
 
 def _http_get_text(url: str) -> str:
@@ -341,52 +234,50 @@ def _cleanup_entry_duplicates(*, output_dir: Path, entry: HatenablogEntry, keep_
 
 
 def _cleanup_missing_entries(*, output_dir: Path, valid_entry_keys: set[str]) -> None:
-    for path in output_dir.glob("*.txt"):
-        entry_key = _extract_entry_key(path.name)
-        if not entry_key:
-            continue
-        if entry_key in valid_entry_keys:
-            continue
-        try:
-            path.unlink()
-            logger.info("Removed deleted Hatenablog export %s", path.name)
-        except Exception as exc:
-            logger.warning(
-                "Failed to remove deleted Hatenablog export %s: %s",
-                path.name,
-                exc,
-            )
-            continue
+    for pattern in ("*.md", "*.txt"):
+        for path in output_dir.glob(pattern):
+            entry_key = _extract_entry_key(path.name)
+            if not entry_key:
+                continue
+            if entry_key in valid_entry_keys:
+                continue
+            try:
+                path.unlink()
+                logger.info("Removed deleted Hatenablog export %s", path.name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to remove deleted Hatenablog export %s: %s",
+                    path.name,
+                    exc,
+                )
+                continue
 
-        meta_path = _metadata_sidecar_path(path)
-        if not meta_path.exists():
-            continue
-        try:
-            meta_path.unlink()
-            logger.info("Removed deleted Hatenablog metadata %s", meta_path.name)
-        except Exception as exc:
-            logger.warning(
-                "Failed to remove deleted Hatenablog metadata %s: %s",
-                meta_path.name,
-                exc,
-            )
+            meta_path = _metadata_sidecar_path(path)
+            if not meta_path.exists():
+                continue
+            try:
+                meta_path.unlink()
+                logger.info("Removed deleted Hatenablog metadata %s", meta_path.name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to remove deleted Hatenablog metadata %s: %s",
+                    meta_path.name,
+                    exc,
+                )
 
 
 def _build_output_filename(entry: HatenablogEntry) -> str:
     key = _entry_key(entry)
     normalized_url_path = re.sub(r"^https?://", "", entry.url, flags=re.IGNORECASE)
     safe_slug = sanitize_filename(normalized_url_path.replace("/", "__"))
-    return f"{key}{FILE_ID_SEPARATOR}{safe_slug}.txt"
+    return f"{key}{FILE_ID_SEPARATOR}{safe_slug}.md"
 
 
-def _extract_article_text(entry: HatenablogEntry) -> str:
+def _extract_article_markdown(entry: HatenablogEntry) -> str:
     raw_html = entry.content_html
     if not raw_html:
         raw_html = _http_get_text(entry.url)
-    extractor = _ArticleTextExtractor()
-    extractor.feed(raw_html)
-    extractor.close()
-    return extractor.text()
+    return raw_html
 
 
 def download_hatenablog_articles(
@@ -435,11 +326,11 @@ def download_hatenablog_articles(
                 continue
 
         try:
-            text = _extract_article_text(entry)
-            if not text:
+            markdown = _extract_article_markdown(entry)
+            if not markdown.strip():
                 logger.warning("Empty Hatenablog article body: %s", entry.url)
                 continue
-            out_path.write_text(text, encoding="utf-8")
+            out_path.write_text(markdown, encoding="utf-8")
             _write_entry_metadata(out_path, entry)
             downloaded_count += 1
             logger.info("Downloaded Hatenablog article: %s", entry.url)

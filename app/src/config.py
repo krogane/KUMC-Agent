@@ -75,6 +75,8 @@ _REQUIRED_PROMPT_ENV_NAMES: tuple[str, ...] = (
     "PROMPT_LLAMA_HEADER_CONTEXT",
     "PROMPT_LLAMA_HEADER_OUTPUT_FORMAT",
     "PROMPT_LLAMA_HEADER_INSTRUCTIONS",
+    "PROMPT_MATERIAL_SEARCH_SELECTOR_SYSTEM",
+    "PROMPT_MATERIAL_SEARCH_SELECTOR_USER_TEMPLATE",
 )
 
 
@@ -179,6 +181,19 @@ DEFAULT_FUNCTION_CALL_MAX_RETRIES: int = 2
 DEFAULT_FUNCTION_CALL_ENABLED: bool = True
 DEFAULT_FUNCTION_CALL_LOG_ENABLED: bool = False
 DEFAULT_RAG_IDEA_TEMPERATURE: float = 0.8
+DEFAULT_MATERIAL_SEARCH_MAX_NAMES: int = 3
+DEFAULT_MATERIAL_SEARCH_PARTIAL_MATCH_SEMANTIC_TOP_K: int = 1
+DEFAULT_MATERIAL_SEARCH_CHAR_LIMIT: int = 3000
+DEFAULT_MATERIAL_SEARCH_MAX_SELECTED_SUMMARY_CHUNKS: int = 3
+DEFAULT_MATERIAL_SEARCH_SUMMARY_MISSING_FIRST_REC_TOP_K: int = 3
+DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_RETRIES: int = 2
+DEFAULT_MATERIAL_SEARCH_SELECTOR_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
+DEFAULT_MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
+DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL: str = "gemma-3n-E2B-it-IQ4_XS.gguf"
+DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
+DEFAULT_MATERIAL_SEARCH_SELECTOR_TEMPERATURE: float = 0.0
+DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_OUTPUT_TOKENS: int = 128
+DEFAULT_MATERIAL_SEARCH_SELECTOR_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
 
 # First Recursive Chunking Settings
 DEFAULT_FIRST_REC_CHUNK_SIZE: int = 1024
@@ -283,10 +298,16 @@ DEFAULT_EVAL_CONTEXT_RECALL_ENABLED: bool = True
 
 # Google Drive Settings
 DEFAULT_DRIVE_MAX_FILES: int = 0
+DEFAULT_CRAFTERS_COLONY_AUTHOR_URL: str = (
+    "https://minecraft-mcworld.com/author/2937761467834624754e30c1ed9db1390dc5f974/"
+)
+DEFAULT_CRAFTERS_COLONY_MAX_PAGES: int = 100
+DEFAULT_CRAFTERS_COLONY_MAX_ARTICLES: int = 0
 
 # Command Prefix
 DEFAULT_COMMAND_PREFIX: str = "/ai "
 DEFAULT_INDEX_COMMAND_PREFIX: str = "/ai build-index"
+DEFAULT_MAINTENANCE_COMMAND_AUTHOR_IDS: str = ""
 DEFAULT_AUTO_INDEX_ENABLED: bool = False
 DEFAULT_AUTO_INDEX_TIME: str = "03:00"
 DEFAULT_AUTO_INDEX_WEEKDAYS: str = "mon,tue,wed,thu,fri"
@@ -296,6 +317,10 @@ DEFAULT_INDEX_UPDATE_ESTIMATE_MAX_MINUTES: int = 60
 DEFAULT_DISCORD_GUILD_ALLOW_LIST: str = ""
 DEFAULT_MAX_INPUT_CHARACTERS: int = 0
 DEFAULT_PROMPT_FULL_LOG_ENABLED: bool = True
+DEFAULT_SPECIAL_CHANNEL_HISTORY_LIMIT: int = 30
+DEFAULT_SPECIAL_CHANNEL_CUSTOM_INSTRUCTION: str = ""
+DEFAULT_ANSWER_RECORD_LOG_ENABLED: bool = True
+DEFAULT_ANSWER_RECORD_LOG_PATH: str = "logs/answer_records.jsonl"
 
 # VC Meeting Settings
 DEFAULT_VC_FEATURE_ENABLED: bool = False
@@ -307,7 +332,6 @@ DEFAULT_VC_TARGET_VOICE_CHANNEL_NAME: str = "例会"
 DEFAULT_VC_AUTO_JOIN_MIN_PARTICIPANTS: int = 3
 DEFAULT_VC_PARTICIPANT_CHECK_INTERVAL_SECONDS: int = 10
 DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS: int = 300
-DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS: int = 60
 DEFAULT_VC_TRANSCRIBE_MODEL: str = "kotoba-tech/kotoba-whisper-v2.2"
 DEFAULT_VC_TRANSCRIBE_DEVICE: str = "auto"
 DEFAULT_VC_TRANSCRIBE_TORCH_DTYPE: str = "auto"
@@ -323,13 +347,20 @@ DEFAULT_VC_SUMMARY_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_VC_SUMMARY_TEMPERATURE: float = 0.2
 DEFAULT_VC_SUMMARY_MAX_OUTPUT_TOKENS: int = 256
 DEFAULT_VC_SUMMARY_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
-DEFAULT_VC_END_JUDGE_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
-DEFAULT_VC_END_JUDGE_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_VC_END_JUDGE_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
-DEFAULT_VC_END_JUDGE_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
-DEFAULT_VC_END_JUDGE_TEMPERATURE: float = 0.0
-DEFAULT_VC_END_JUDGE_MAX_OUTPUT_TOKENS: int = 64
-DEFAULT_VC_END_JUDGE_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
+DEFAULT_VC_MINUTES_ENABLED: bool = True
+DEFAULT_VC_MINUTES_DRIVE_DIR: str = "議事録"
+DEFAULT_VC_MINUTES_FETCH_MAX_RETRIES: int = 2
+DEFAULT_VC_MINUTES_APPLY_MAX_RETRIES: int = 2
+DEFAULT_VC_MINUTES_LLM_MAX_RETRIES: int = 2
+DEFAULT_VC_MINUTES_HISTORY_SUMMARY_MAX: int = 2
+DEFAULT_VC_MINUTES_IMAGE_BATCH_SIZE: int = 10
+DEFAULT_VC_MINUTES_EDIT_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
+DEFAULT_VC_MINUTES_EDIT_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
+DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
+DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
+DEFAULT_VC_MINUTES_EDIT_TEMPERATURE: float = 0.2
+DEFAULT_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS: int = 512
+DEFAULT_VC_MINUTES_EDIT_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
 DEFAULT_VC_FINAL_SUMMARY_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_VC_FINAL_SUMMARY_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
 DEFAULT_VC_FINAL_SUMMARY_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
@@ -411,7 +442,12 @@ def _parse_weekdays(value: str | None, *, default: str) -> tuple[int, ...]:
     return tuple(deduped)
 
 
-def _parse_id_list(value: str | None, *, default: str) -> tuple[int, ...]:
+def _parse_id_list(
+    value: str | None,
+    *,
+    default: str,
+    env_name: str = "DISCORD_GUILD_ALLOW_LIST",
+) -> tuple[int, ...]:
     raw = (value if value is not None else default).strip()
     if not raw:
         return tuple()
@@ -420,7 +456,7 @@ def _parse_id_list(value: str | None, *, default: str) -> tuple[int, ...]:
     for token in tokens:
         if not token.isdigit():
             raise ValueError(
-                f"Invalid DISCORD_GUILD_ALLOW_LIST entry '{token}'. "
+                f"Invalid {env_name} entry '{token}'. "
                 "Use comma-separated numeric IDs."
             )
         ids.append(int(token))
@@ -512,7 +548,7 @@ def build_summery_chunk_prompt(
     drive_path = (drive_file_path or "").strip()
     drive_path_display = drive_path if drive_path else "不明"
 
-    if normalized_type in {"messages", "discord_message"}:
+    if normalized_type in {"messages", "discord_message", "x_posts"}:
         return render_prompt_template(
             "PROMPT_SUMMERY_CHUNK_MESSAGES_TEMPLATE",
             target_characters=target_characters,
@@ -556,10 +592,14 @@ class AppConfig:
     index_dir: Path
     discord_bot_token: str = ""
     discord_guild_allow_list: tuple[int, ...] = ()
+    maintenance_command_author_ids: tuple[int, ...] = ()
     gemini_api_key: str = ""
     drive_folder_id: str = ""
     google_application_credentials: str = ""
     drive_max_files: int = DEFAULT_DRIVE_MAX_FILES
+    crafters_colony_author_url: str = DEFAULT_CRAFTERS_COLONY_AUTHOR_URL
+    crafters_colony_max_pages: int = DEFAULT_CRAFTERS_COLONY_MAX_PAGES
+    crafters_colony_max_articles: int = DEFAULT_CRAFTERS_COLONY_MAX_ARTICLES
     pdf_ocr_model_path: str = DEFAULT_PDF_OCR_MODEL
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     raptor_embedding_model: str = DEFAULT_RAPTOR_EMBEDDING_MODEL
@@ -610,6 +650,42 @@ class AppConfig:
     function_call_max_retries: int = DEFAULT_FUNCTION_CALL_MAX_RETRIES
     function_call_enabled: bool = DEFAULT_FUNCTION_CALL_ENABLED
     function_call_log_enabled: bool = DEFAULT_FUNCTION_CALL_LOG_ENABLED
+    material_search_max_names: int = DEFAULT_MATERIAL_SEARCH_MAX_NAMES
+    material_search_partial_match_semantic_top_k: int = (
+        DEFAULT_MATERIAL_SEARCH_PARTIAL_MATCH_SEMANTIC_TOP_K
+    )
+    material_search_char_limit: int = DEFAULT_MATERIAL_SEARCH_CHAR_LIMIT
+    material_search_max_selected_summary_chunks: int = (
+        DEFAULT_MATERIAL_SEARCH_MAX_SELECTED_SUMMARY_CHUNKS
+    )
+    material_search_summary_missing_first_rec_top_k: int = (
+        DEFAULT_MATERIAL_SEARCH_SUMMARY_MISSING_FIRST_REC_TOP_K
+    )
+    material_search_selector_max_retries: int = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_RETRIES
+    )
+    material_search_selector_llm_provider: str = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_LLM_PROVIDER
+    )
+    material_search_selector_gemini_model: str = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL
+    )
+    material_search_selector_llama_model: str = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL
+    )
+    material_search_selector_llama_model_path: str = ""
+    material_search_selector_llama_ctx_size: int = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE
+    )
+    material_search_selector_temperature: float = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_TEMPERATURE
+    )
+    material_search_selector_max_output_tokens: int = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_OUTPUT_TOKENS
+    )
+    material_search_selector_thinking_level: str = (
+        DEFAULT_MATERIAL_SEARCH_SELECTOR_THINKING_LEVEL
+    )
     rag_idea_temperature: float = DEFAULT_RAG_IDEA_TEMPERATURE
     chat_history_enabled: bool = DEFAULT_CHAT_HISTORY_ENABLED
     chat_history_max_turns: int = DEFAULT_CHAT_HISTORY_MAX_TURNS
@@ -656,6 +732,12 @@ class AppConfig:
     eval_context_recall_enabled: bool = DEFAULT_EVAL_CONTEXT_RECALL_ENABLED
     max_input_characters: int = DEFAULT_MAX_INPUT_CHARACTERS
     prompt_full_log_enabled: bool = DEFAULT_PROMPT_FULL_LOG_ENABLED
+    special_channel_history_limit: int = DEFAULT_SPECIAL_CHANNEL_HISTORY_LIMIT
+    special_channel_custom_instruction: str = (
+        DEFAULT_SPECIAL_CHANNEL_CUSTOM_INSTRUCTION
+    )
+    answer_record_log_enabled: bool = DEFAULT_ANSWER_RECORD_LOG_ENABLED
+    answer_record_log_path: str = DEFAULT_ANSWER_RECORD_LOG_PATH
     command_prefix: str = DEFAULT_COMMAND_PREFIX
     index_command_prefix: str = DEFAULT_INDEX_COMMAND_PREFIX
     system_rules: Sequence[str] = DEFAULT_SYSTEM_RULES
@@ -697,9 +779,6 @@ class AppConfig:
     vc_summary_transcribe_interval_seconds: int = (
         DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS
     )
-    vc_end_judge_transcribe_interval_seconds: int = (
-        DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS
-    )
     vc_transcribe_model: str = DEFAULT_VC_TRANSCRIBE_MODEL
     vc_transcribe_device: str = DEFAULT_VC_TRANSCRIBE_DEVICE
     vc_transcribe_torch_dtype: str = DEFAULT_VC_TRANSCRIBE_TORCH_DTYPE
@@ -720,16 +799,23 @@ class AppConfig:
         DEFAULT_VC_SUMMARY_MAX_OUTPUT_TOKENS
     )
     vc_summary_thinking_level: str = DEFAULT_VC_SUMMARY_THINKING_LEVEL
-    vc_end_judge_llm_provider: str = DEFAULT_VC_END_JUDGE_LLM_PROVIDER
-    vc_end_judge_gemini_model: str = DEFAULT_VC_END_JUDGE_GEMINI_MODEL
-    vc_end_judge_llama_model: str = DEFAULT_VC_END_JUDGE_LLAMA_MODEL
-    vc_end_judge_llama_model_path: str = ""
-    vc_end_judge_llama_ctx_size: int = DEFAULT_VC_END_JUDGE_LLAMA_CTX_SIZE
-    vc_end_judge_temperature: float = DEFAULT_VC_END_JUDGE_TEMPERATURE
-    vc_end_judge_max_output_tokens: int = (
-        DEFAULT_VC_END_JUDGE_MAX_OUTPUT_TOKENS
+    vc_minutes_enabled: bool = DEFAULT_VC_MINUTES_ENABLED
+    vc_minutes_drive_dir: str = DEFAULT_VC_MINUTES_DRIVE_DIR
+    vc_minutes_fetch_max_retries: int = DEFAULT_VC_MINUTES_FETCH_MAX_RETRIES
+    vc_minutes_apply_max_retries: int = DEFAULT_VC_MINUTES_APPLY_MAX_RETRIES
+    vc_minutes_llm_max_retries: int = DEFAULT_VC_MINUTES_LLM_MAX_RETRIES
+    vc_minutes_history_summary_max: int = DEFAULT_VC_MINUTES_HISTORY_SUMMARY_MAX
+    vc_minutes_image_batch_size: int = DEFAULT_VC_MINUTES_IMAGE_BATCH_SIZE
+    vc_minutes_edit_llm_provider: str = DEFAULT_VC_MINUTES_EDIT_LLM_PROVIDER
+    vc_minutes_edit_gemini_model: str = DEFAULT_VC_MINUTES_EDIT_GEMINI_MODEL
+    vc_minutes_edit_llama_model: str = DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL
+    vc_minutes_edit_llama_model_path: str = ""
+    vc_minutes_edit_llama_ctx_size: int = DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE
+    vc_minutes_edit_temperature: float = DEFAULT_VC_MINUTES_EDIT_TEMPERATURE
+    vc_minutes_edit_max_output_tokens: int = (
+        DEFAULT_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS
     )
-    vc_end_judge_thinking_level: str = DEFAULT_VC_END_JUDGE_THINKING_LEVEL
+    vc_minutes_edit_thinking_level: str = DEFAULT_VC_MINUTES_EDIT_THINKING_LEVEL
     vc_final_summary_llm_provider: str = (
         DEFAULT_VC_FINAL_SUMMARY_LLM_PROVIDER
     )
@@ -806,10 +892,14 @@ class AppConfig:
         genai_model: str | None = None,
         discord_bot_token: str | None = None,
         discord_guild_allow_list: str | None = None,
+        maintenance_command_author_ids: str | None = None,
         gemini_api_key: str | None = None,
         drive_folder_id: str | None = None,
         google_application_credentials: str | None = None,
         drive_max_files: int | None = None,
+        crafters_colony_author_url: str | None = None,
+        crafters_colony_max_pages: int | None = None,
+        crafters_colony_max_articles: int | None = None,
         pdf_ocr_model: str | None = None,
         llama_model: str | None = None,
         llama_ctx_size: int | None = None,
@@ -876,6 +966,10 @@ class AppConfig:
         eval_context_recall_enabled: bool | None = None,
         max_input_characters: int | None = None,
         prompt_full_log_enabled: bool | None = None,
+        special_channel_history_limit: int | None = None,
+        special_channel_custom_instruction: str | None = None,
+        answer_record_log_enabled: bool | None = None,
+        answer_record_log_path: str | None = None,
         prop_enabled: bool | None = None,
         prop_provider: str | None = None,
         prop_gemini_model: str | None = None,
@@ -1040,6 +1134,15 @@ class AppConfig:
             model_dir=llm_model_dir_path,
             base_dir=resolved_base,
         )
+        raw_material_search_selector_llama_model_name = os.getenv(
+            "MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL",
+            DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL,
+        )
+        resolved_material_search_selector_llama_model_path = _resolve_model_path(
+            model_name=raw_material_search_selector_llama_model_name,
+            model_dir=llm_model_dir_path,
+            base_dir=resolved_base,
+        )
 
         raw_cross_encoder_model_name = (
             cross_encoder_model_path
@@ -1097,12 +1200,12 @@ class AppConfig:
             base_dir=resolved_base,
         )
 
-        raw_vc_end_judge_llama_model_name = os.getenv(
-            "VC_END_JUDGE_LLAMA_MODEL",
-            DEFAULT_VC_END_JUDGE_LLAMA_MODEL,
+        raw_vc_minutes_edit_llama_model_name = os.getenv(
+            "VC_MINUTES_EDIT_LLAMA_MODEL",
+            DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL,
         )
-        resolved_vc_end_judge_llama_model_path = _resolve_model_path(
-            model_name=raw_vc_end_judge_llama_model_name,
+        resolved_vc_minutes_edit_llama_model_path = _resolve_model_path(
+            model_name=raw_vc_minutes_edit_llama_model_name,
             model_dir=llm_model_dir_path,
             base_dir=resolved_base,
         )
@@ -1141,13 +1244,17 @@ class AppConfig:
         refusal_provider_value = refusal_llm_provider or os.getenv(
             "REFUSAL_LLM_PROVIDER", DEFAULT_REFUSAL_LLM_PROVIDER
         )
+        material_search_selector_provider_value = os.getenv(
+            "MATERIAL_SEARCH_SELECTOR_LLM_PROVIDER",
+            DEFAULT_MATERIAL_SEARCH_SELECTOR_LLM_PROVIDER,
+        )
         vc_summary_provider_value = os.getenv(
             "VC_SUMMARY_LLM_PROVIDER",
             DEFAULT_VC_SUMMARY_LLM_PROVIDER,
         )
-        vc_end_judge_provider_value = os.getenv(
-            "VC_END_JUDGE_LLM_PROVIDER",
-            DEFAULT_VC_END_JUDGE_LLM_PROVIDER,
+        vc_minutes_edit_provider_value = os.getenv(
+            "VC_MINUTES_EDIT_LLM_PROVIDER",
+            DEFAULT_VC_MINUTES_EDIT_LLM_PROVIDER,
         )
         vc_final_summary_provider_value = os.getenv(
             "VC_FINAL_SUMMARY_LLM_PROVIDER",
@@ -1181,13 +1288,17 @@ class AppConfig:
             if refusal_genai_model is not None
             else os.getenv("REFUSAL_GEMINI_MODEL", DEFAULT_REFUSAL_GENAI_MODEL)
         )
+        material_search_selector_gemini_model_value = os.getenv(
+            "MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL",
+            DEFAULT_MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL,
+        )
         vc_summary_gemini_model_value = os.getenv(
             "VC_SUMMARY_GEMINI_MODEL",
             DEFAULT_VC_SUMMARY_GEMINI_MODEL,
         )
-        vc_end_judge_gemini_model_value = os.getenv(
-            "VC_END_JUDGE_GEMINI_MODEL",
-            DEFAULT_VC_END_JUDGE_GEMINI_MODEL,
+        vc_minutes_edit_gemini_model_value = os.getenv(
+            "VC_MINUTES_EDIT_GEMINI_MODEL",
+            DEFAULT_VC_MINUTES_EDIT_GEMINI_MODEL,
         )
         vc_final_summary_gemini_model_value = os.getenv(
             "VC_FINAL_SUMMARY_GEMINI_MODEL",
@@ -1265,11 +1376,6 @@ class AppConfig:
             if legacy_vc_transcribe_interval_seconds is not None
             else str(DEFAULT_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS)
         )
-        vc_end_judge_transcribe_interval_default = (
-            legacy_vc_transcribe_interval_seconds
-            if legacy_vc_transcribe_interval_seconds is not None
-            else str(DEFAULT_VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS)
-        )
         discord_guild_allow_list_value = (
             discord_guild_allow_list
             if discord_guild_allow_list is not None
@@ -1281,6 +1387,19 @@ class AppConfig:
         discord_guild_allow_list_parsed = _parse_id_list(
             discord_guild_allow_list_value,
             default=DEFAULT_DISCORD_GUILD_ALLOW_LIST,
+        )
+        maintenance_command_author_ids_value = (
+            maintenance_command_author_ids
+            if maintenance_command_author_ids is not None
+            else os.getenv(
+                "MAINTENANCE_COMMAND_AUTHOR_IDS",
+                DEFAULT_MAINTENANCE_COMMAND_AUTHOR_IDS,
+            )
+        )
+        maintenance_command_author_ids_parsed = _parse_id_list(
+            maintenance_command_author_ids_value,
+            default=DEFAULT_MAINTENANCE_COMMAND_AUTHOR_IDS,
+            env_name="MAINTENANCE_COMMAND_AUTHOR_IDS",
         )
         base_sparse_search_top_k = (
             sparse_search_top_k
@@ -1319,6 +1438,7 @@ class AppConfig:
             if discord_bot_token is not None
             else os.getenv("DISCORD_BOT_TOKEN", ""),
             discord_guild_allow_list=discord_guild_allow_list_parsed,
+            maintenance_command_author_ids=maintenance_command_author_ids_parsed,
             gemini_api_key=gemini_api_key
             if gemini_api_key is not None
             else os.getenv("GEMINI_API_KEY", ""),
@@ -1331,6 +1451,34 @@ class AppConfig:
             drive_max_files=drive_max_files
             if drive_max_files is not None
             else int(os.getenv("DRIVE_MAX_FILES", str(DEFAULT_DRIVE_MAX_FILES))),
+            crafters_colony_author_url=crafters_colony_author_url
+            if crafters_colony_author_url is not None
+            else os.getenv(
+                "CRAFTERS_COLONY_AUTHOR_URL",
+                DEFAULT_CRAFTERS_COLONY_AUTHOR_URL,
+            ),
+            crafters_colony_max_pages=max(
+                1,
+                crafters_colony_max_pages
+                if crafters_colony_max_pages is not None
+                else int(
+                    os.getenv(
+                        "CRAFTERS_COLONY_MAX_PAGES",
+                        str(DEFAULT_CRAFTERS_COLONY_MAX_PAGES),
+                    )
+                ),
+            ),
+            crafters_colony_max_articles=max(
+                0,
+                crafters_colony_max_articles
+                if crafters_colony_max_articles is not None
+                else int(
+                    os.getenv(
+                        "CRAFTERS_COLONY_MAX_ARTICLES",
+                        str(DEFAULT_CRAFTERS_COLONY_MAX_ARTICLES),
+                    )
+                ),
+            ),
             pdf_ocr_model_path=resolved_pdf_ocr_model_path,
             embedding_model=resolved_embedding_model,
             raptor_embedding_model=resolved_raptor_embedding_model,
@@ -1550,6 +1698,96 @@ class AppConfig:
             else _env_bool(
                 os.getenv("FUNCTION_CALL_LOG_ENABLED"),
                 DEFAULT_FUNCTION_CALL_LOG_ENABLED,
+            ),
+            material_search_max_names=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_MAX_NAMES",
+                        str(DEFAULT_MATERIAL_SEARCH_MAX_NAMES),
+                    )
+                ),
+            ),
+            material_search_partial_match_semantic_top_k=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_PARTIAL_MATCH_SEMANTIC_TOP_K",
+                        str(DEFAULT_MATERIAL_SEARCH_PARTIAL_MATCH_SEMANTIC_TOP_K),
+                    )
+                ),
+            ),
+            material_search_char_limit=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_CHAR_LIMIT",
+                        str(DEFAULT_MATERIAL_SEARCH_CHAR_LIMIT),
+                    )
+                ),
+            ),
+            material_search_max_selected_summary_chunks=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_MAX_SELECTED_SUMMARY_CHUNKS",
+                        str(
+                            DEFAULT_MATERIAL_SEARCH_MAX_SELECTED_SUMMARY_CHUNKS
+                        ),
+                    )
+                ),
+            ),
+            material_search_summary_missing_first_rec_top_k=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_SUMMARY_MISSING_FIRST_REC_TOP_K",
+                        str(
+                            DEFAULT_MATERIAL_SEARCH_SUMMARY_MISSING_FIRST_REC_TOP_K
+                        ),
+                    )
+                ),
+            ),
+            material_search_selector_max_retries=max(
+                0,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_SELECTOR_MAX_RETRIES",
+                        str(DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_RETRIES),
+                    )
+                ),
+            ),
+            material_search_selector_llm_provider=material_search_selector_provider_value,
+            material_search_selector_gemini_model=material_search_selector_gemini_model_value,
+            material_search_selector_llama_model=raw_material_search_selector_llama_model_name,
+            material_search_selector_llama_model_path=resolved_material_search_selector_llama_model_path,
+            material_search_selector_llama_ctx_size=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE",
+                        str(DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE),
+                    )
+                ),
+            ),
+            material_search_selector_temperature=float(
+                os.getenv(
+                    "MATERIAL_SEARCH_SELECTOR_TEMPERATURE",
+                    str(DEFAULT_MATERIAL_SEARCH_SELECTOR_TEMPERATURE),
+                )
+            ),
+            material_search_selector_max_output_tokens=max(
+                1,
+                int(
+                    os.getenv(
+                        "MATERIAL_SEARCH_SELECTOR_MAX_OUTPUT_TOKENS",
+                        str(DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_OUTPUT_TOKENS),
+                    )
+                ),
+            ),
+            material_search_selector_thinking_level=os.getenv(
+                "MATERIAL_SEARCH_SELECTOR_THINKING_LEVEL",
+                DEFAULT_MATERIAL_SEARCH_SELECTOR_THINKING_LEVEL,
             ),
             rag_idea_temperature=rag_idea_temperature
             if rag_idea_temperature is not None
@@ -1785,6 +2023,38 @@ class AppConfig:
                 os.getenv("PROMPT_FULL_LOG_ENABLED"),
                 DEFAULT_PROMPT_FULL_LOG_ENABLED,
             ),
+            special_channel_history_limit=max(
+                0,
+                special_channel_history_limit
+                if special_channel_history_limit is not None
+                else int(
+                    os.getenv(
+                        "SPECIAL_CHANNEL_HISTORY_LIMIT",
+                        str(DEFAULT_SPECIAL_CHANNEL_HISTORY_LIMIT),
+                    )
+                ),
+            ),
+            special_channel_custom_instruction=special_channel_custom_instruction
+            if special_channel_custom_instruction is not None
+            else os.getenv(
+                "SPECIAL_CHANNEL_CUSTOM_INSTRUCTION",
+                DEFAULT_SPECIAL_CHANNEL_CUSTOM_INSTRUCTION,
+            ),
+            answer_record_log_enabled=answer_record_log_enabled
+            if answer_record_log_enabled is not None
+            else _env_bool(
+                os.getenv("ANSWER_RECORD_LOG_ENABLED"),
+                DEFAULT_ANSWER_RECORD_LOG_ENABLED,
+            ),
+            answer_record_log_path=(
+                answer_record_log_path.strip()
+                if answer_record_log_path is not None
+                and answer_record_log_path.strip()
+                else (
+                    (os.getenv("ANSWER_RECORD_LOG_PATH") or "").strip()
+                    or DEFAULT_ANSWER_RECORD_LOG_PATH
+                )
+            ),
             command_prefix=command_prefix
             if command_prefix is not None
             else os.getenv("COMMAND_PREFIX", DEFAULT_COMMAND_PREFIX),
@@ -1889,15 +2159,6 @@ class AppConfig:
                     )
                 ),
             ),
-            vc_end_judge_transcribe_interval_seconds=max(
-                30,
-                int(
-                    os.getenv(
-                        "VC_END_JUDGE_TRANSCRIBE_INTERVAL_SECONDS",
-                        vc_end_judge_transcribe_interval_default,
-                    )
-                ),
-            ),
             vc_transcribe_model=resolved_vc_transcribe_model_path,
             vc_transcribe_device=os.getenv(
                 "VC_TRANSCRIBE_DEVICE",
@@ -1968,37 +2229,89 @@ class AppConfig:
                 "VC_SUMMARY_THINKING_LEVEL",
                 DEFAULT_VC_SUMMARY_THINKING_LEVEL,
             ),
-            vc_end_judge_llm_provider=vc_end_judge_provider_value,
-            vc_end_judge_gemini_model=vc_end_judge_gemini_model_value,
-            vc_end_judge_llama_model=raw_vc_end_judge_llama_model_name,
-            vc_end_judge_llama_model_path=resolved_vc_end_judge_llama_model_path,
-            vc_end_judge_llama_ctx_size=max(
-                256,
+            vc_minutes_enabled=_env_bool(
+                os.getenv("VC_MINUTES_ENABLED"), DEFAULT_VC_MINUTES_ENABLED
+            ),
+            vc_minutes_drive_dir=os.getenv(
+                "VC_MINUTES_DRIVE_DIR",
+                DEFAULT_VC_MINUTES_DRIVE_DIR,
+            ),
+            vc_minutes_fetch_max_retries=max(
+                0,
                 int(
                     os.getenv(
-                        "VC_END_JUDGE_LLAMA_CTX_SIZE",
-                        str(DEFAULT_VC_END_JUDGE_LLAMA_CTX_SIZE),
+                        "VC_MINUTES_FETCH_MAX_RETRIES",
+                        str(DEFAULT_VC_MINUTES_FETCH_MAX_RETRIES),
                     )
                 ),
             ),
-            vc_end_judge_temperature=float(
-                os.getenv(
-                    "VC_END_JUDGE_TEMPERATURE",
-                    str(DEFAULT_VC_END_JUDGE_TEMPERATURE),
-                )
+            vc_minutes_apply_max_retries=max(
+                0,
+                int(
+                    os.getenv(
+                        "VC_MINUTES_APPLY_MAX_RETRIES",
+                        str(DEFAULT_VC_MINUTES_APPLY_MAX_RETRIES),
+                    )
+                ),
             ),
-            vc_end_judge_max_output_tokens=max(
+            vc_minutes_llm_max_retries=max(
+                0,
+                int(
+                    os.getenv(
+                        "VC_MINUTES_LLM_MAX_RETRIES",
+                        str(DEFAULT_VC_MINUTES_LLM_MAX_RETRIES),
+                    )
+                ),
+            ),
+            vc_minutes_history_summary_max=max(
+                0,
+                int(
+                    os.getenv(
+                        "VC_MINUTES_HISTORY_SUMMARY_MAX",
+                        str(DEFAULT_VC_MINUTES_HISTORY_SUMMARY_MAX),
+                    )
+                ),
+            ),
+            vc_minutes_image_batch_size=max(
                 1,
                 int(
                     os.getenv(
-                        "VC_END_JUDGE_MAX_OUTPUT_TOKENS",
-                        str(DEFAULT_VC_END_JUDGE_MAX_OUTPUT_TOKENS),
+                        "VC_MINUTES_IMAGE_BATCH_SIZE",
+                        str(DEFAULT_VC_MINUTES_IMAGE_BATCH_SIZE),
                     )
                 ),
             ),
-            vc_end_judge_thinking_level=os.getenv(
-                "VC_END_JUDGE_THINKING_LEVEL",
-                DEFAULT_VC_END_JUDGE_THINKING_LEVEL,
+            vc_minutes_edit_llm_provider=vc_minutes_edit_provider_value,
+            vc_minutes_edit_gemini_model=vc_minutes_edit_gemini_model_value,
+            vc_minutes_edit_llama_model=raw_vc_minutes_edit_llama_model_name,
+            vc_minutes_edit_llama_model_path=resolved_vc_minutes_edit_llama_model_path,
+            vc_minutes_edit_llama_ctx_size=max(
+                256,
+                int(
+                    os.getenv(
+                        "VC_MINUTES_EDIT_LLAMA_CTX_SIZE",
+                        str(DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE),
+                    )
+                ),
+            ),
+            vc_minutes_edit_temperature=float(
+                os.getenv(
+                    "VC_MINUTES_EDIT_TEMPERATURE",
+                    str(DEFAULT_VC_MINUTES_EDIT_TEMPERATURE),
+                )
+            ),
+            vc_minutes_edit_max_output_tokens=max(
+                1,
+                int(
+                    os.getenv(
+                        "VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS",
+                        str(DEFAULT_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS),
+                    )
+                ),
+            ),
+            vc_minutes_edit_thinking_level=os.getenv(
+                "VC_MINUTES_EDIT_THINKING_LEVEL",
+                DEFAULT_VC_MINUTES_EDIT_THINKING_LEVEL,
             ),
             vc_final_summary_llm_provider=vc_final_summary_provider_value,
             vc_final_summary_gemini_model=vc_final_summary_gemini_model_value,
