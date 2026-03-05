@@ -1,0 +1,22 @@
+providers:
+  llm:
+    provider: "gemini"
+    gemini_model: "gemini-3.1-flash-lite-preview"
+    llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
+    temperature: 0.0
+    max_output_tokens: 1024
+    thinking_level: "minimal"
+    threads: 4
+    gpu_layers: 0
+  embeddings:
+    provider: "local"
+    model: "intfloat/multilingual-e5-small"
+    dimensions: 256
+  reranker:
+    model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    enabled: true
+  function_call:
+    enabled: true
+    provider: "gemini"
+    gemini_model: "gemini-2.5-flash-lite"
+    llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"

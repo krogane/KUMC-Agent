@@ -1,0 +1,7 @@
+model:
+  root_dir: "model"
+  llm_dir: "model/llm"
+  embedding_dir: "model/embedding"
+  cross_encoder_dir: "model/cross-encoder"
+  whisper_dir: "model/whisper"
+  ocr_dir: "model/ocr"

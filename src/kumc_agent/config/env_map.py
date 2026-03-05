@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class EnvBinding:
+    env_name: str
+    path: str
+    parser: Callable[[str], object]
+
+
+def _to_bool(raw: str) -> bool:
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _to_int(raw: str) -> int:
+    return int(raw.strip())
+
+
+def _to_float(raw: str) -> float:
+    return float(raw.strip())
+
+
+def _to_int_list(raw: str) -> list[int]:
+    value = raw.strip()
+    if not value:
+        return []
+    if value in {"*", "all", "every"}:
+        return [0, 1, 2, 3, 4, 5, 6]
+    out: list[int] = []
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            out.append(int(token))
+            continue
+        weekday = {
+            "mon": 0,
+            "tue": 1,
+            "wed": 2,
+            "thu": 3,
+            "fri": 4,
+            "sat": 5,
+            "sun": 6,
+        }.get(token[:3].lower())
+        if weekday is None:
+            raise ValueError(f"Invalid weekday token: {token}")
+        out.append(weekday)
+    return out
+
+
+def _to_str_list(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _to_int_csv(raw: str) -> list[int]:
+    values = _to_str_list(raw)
+    return [int(value) for value in values]
+
+
+ENV_BINDINGS: tuple[EnvBinding, ...] = (
+    EnvBinding("KUMC_LOG_LEVEL", "app.log_level", str),
+    EnvBinding("KUMC_COMMAND_PREFIX", "app.command_prefix", str),
+    EnvBinding("KUMC_INDEX_COMMAND_PREFIX", "app.index_command_prefix", str),
+    EnvBinding("KUMC_MAX_INPUT_CHARACTERS", "app.max_input_characters", _to_int),
+    EnvBinding("KUMC_DISCORD_BOT_TOKEN", "integrations.discord.bot_token", str),
+    EnvBinding("KUMC_GEMINI_API_KEY", "integrations.gemini_api_key", str),
+    EnvBinding("KUMC_DRIVE_FOLDER_ID", "integrations.drive.folder_id", str),
+    EnvBinding(
+        "KUMC_GOOGLE_APPLICATION_CREDENTIALS",
+        "integrations.drive.google_application_credentials",
+        str,
+    ),
+    EnvBinding("KUMC_DRIVE_MAX_FILES", "integrations.drive.max_files", _to_int),
+    EnvBinding(
+        "KUMC_CRAFTERS_COLONY_AUTHOR_URL",
+        "integrations.crafters_colony.author_url",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_CRAFTERS_COLONY_MAX_PAGES",
+        "integrations.crafters_colony.max_pages",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_CRAFTERS_COLONY_MAX_ARTICLES",
+        "integrations.crafters_colony.max_articles",
+        _to_int,
+    ),
+    EnvBinding("KUMC_LLM_PROVIDER", "providers.llm.provider", str),
+    EnvBinding("KUMC_LLM_GEMINI_MODEL", "providers.llm.gemini_model", str),
+    EnvBinding("KUMC_LLM_LLAMA_MODEL_PATH", "providers.llm.llama_model_path", str),
+    EnvBinding("KUMC_LLM_TEMPERATURE", "providers.llm.temperature", _to_float),
+    EnvBinding(
+        "KUMC_LLM_MAX_OUTPUT_TOKENS",
+        "providers.llm.max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding("KUMC_LLM_THINKING_LEVEL", "providers.llm.thinking_level", str),
+    EnvBinding("KUMC_LLM_THREADS", "providers.llm.threads", _to_int),
+    EnvBinding("KUMC_LLM_GPU_LAYERS", "providers.llm.gpu_layers", _to_int),
+    EnvBinding("KUMC_EMBEDDING_PROVIDER", "providers.embeddings.provider", str),
+    EnvBinding("KUMC_EMBEDDING_MODEL", "providers.embeddings.model", str),
+    EnvBinding("KUMC_EMBEDDING_DIMENSIONS", "providers.embeddings.dimensions", _to_int),
+    EnvBinding("KUMC_RERANKER_MODEL", "providers.reranker.model", str),
+    EnvBinding("KUMC_RERANKER_ENABLED", "providers.reranker.enabled", _to_bool),
+    EnvBinding("KUMC_FUNCTION_CALL_ENABLED", "providers.function_call.enabled", _to_bool),
+    EnvBinding("KUMC_FUNCTION_CALL_PROVIDER", "providers.function_call.provider", str),
+    EnvBinding(
+        "KUMC_FUNCTION_CALL_GEMINI_MODEL",
+        "providers.function_call.gemini_model",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_FUNCTION_CALL_LLAMA_MODEL_PATH",
+        "providers.function_call.llama_model_path",
+        str,
+    ),
+    EnvBinding("KUMC_AUTO_INDEX_ENABLED", "scheduler.auto_index_enabled", _to_bool),
+    EnvBinding("KUMC_AUTO_INDEX_TIME", "scheduler.auto_index_time", str),
+    EnvBinding("KUMC_AUTO_INDEX_WEEKDAYS", "scheduler.auto_index_weekdays", _to_int_list),
+    EnvBinding("KUMC_FEATURE_RAG", "features.rag", _to_bool),
+    EnvBinding("KUMC_FEATURE_INDEXING", "features.indexing", _to_bool),
+    EnvBinding("KUMC_FEATURE_EVAL", "features.eval", _to_bool),
+    EnvBinding("KUMC_FEATURE_SUMMARIZATION", "features.summarization", _to_bool),
+    EnvBinding("KUMC_FEATURE_VC", "features.vc", _to_bool),
+    EnvBinding("KUMC_FEATURE_DOCGEN", "features.docgen", _to_bool),
+    EnvBinding("KUMC_FEATURE_HTTP", "features.http", _to_bool),
+    EnvBinding("KUMC_RETRIEVAL_TOP_K", "features.retrieval.top_k", _to_int),
+    EnvBinding("KUMC_RETRIEVAL_DENSE_TOP_K", "features.retrieval.dense_top_k", _to_int),
+    EnvBinding("KUMC_RETRIEVAL_SPARSE_TOP_K", "features.retrieval.sparse_top_k", _to_int),
+    EnvBinding(
+        "KUMC_RETRIEVAL_RERANK_POOL_SIZE",
+        "features.retrieval.rerank_pool_size",
+        _to_int,
+    ),
+    EnvBinding("KUMC_RETRIEVAL_MMR_LAMBDA", "features.retrieval.mmr_lambda", _to_float),
+    EnvBinding(
+        "KUMC_MAINTENANCE_COMMAND_AUTHOR_IDS",
+        "security.maintenance_command_author_ids",
+        _to_int_csv,
+    ),
+    EnvBinding(
+        "KUMC_DISCORD_GUILD_ALLOW_LIST",
+        "security.discord_guild_allow_list",
+        _to_int_csv,
+    ),
+    EnvBinding("KUMC_REFUSAL_KEYWORDS", "security.refusal_keywords", _to_str_list),
+    EnvBinding("KUMC_MODEL_ROOT_DIR", "model.root_dir", str),
+    EnvBinding("KUMC_MODEL_LLM_DIR", "model.llm_dir", str),
+    EnvBinding("KUMC_MODEL_EMBEDDING_DIR", "model.embedding_dir", str),
+    EnvBinding("KUMC_MODEL_CROSS_ENCODER_DIR", "model.cross_encoder_dir", str),
+    EnvBinding("KUMC_MODEL_WHISPER_DIR", "model.whisper_dir", str),
+    EnvBinding("KUMC_MODEL_OCR_DIR", "model.ocr_dir", str),
+    EnvBinding("KUMC_VC_FEATURE_ENABLED", "vc.feature_enabled", _to_bool),
+    EnvBinding("KUMC_VC_AUTO_JOIN_ENABLED", "vc.auto_join_enabled", _to_bool),
+    EnvBinding("KUMC_VC_AUTO_JOIN_WEEKDAYS", "vc.auto_join_weekdays", _to_int_list),
+    EnvBinding("KUMC_VC_AUTO_JOIN_TIME", "vc.auto_join_time", str),
+    EnvBinding(
+        "KUMC_VC_AUTO_JOIN_DURATION_MINUTES",
+        "vc.auto_join_duration_minutes",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_TARGET_VOICE_CHANNEL_NAME",
+        "vc.target_voice_channel_name",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_AUTO_JOIN_MIN_PARTICIPANTS",
+        "vc.auto_join_min_participants",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_PARTICIPANT_CHECK_INTERVAL_SECONDS",
+        "vc.participant_check_interval_seconds",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_SUMMARY_TRANSCRIBE_INTERVAL_SECONDS",
+        "vc.summary_transcribe_interval_seconds",
+        _to_int,
+    ),
+    EnvBinding("KUMC_VC_TRANSCRIBE_MODEL", "vc.transcribe_model", str),
+    EnvBinding("KUMC_VC_TRANSCRIBE_DEVICE", "vc.transcribe_device", str),
+    EnvBinding("KUMC_VC_TRANSCRIBE_TORCH_DTYPE", "vc.transcribe_torch_dtype", str),
+    EnvBinding("KUMC_VC_TRANSCRIBE_LANGUAGE", "vc.transcribe_language", str),
+    EnvBinding("KUMC_VC_AUTO_QUIT_ENABLED", "vc.auto_quit_enabled", _to_bool),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_ENABLED",
+        "vc.final_summary_enabled",
+        _to_bool,
+    ),
+    EnvBinding("KUMC_VC_SUMMARY_PREVIOUS_MAX", "vc.summary_previous_max", _to_int),
+    EnvBinding(
+        "KUMC_VC_SUMMARY_TARGET_CHARACTERS",
+        "vc.summary_target_characters",
+        _to_int,
+    ),
+    EnvBinding("KUMC_VC_SUMMARY_LLM_PROVIDER", "vc.summary_llm_provider", str),
+    EnvBinding("KUMC_VC_SUMMARY_GEMINI_MODEL", "vc.summary_gemini_model", str),
+    EnvBinding("KUMC_VC_SUMMARY_LLAMA_MODEL_PATH", "vc.summary_llama_model_path", str),
+    EnvBinding("KUMC_VC_SUMMARY_LLAMA_CTX_SIZE", "vc.summary_llama_ctx_size", _to_int),
+    EnvBinding("KUMC_VC_SUMMARY_TEMPERATURE", "vc.summary_temperature", _to_float),
+    EnvBinding(
+        "KUMC_VC_SUMMARY_MAX_OUTPUT_TOKENS",
+        "vc.summary_max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding("KUMC_VC_SUMMARY_THINKING_LEVEL", "vc.summary_thinking_level", str),
+    EnvBinding("KUMC_VC_MINUTES_ENABLED", "vc.minutes_enabled", _to_bool),
+    EnvBinding("KUMC_VC_MINUTES_DRIVE_DIR", "vc.minutes_drive_dir", str),
+    EnvBinding(
+        "KUMC_VC_MINUTES_FETCH_MAX_RETRIES",
+        "vc.minutes_fetch_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_APPLY_MAX_RETRIES",
+        "vc.minutes_apply_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_LLM_MAX_RETRIES",
+        "vc.minutes_llm_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_HISTORY_SUMMARY_MAX",
+        "vc.minutes_history_summary_max",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_IMAGE_BATCH_SIZE",
+        "vc.minutes_image_batch_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_LLM_PROVIDER",
+        "vc.minutes_edit_llm_provider",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_GEMINI_MODEL",
+        "vc.minutes_edit_gemini_model",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_LLAMA_MODEL_PATH",
+        "vc.minutes_edit_llama_model_path",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_LLAMA_CTX_SIZE",
+        "vc.minutes_edit_llama_ctx_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_TEMPERATURE",
+        "vc.minutes_edit_temperature",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS",
+        "vc.minutes_edit_max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_MINUTES_EDIT_THINKING_LEVEL",
+        "vc.minutes_edit_thinking_level",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_LLM_PROVIDER",
+        "vc.final_summary_llm_provider",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_GEMINI_MODEL",
+        "vc.final_summary_gemini_model",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_LLAMA_MODEL_PATH",
+        "vc.final_summary_llama_model_path",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_LLAMA_CTX_SIZE",
+        "vc.final_summary_llama_ctx_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_TEMPERATURE",
+        "vc.final_summary_temperature",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_MAX_OUTPUT_TOKENS",
+        "vc.final_summary_max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_VC_FINAL_SUMMARY_THINKING_LEVEL",
+        "vc.final_summary_thinking_level",
+        str,
+    ),
+)

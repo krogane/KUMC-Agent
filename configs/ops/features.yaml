@@ -1,0 +1,19 @@
+features:
+  rag: true
+  indexing: true
+  eval: true
+  summarization: true
+  vc: false
+  docgen: false
+  http: false
+  sources:
+    drive: true
+    discord: true
+    hatenablog: true
+    crafters_colony: true
+  retrieval:
+    top_k: 8
+    dense_top_k: 15
+    sparse_top_k: 15
+    rerank_pool_size: 20
+    mmr_lambda: 0.75

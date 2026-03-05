@@ -1,0 +1,25 @@
+app:
+  command_prefix: "/ai"
+  index_command_prefix: "/ai build-index"
+  max_input_characters: 1024
+  log_level: "INFO"
+  data_dir: "data"
+  raw_dir: "data/raw"
+  chunks_path: "data/chunks/chunks.jsonl"
+  index_dir: "data/index"
+  eval_dir: "data/eval"
+  cache_dir: "data/cache"
+  answer_record_log_path: "logs/answer_records.jsonl"
+  source_max_count: 3
+integrations:
+  discord:
+    bot_token: ""
+  drive:
+    folder_id: ""
+    google_application_credentials: ""
+    max_files: 0
+  crafters_colony:
+    author_url: ""
+    max_pages: 100
+    max_articles: 0
+  gemini_api_key: ""

@@ -1,0 +1,4 @@
+scheduler:
+  auto_index_enabled: false
+  auto_index_time: "03:00"
+  auto_index_weekdays: [0, 1, 2, 3, 4]

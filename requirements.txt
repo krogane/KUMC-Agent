@@ -23,3 +23,4 @@ sudachipy
 sudachidict_core
 rank-bm25
 jsonref
+PyYAML
