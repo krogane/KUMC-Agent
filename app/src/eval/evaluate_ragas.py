@@ -148,7 +148,10 @@ def main() -> None:
 
     rag_pipeline = RagPipeline(
         index_dir=cfg.index_dir,
-        embedding_factory=EmbeddingFactory(cfg.embedding_model),
+        embedding_factory=EmbeddingFactory(
+            cfg.embedding_model,
+            api_key=cfg.gemini_api_key,
+        ),
         llm_api_key=llm_api_key,
         config=cfg,
     )

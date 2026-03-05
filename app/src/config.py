@@ -485,6 +485,10 @@ def _resolve_model_path(
 ) -> str:
     if not model_name:
         return ""
+    normalized = model_name.strip()
+    lowered = normalized.lower()
+    if lowered.startswith("gemini:") or lowered.startswith("gemini/"):
+        return normalized
     path = Path(model_name)
     if path.is_absolute():
         return str(path)
@@ -2528,9 +2532,59 @@ class SentenceTransformerEmbeddings(Embeddings):
         return f"{prefix} {stripped}"
 
 
+class GeminiEmbeddings(Embeddings):
+    _BATCH_SIZE = 96
+
+    def __init__(self, *, model_name: str, api_key: str | None = None) -> None:
+        self._model_name = (model_name or "").strip()
+        if not self._model_name:
+            raise RuntimeError("Gemini embedding model name is required.")
+
+        resolved_api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        if not resolved_api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set. Please set it in .env")
+
+        self._api_key = resolved_api_key
+        self._client = _gemini_embedding_client(self._api_key)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        normalized_texts = [_normalize_embedding_text(text) for text in texts]
+        vectors: list[list[float]] = []
+        for i in range(0, len(normalized_texts), self._BATCH_SIZE):
+            batch = normalized_texts[i : i + self._BATCH_SIZE]
+            response = self._client.models.embed_content(
+                model=self._model_name,
+                contents=batch,
+                config=_gemini_embed_config(task_type="RETRIEVAL_DOCUMENT"),
+            )
+            vectors.extend(_extract_gemini_embedding_vectors(response))
+        if len(vectors) != len(normalized_texts):
+            raise RuntimeError(
+                "Gemini embedding response count mismatch for documents: "
+                f"requested={len(normalized_texts)} got={len(vectors)}"
+            )
+        return vectors
+
+    def embed_query(self, text: str) -> list[float]:
+        response = self._client.models.embed_content(
+            model=self._model_name,
+            contents=[_normalize_embedding_text(text)],
+            config=_gemini_embed_config(task_type="RETRIEVAL_QUERY"),
+        )
+        vectors = _extract_gemini_embedding_vectors(response)
+        if not vectors or not vectors[0]:
+            raise RuntimeError(
+                "Gemini embedding response did not contain a query vector."
+            )
+        return vectors[0]
+
+
 class EmbeddingFactory:
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, *, api_key: str | None = None) -> None:
         self._model_name = model_name
+        self._api_key = api_key
 
     @property
     def model_name(self) -> str:
@@ -2538,7 +2592,10 @@ class EmbeddingFactory:
 
     @lru_cache(maxsize=1)
     def get_embeddings(self) -> Embeddings:
-        return SentenceTransformerEmbeddings(model_path=self._model_name)
+        provider, model_name = _parse_embedding_model_spec(self._model_name)
+        if provider == "gemini":
+            return GeminiEmbeddings(model_name=model_name, api_key=self._api_key)
+        return SentenceTransformerEmbeddings(model_path=model_name)
 
 
 def _vectors_to_list(vectors) -> list[list[float]]:
@@ -2551,3 +2608,64 @@ def _vectors_to_list(vectors) -> list[list[float]]:
 def _is_multilingual_e5(model_path: str) -> bool:
     normalized = (model_path or "").lower()
     return "multilingual-e5" in normalized or "multilingual_e5" in normalized
+
+
+def _normalize_embedding_text(text: str | None) -> str:
+    normalized = text if text else " "
+    return normalized if normalized.strip() else " "
+
+
+def _parse_embedding_model_spec(model_name: str) -> tuple[str, str]:
+    raw = (model_name or "").strip()
+    lowered = raw.lower()
+    if lowered.startswith("gemini:"):
+        parsed = raw.split(":", maxsplit=1)[1].strip()
+        if not parsed:
+            raise RuntimeError(
+                "Gemini embedding model is missing. "
+                "Use EMBEDDING_MODEL=gemini:<model-name>."
+            )
+        return "gemini", parsed
+    if lowered.startswith("gemini/"):
+        parsed = raw.split("/", maxsplit=1)[1].strip()
+        if not parsed:
+            raise RuntimeError(
+                "Gemini embedding model is missing. "
+                "Use EMBEDDING_MODEL=gemini/<model-name>."
+            )
+        return "gemini", parsed
+    return "local", raw
+
+
+def _extract_gemini_embedding_vectors(response) -> list[list[float]]:
+    embeddings = getattr(response, "embeddings", None) or []
+    if not embeddings:
+        single = getattr(response, "embedding", None)
+        if single is not None:
+            embeddings = [single]
+    vectors: list[list[float]] = []
+    for embedding in embeddings:
+        values = getattr(embedding, "values", None) or []
+        vectors.append([float(value) for value in values])
+    return vectors
+
+
+def _gemini_embed_config(*, task_type: str):
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai is required for Gemini embedding access."
+        ) from exc
+    return genai.types.EmbedContentConfig(task_type=task_type)
+
+
+@lru_cache(maxsize=1)
+def _gemini_embedding_client(api_key: str):
+    try:
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai is required for Gemini embedding access."
+        ) from exc
+    return genai.Client(api_key=api_key)

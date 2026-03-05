@@ -18,7 +18,10 @@ def _build_pipeline() -> RagPipeline:
     base_dir = Path(__file__).resolve().parents[2]
     load_dotenv(base_dir / ".env")
     app_config = AppConfig.from_here(base_dir=base_dir)
-    embedding_factory = EmbeddingFactory(app_config.embedding_model)
+    embedding_factory = EmbeddingFactory(
+        app_config.embedding_model,
+        api_key=app_config.gemini_api_key,
+    )
     return RagPipeline(
         index_dir=app_config.index_dir,
         embedding_factory=embedding_factory,

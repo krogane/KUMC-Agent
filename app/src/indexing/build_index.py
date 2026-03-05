@@ -860,6 +860,7 @@ def main() -> None:
         chunks=index_chunks,
         model_name=cfg.embedding_model,
         index_dir=cfg.index_dir,
+        gemini_api_key=cfg.gemini_api_key,
     )
     _build_keyword_inverted_indexes(cfg)
     build_and_save_material_catalog(cfg)

@@ -76,7 +76,10 @@ discord_client = discord.Client(intents=intents)
 
 
 # RAG Pipeline
-_embedding_factory = EmbeddingFactory(APP_CONFIG.embedding_model)
+_embedding_factory = EmbeddingFactory(
+    APP_CONFIG.embedding_model,
+    api_key=APP_CONFIG.gemini_api_key,
+)
 rag_pipeline = RagPipeline(
     index_dir=INDEX_DIR,
     embedding_factory=_embedding_factory,

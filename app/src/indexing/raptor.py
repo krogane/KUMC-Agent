@@ -257,7 +257,10 @@ def _embed_chunks(chunks: list[Chunk], *, config: AppConfig) -> np.ndarray:
         return np.array([])
     from config import EmbeddingFactory
 
-    embedder = EmbeddingFactory(model_name).get_embeddings()
+    embedder = EmbeddingFactory(
+        model_name,
+        api_key=config.gemini_api_key,
+    ).get_embeddings()
     texts = [chunk_embedding_text(chunk) for chunk in chunks]
     vectors = embedder.embed_documents(texts)
     return np.array(vectors, dtype=np.float32)

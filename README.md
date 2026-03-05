@@ -75,6 +75,7 @@ pip install -r requirements.txt
 
 #### 回答LLM / Embedding
 - `GEMINI_MODEL`（Gemini利用時のモデル名）
+- `EMBEDDING_MODEL` / `RAPTOR_EMBEDDING_MODEL`: `gemini:<model>` または `gemini/<model>` で Gemini Embeddings を利用可能（例: `gemini:text-embedding-004`）
 - `LLAMA_CTX_SIZE`, `LLAMA_THREADS`, `LLAMA_GPU_LAYERS`
 - `TEMPERATURE`, `MAX_OUTPUT_TOKENS`, `THINKING_LEVEL`
 - `CROSS_ENCODER_MODEL`（再ランク用モデル。未設定なら再ランクなし）
@@ -162,7 +163,8 @@ pip install -r requirements.txt
 入力元が削除された場合、対応する出力Chunkと下流Chunkも同期削除されます。
 
 ##### モデルパスの解決
-`EMBEDDING_MODEL`/`LLAMA_MODEL`/`CROSS_ENCODER_MODEL`/`*_LLAMA_MODEL` などは、ファイル名のみ指定した場合は各`*_MODEL_DIR`を基準に解決されます。相対パスや絶対パスでも指定可能です。
+`EMBEDDING_MODEL`/`LLAMA_MODEL`/`CROSS_ENCODER_MODEL`/`*_LLAMA_MODEL` などは、ファイル名のみ指定した場合は各`*_MODEL_DIR`を基準に解決されます。相対パスや絶対パスでも指定可能です。  
+`EMBEDDING_MODEL` と `RAPTOR_EMBEDDING_MODEL` は `gemini:` または `gemini/` で始めると、ローカルパス解決を行わず Gemini Embeddings として扱います。
 
 ## 実行方法
 ### Index構築

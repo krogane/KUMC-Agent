@@ -14,14 +14,20 @@ from indexing.utils import ensure_dir
 logger = logging.getLogger(__name__)
 
 
-def build_faiss_index(*, chunks: list[Chunk], model_name: str, index_dir: Path) -> None:
+def build_faiss_index(
+    *,
+    chunks: list[Chunk],
+    model_name: str,
+    index_dir: Path,
+    gemini_api_key: str = "",
+) -> None:
     if not chunks:
         logger.warning("No documents to index. Skipping FAISS build.")
         return
 
     ensure_dir(index_dir)
 
-    embeddings = EmbeddingFactory(model_name).get_embeddings()
+    embeddings = EmbeddingFactory(model_name, api_key=gemini_api_key).get_embeddings()
 
     docs = [
         Document(page_content=chunk_embedding_text(chunk), metadata=chunk.metadata)
