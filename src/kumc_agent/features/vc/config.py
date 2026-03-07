@@ -80,7 +80,7 @@ class VCManagerConfig:
 
         return cls(
             raw_data_dir=config.app.raw_dir,
-            summery_chunk_dir=config.app.data_dir / "chunks" / "summery_chunk",
+            summery_chunk_dir=config.app.data_dir / "chunks" / "summary_chunk",
             discord_guild_allow_list=tuple(config.security.discord_guild_allow_list),
             drive_folder_id=config.integrations.drive.folder_id,
             google_application_credentials=config.integrations.drive.google_application_credentials,

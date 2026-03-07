@@ -118,6 +118,88 @@ class FeatureSection:
 
 
 @dataclass(frozen=True)
+class RagRoutingSection:
+    enabled: bool
+    provider: str
+    gemini_model: str
+    llama_model_path: str
+    temperature: float
+    max_new_tokens: int
+    max_retries: int
+    log_enabled: bool
+    material_search_max_names: int
+
+
+@dataclass(frozen=True)
+class RagHistorySection:
+    enabled: bool
+    max_turns: int
+    prompt_default_turns: int
+    prompt_additional_turns: int
+    special_channel_history_limit: int
+    special_channel_names: list[str]
+    special_channel_custom_instruction: str
+
+
+@dataclass(frozen=True)
+class RagSection:
+    routing: RagRoutingSection
+    history: RagHistorySection
+    fast_model_notice: str
+
+
+@dataclass(frozen=True)
+class IndexingChunkingSection:
+    first_recursive_chunk_size: int
+    first_recursive_chunk_overlap: int
+    second_recursive_chunk_size: int
+    second_recursive_chunk_overlap: int
+    summary_characters: int
+
+
+@dataclass(frozen=True)
+class IndexingStagesSection:
+    second_recursive_enabled: bool
+    sparse_second_recursive_enabled: bool
+    summary_enabled: bool
+    proposition_enabled: bool
+    raptor_enabled: bool
+
+
+@dataclass(frozen=True)
+class IndexingRefreshSection:
+    clear_raw_data: bool
+    clear_first_recursive_chunk_data: bool
+    clear_second_recursive_chunk_data: bool
+    clear_summary_chunk_data: bool
+    clear_proposition_chunk_data: bool
+    clear_raptor_chunk_data: bool
+    update_raw_data: bool
+    update_first_recursive_chunk_data: bool
+    update_second_recursive_chunk_data: bool
+    update_sparse_second_recursive_chunk_data: bool
+    update_summary_chunk_data: bool
+    update_proposition_chunk_data: bool
+    update_raptor_chunk_data: bool
+
+
+@dataclass(frozen=True)
+class IndexingSection:
+    chunking: IndexingChunkingSection
+    stages: IndexingStagesSection
+    refresh: IndexingRefreshSection
+
+
+@dataclass(frozen=True)
+class OpsSection:
+    warmup_interval_minutes: int
+    index_update_estimate_min_minutes: int
+    index_update_estimate_max_minutes: int
+    answer_record_log_enabled: bool
+    answer_record_log_path: Path
+
+
+@dataclass(frozen=True)
 class IntegrationDiscordSection:
     bot_token: str
 
@@ -202,6 +284,9 @@ class RuntimeConfig:
     security: SecuritySection
     scheduler: SchedulerSection
     features: FeatureSection
+    rag: RagSection
+    indexing: IndexingSection
+    ops: OpsSection
     integrations: IntegrationSection
     model: ModelSection
     vc: VCSection

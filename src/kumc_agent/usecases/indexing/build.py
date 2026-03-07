@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
@@ -12,6 +13,10 @@ from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
 @dataclass(frozen=True)
 class BuildIndexRequest:
     refresh_sources: bool = True
+    full_rebuild: bool = False
+    stage_selection: tuple[str, ...] | None = None
+    allow_cancel: bool = False
+    cancel_event: threading.Event | None = None
 
 
 class BuildIndexUsecase:
@@ -42,4 +47,10 @@ class BuildIndexUsecase:
                 if loader is None:
                     continue
                 loaded += loader.load()
-        return self._indexing_service.build(loaded_sources=loaded)
+        return self._indexing_service.build(
+            loaded_sources=loaded,
+            full_rebuild=request.full_rebuild,
+            stage_selection=request.stage_selection,
+            allow_cancel=request.allow_cancel,
+            cancel_event=request.cancel_event,
+        )

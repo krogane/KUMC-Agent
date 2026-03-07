@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
@@ -145,10 +146,35 @@ def _routing_system_prompt(*, material_search_max_names: int) -> str:
     today = datetime.now(ZoneInfo("Asia/Tokyo"))
     weekday = ["月", "火", "水", "木", "金", "土", "日"][today.weekday()]
     today_label = today.strftime("%Y年%m月%d日") + f"（{weekday}）"
-    return _DEFAULT_ROUTING_SYSTEM_PROMPT.format(
-        today_label=today_label,
-        material_search_max_names=max(1, int(material_search_max_names)),
+    limit = str(max(1, int(material_search_max_names)))
+    template = _routing_system_prompt_template()
+    return (
+        template.replace("{today_label}", today_label).replace(
+            "{material_search_max_names}", limit
+        )
     )
+
+
+@lru_cache(maxsize=1)
+def _routing_system_prompt_template() -> str:
+    prompt_path = _routing_prompt_path()
+    if prompt_path is None:
+        return _DEFAULT_ROUTING_SYSTEM_PROMPT
+    try:
+        if prompt_path.exists():
+            value = prompt_path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+    except OSError:
+        logger.exception("Failed to load routing prompt file: %s", prompt_path)
+    return _DEFAULT_ROUTING_SYSTEM_PROMPT
+
+
+def _routing_prompt_path() -> Path | None:
+    resolved = Path(__file__).resolve()
+    if len(resolved.parents) <= 5:
+        return None
+    return resolved.parents[5] / "assets" / "prompts" / "routing.md"
 
 
 def _format_routing_history(
@@ -206,42 +232,100 @@ def _generate_routing_payload_gemini(
         raise RuntimeError("google-genai is required for Gemini access.") from exc
 
     client = _genai_client(config.gemini_api_key)
-    response = client.models.generate_content(
+    include_thinking = _routing_gemini_model_supports_thinking(
+        config.function_call_gemini_model
+    )
+    if not include_thinking:
+        logger.info(
+            "Routing Gemini model %s does not support thinking_level. "
+            "Send request without thinking_config.",
+            config.function_call_gemini_model,
+        )
+    try:
+        response = _generate_routing_payload_gemini_response(
+            client=client,
+            genai_module=genai,
+            config=config,
+            query=query,
+            question_author=question_author,
+            history=history,
+            include_thinking=include_thinking,
+        )
+    except Exception as exc:
+        if include_thinking and _is_unsupported_gemini_thinking_error(exc):
+            logger.info(
+                "Routing Gemini model %s rejected thinking_level. "
+                "Retrying without thinking_config.",
+                config.function_call_gemini_model,
+            )
+            response = _generate_routing_payload_gemini_response(
+                client=client,
+                genai_module=genai,
+                config=config,
+                query=query,
+                question_author=question_author,
+                history=history,
+                include_thinking=False,
+            )
+        else:
+            raise
+    return (response.text or "").strip()
+
+
+def _generate_routing_payload_gemini_response(
+    *,
+    client,
+    genai_module,
+    config: AppConfig,
+    query: str,
+    question_author: str | None,
+    history: Sequence[ChatHistoryEntry] | None,
+    include_thinking: bool,
+):
+    system_instruction = _routing_system_prompt(
+        material_search_max_names=config.material_search_max_names
+    )
+    user_prompt = _routing_user_prompt(
+        query=query,
+        question_author=question_author,
+        history=history,
+    )
+    request_config: dict[str, object] = {
+        "temperature": config.function_call_temperature,
+        "max_output_tokens": max(1, int(config.function_call_max_new_tokens)),
+        "response_mime_type": "application/json",
+        "system_instruction": system_instruction,
+    }
+    if include_thinking:
+        request_config["thinking_config"] = genai_module.types.ThinkingConfig(
+            thinking_level=config.thinking_level
+        )
+    return client.models.generate_content(
         model=config.function_call_gemini_model,
         contents=[
-            {
-                "role": "system",
-                "parts": [
-                    {
-                        "text": _routing_system_prompt(
-                            material_search_max_names=config.material_search_max_names
-                        )
-                    }
-                ],
-            },
             {
                 "role": "user",
                 "parts": [
                     {
-                        "text": _routing_user_prompt(
-                            query=query,
-                            question_author=question_author,
-                            history=history,
-                        )
+                        "text": user_prompt
                     }
                 ],
             },
         ],
-        config=genai.types.GenerateContentConfig(
-            temperature=config.function_call_temperature,
-            max_output_tokens=max(1, int(config.function_call_max_new_tokens)),
-            response_mime_type="application/json",
-            thinking_config=genai.types.ThinkingConfig(
-                thinking_level=config.thinking_level
-            ),
-        ),
+        config=genai_module.types.GenerateContentConfig(**request_config),
     )
-    return (response.text or "").strip()
+
+
+def _routing_gemini_model_supports_thinking(model_name: str) -> bool:
+    normalized = (model_name or "").strip().lower()
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1]
+    unsupported_prefixes = ("gemini-2.5-flash-lite",)
+    return not any(normalized.startswith(prefix) for prefix in unsupported_prefixes)
+
+
+def _is_unsupported_gemini_thinking_error(exc: Exception) -> bool:
+    return "thinking level is not supported for this model" in str(exc).lower()
 
 
 def _generate_routing_payload_llama(

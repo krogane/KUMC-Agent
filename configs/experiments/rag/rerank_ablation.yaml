@@ -1,8 +1,8 @@
 providers:
   reranker:
-    enabled: false
+    enabled: true
 features:
   retrieval:
     top_k: 8
-    dense_top_k: 20
-    sparse_top_k: 20
+    dense_top_k: 15
+    sparse_top_k: 15

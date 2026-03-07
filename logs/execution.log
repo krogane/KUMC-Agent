@@ -1,0 +1,99 @@
+2026-03-07 00:59:45,197 INFO kumc_agent.smoke: smoke-log
+2026-03-07 01:00:45,735 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
+2026-03-07 01:00:45,735 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-07 01:00:46,233 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 400 Bad Request"
+2026-03-07 01:00:46,234 ERROR kumc_agent.features.rag.components.routing: Legacy function-call routing failed. Fallback to heuristic.
+Traceback (most recent call last):
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/features/rag/components/routing.py", line 96, in _route_with_legacy_function_calling
+    decision = decide_tools(
+        query=query,
+    ...<2 lines>...
+        history=history,
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 86, in decide_tools
+    raw = _generate_routing_payload(
+        query=query,
+    ...<2 lines>...
+        history=history,
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 126, in _generate_routing_payload
+    return _generate_routing_payload_gemini(
+        query=query,
+    ...<2 lines>...
+        history=history,
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 245, in _generate_routing_payload_gemini
+    response = _generate_routing_payload_gemini_response(
+        client=client,
+    ...<5 lines>...
+        include_thinking=include_thinking,
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 294, in _generate_routing_payload_gemini_response
+    return client.models.generate_content(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        model=config.function_call_gemini_model,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<24 lines>...
+        config=genai_module.types.GenerateContentConfig(**request_config),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/models.py", line 5227, in generate_content
+    response = self._generate_content(
+        model=model, contents=contents, config=parsed_config
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/models.py", line 4009, in _generate_content
+    response = self._api_client.request(
+        'post', path, request_dict, http_options
+    )
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1386, in request
+    response = self._request(http_request, http_options, stream=False)
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1222, in _request
+    return self._retry(self._request_once, http_request, stream)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 477, in __call__
+    do = self.iter(retry_state=retry_state)
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 378, in iter
+    result = action(retry_state)
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 420, in exc_check
+    raise retry_exc.reraise()
+          ~~~~~~~~~~~~~~~~~^^
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 187, in reraise
+    raise self.last_attempt.result()
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/lib/python3.13/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/lib/python3.13/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 480, in __call__
+    result = fn(*args, **kwargs)
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1199, in _request_once
+    errors.APIError.raise_for_response(response)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/errors.py", line 121, in raise_for_response
+    cls.raise_error(response.status_code, response_json, response)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/errors.py", line 146, in raise_error
+    raise ClientError(status_code, response_json, response)
+google.genai.errors.ClientError: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Please use a valid role: user, model.', 'status': 'INVALID_ARGUMENT'}}
+2026-03-07 01:00:46,264 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-07 01:00:47,510 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+2026-03-07 01:19:16,938 INFO __main__: CLI command started: repl
+2026-03-07 01:19:16,939 INFO __main__: Starting REPL session
+2026-03-07 01:19:24,314 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
+2026-03-07 01:19:24,315 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-07 01:19:25,593 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-07 01:19:25,595 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling raw output: {
+  "target_model": "no_rag",
+  "material_names": [],
+  "idea_generation": false,
+  "include_capabilities_info": false,
+  "recency_mode": "off",
+  "use_additional_memory": false,
+  "needs_additional_query": false,
+  "additional_queries": []
+}
+2026-03-07 01:19:25,595 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling parsed decision: FunctionRoutingDecision(target_model='no_rag', material_names=[], idea_generation=False, include_capabilities_info=False, recency_mode='off', use_additional_memory=False, needs_additional_query=False, additional_queries=[])
+2026-03-07 01:19:25,607 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-07 01:19:26,933 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"

@@ -6,6 +6,7 @@ features:
   vc: false
   docgen: false
   http: false
+  recency_mode: "soft"
   sources:
     drive: true
     discord: true

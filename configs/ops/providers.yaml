@@ -9,7 +9,7 @@ providers:
     threads: 4
     gpu_layers: 0
   embeddings:
-    provider: "local"
+    provider: "gemini"
     model: "intfloat/multilingual-e5-small"
     dimensions: 256
   reranker:

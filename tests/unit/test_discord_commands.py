@@ -38,6 +38,16 @@ class DiscordCommandParseTests(unittest.TestCase):
         self.assertEqual(parsed.kind, "chat")
         self.assertEqual(parsed.payload, "KUMCとは")
 
+    def test_chat_fast_command(self) -> None:
+        parsed = parse_command(
+            content="/ai fast KUMCとは",
+            prefix="/ai",
+            index_command_prefix="/ai build-index",
+        )
+        self.assertEqual(parsed.kind, "chat")
+        self.assertEqual(parsed.payload, "KUMCとは")
+        self.assertTrue(parsed.force_fast_mode)
+
 
 if __name__ == "__main__":
     unittest.main()

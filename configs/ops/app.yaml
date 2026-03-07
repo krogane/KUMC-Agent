@@ -11,6 +11,59 @@ app:
   cache_dir: "data/cache"
   answer_record_log_path: "logs/answer_records.jsonl"
   source_max_count: 3
+rag:
+  fast_model_notice: "※負荷軽減のために軽量モードを使用しました。"
+  routing:
+    enabled: true
+    provider: "gemini"
+    gemini_model: "gemini-2.5-flash-lite"
+    llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+    temperature: 0.0
+    max_new_tokens: 128
+    max_retries: 1
+    log_enabled: true
+    material_search_max_names: 3
+  history:
+    enabled: true
+    max_turns: 10
+    prompt_default_turns: 1
+    prompt_additional_turns: 10
+    special_channel_history_limit: 30
+    special_channel_names: ["kumc-agent"]
+    special_channel_custom_instruction: ""
+indexing:
+  chunking:
+    first_recursive_chunk_size: 1024
+    first_recursive_chunk_overlap: 128
+    second_recursive_chunk_size: 384
+    second_recursive_chunk_overlap: 64
+    summary_characters: 200
+  stages:
+    second_recursive_enabled: true
+    sparse_second_recursive_enabled: true
+    summary_enabled: true
+    proposition_enabled: false
+    raptor_enabled: false
+  refresh:
+    clear_raw_data: false
+    clear_first_recursive_chunk_data: false
+    clear_second_recursive_chunk_data: false
+    clear_summary_chunk_data: false
+    clear_proposition_chunk_data: false
+    clear_raptor_chunk_data: false
+    update_raw_data: true
+    update_first_recursive_chunk_data: true
+    update_second_recursive_chunk_data: true
+    update_sparse_second_recursive_chunk_data: true
+    update_summary_chunk_data: true
+    update_proposition_chunk_data: false
+    update_raptor_chunk_data: false
+ops:
+  warmup_interval_minutes: 60
+  index_update_estimate_min_minutes: 30
+  index_update_estimate_max_minutes: 60
+  answer_record_log_enabled: true
+  answer_record_log_path: "logs/answer_records.jsonl"
 integrations:
   discord:
     bot_token: ""

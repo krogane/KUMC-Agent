@@ -33,10 +33,12 @@ from kumc_agent.usecases.indexing.build import BuildIndexUsecase
 from kumc_agent.usecases.indexing.update import UpdateIndexUsecase
 from kumc_agent.usecases.summarization.run import SummarizationUsecase
 from kumc_agent.usecases.vc.run import VCUsecase
+from kumc_agent.utils.migrate_summary_dir import migrate_summery_chunk_dir
 
 
 def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     config = load_runtime_config(base_dir=base_dir)
+    migrate_summery_chunk_dir(base_dir=config.base_dir)
 
     if config.providers.embeddings.provider == "gemini":
         embedder = GeminiEmbedder(
@@ -84,19 +86,43 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         source_max_count=config.app.source_max_count,
     )
 
+    router = QueryRouter(
+        refusal_keywords=config.security.refusal_keywords,
+        routing_enabled=config.rag.routing.enabled,
+        provider=config.rag.routing.provider,
+        gemini_model=config.rag.routing.gemini_model,
+        llama_model_path=config.rag.routing.llama_model_path,
+        temperature=config.rag.routing.temperature,
+        max_new_tokens=config.rag.routing.max_new_tokens,
+        max_retries=config.rag.routing.max_retries,
+        log_enabled=config.rag.routing.log_enabled,
+        material_search_max_names=config.rag.routing.material_search_max_names,
+        llm_thinking_level=config.providers.llm.thinking_level,
+        llm_threads=config.providers.llm.threads,
+        llm_gpu_layers=config.providers.llm.gpu_layers,
+        llm_ctx_size=4096,
+        gemini_api_key=config.integrations.gemini_api_key,
+    )
+
     rag_service = RagService(
         config=RagConfig(
             top_k=config.features.retrieval.top_k,
             dense_top_k=config.features.retrieval.dense_top_k,
             sparse_top_k=config.features.retrieval.sparse_top_k,
             rerank_pool_size=config.features.retrieval.rerank_pool_size,
+            mmr_lambda=config.features.retrieval.mmr_lambda,
             source_max_count=config.app.source_max_count,
             recency_mode=config.features.recency_mode,
             llm_temperature=config.providers.llm.temperature,
             llm_max_output_tokens=config.providers.llm.max_output_tokens,
             llm_thinking_level=config.providers.llm.thinking_level,
+            history_enabled=config.rag.history.enabled,
+            history_max_turns=config.rag.history.max_turns,
+            prompt_default_turns=config.rag.history.prompt_default_turns,
+            prompt_additional_turns=config.rag.history.prompt_additional_turns,
+            fast_model_notice=config.rag.fast_model_notice,
         ),
-        router=QueryRouter(refusal_keywords=config.security.refusal_keywords),
+        router=router,
         retrieval=retrieval_component,
         generation=generation_component,
         reranker=reranker,
@@ -108,8 +134,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         faiss_index=dense_index,
         bm25_index=sparse_index,
         raw_dir=config.app.raw_dir,
-        chunk_size=1000,
-        chunk_overlap=100,
+        app_config=config,
     )
 
     drive_loader = (
@@ -156,7 +181,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
-    chat_route_usecase = ChatRouteUsecase(router=QueryRouter(refusal_keywords=config.security.refusal_keywords))
+    chat_route_usecase = ChatRouteUsecase(router=router)
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
 
     return RuntimeContext(
