@@ -10,7 +10,7 @@ providers:
     gpu_layers: 0
   embeddings:
     provider: "gemini"
-    model: "intfloat/multilingual-e5-small"
+    model: "gemini-embedding-001"
     dimensions: 256
   reranker:
     model: "cross-encoder/ms-marco-MiniLM-L-6-v2"

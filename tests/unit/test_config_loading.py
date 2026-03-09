@@ -37,6 +37,56 @@ class ConfigLoadingTests(unittest.TestCase):
                   cache_dir: "data/cache"
                   answer_record_log_path: "logs/answer_records.jsonl"
                   source_max_count: 3
+                rag:
+                  prompt_texts:
+                    empty_context: "(コンテキストなし)"
+                    empty_history: "(履歴なし)"
+                    history_user_prefix: "ユーザー: "
+                    history_assistant_prefix: "アシスタント: "
+                    history_sources_label: "参照ソース:"
+                    gemini_header_chat_history: "# チャット履歴"
+                    gemini_header_retry_history: "# 再検索前の質問と回答"
+                    gemini_header_circle_info: "# サークルの基本情報"
+                    gemini_header_capabilities: "# チャットボット自身の機能情報"
+                    gemini_header_context: "# コンテキスト"
+                    gemini_header_output_format: "# 出力形式"
+                    gemini_header_instructions: "## 指示"
+                    gemini_header_question: "# ユーザーの質問"
+                    llama_header_question: "### Question"
+                    llama_header_previous_attempt: "### Previous attempt (Question/Answer)"
+                    llama_header_circle_info: "### サークルの基本情報"
+                    llama_header_capabilities: "### チャットボット自身の機能情報"
+                    llama_header_context: "### Context"
+                    llama_header_output_format: "### Output format"
+                    llama_header_instructions: "## 指示"
+                  generation:
+                    rag:
+                      provider: "gemini"
+                      gemini_model: "gemini-x"
+                      llama_model_path: "model.gguf"
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "answer_json"
+                    no_rag:
+                      provider: "gemini"
+                      gemini_model: "gemini-x"
+                      llama_model_path: "model.gguf"
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "answer_json"
+                    refusal:
+                      provider: "gemini"
+                      gemini_model: "gemini-x"
+                      llama_model_path: "model.gguf"
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "refusal"
+                    idea_generation:
+                      prompt_name: "answer_json"
+                      temperature: 0.0
                 integrations:
                   discord:
                     bot_token: ""
@@ -115,6 +165,14 @@ class ConfigLoadingTests(unittest.TestCase):
                     sparse_top_k: 5
                     rerank_pool_size: 10
                     mmr_lambda: 0.5
+                    recency_weight_soft: 0.2
+                    recency_weight_hard: 0.5
+                    recency_half_life_days: 30.0
+                    sudachi_mode: "B"
+                    sparse_bm25_k1: 1.5
+                    sparse_bm25_b: 0.75
+                    sparse_use_normalized_form: true
+                    sparse_remove_symbols: true
                 """
             ).strip()
             + "\n",
@@ -205,6 +263,14 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_RETRIEVAL_TOP_K": "9",
+                    "KUMC_RETRIEVAL_RECENCY_WEIGHT_SOFT": "0.33",
+                    "KUMC_RETRIEVAL_RECENCY_WEIGHT_HARD": "0.66",
+                    "KUMC_RETRIEVAL_RECENCY_HALF_LIFE_DAYS": "22",
+                    "SUDACHI_MODE": "A",
+                    "SPARSE_BM25_K1": "1.8",
+                    "SPARSE_BM25_B": "0.7",
+                    "SPARSE_USE_NORMALIZED_FORM": "0",
+                    "SPARSE_REMOVE_SYMBOLS": "0",
                     "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
@@ -212,6 +278,14 @@ class ConfigLoadingTests(unittest.TestCase):
                 config = load_runtime_config(base_dir=base)
 
             self.assertEqual(config.features.retrieval.top_k, 7)
+            self.assertEqual(config.features.retrieval.recency_weight_soft, 0.33)
+            self.assertEqual(config.features.retrieval.recency_weight_hard, 0.66)
+            self.assertEqual(config.features.retrieval.recency_half_life_days, 22.0)
+            self.assertEqual(config.features.retrieval.sudachi_mode, "A")
+            self.assertEqual(config.features.retrieval.sparse_bm25_k1, 1.8)
+            self.assertEqual(config.features.retrieval.sparse_bm25_b, 0.7)
+            self.assertFalse(config.features.retrieval.sparse_use_normalized_form)
+            self.assertFalse(config.features.retrieval.sparse_remove_symbols)
             self.assertEqual(config.integrations.discord.bot_token, "token")
 
     def test_unknown_key_in_experiment_raises(self) -> None:
@@ -234,6 +308,38 @@ class ConfigLoadingTests(unittest.TestCase):
             ):
                 with self.assertRaises(ConfigLoadError):
                     load_runtime_config(base_dir=base)
+
+    def test_rag_generation_profiles_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._prepare_base(base)
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_RAG_GENERATION_NO_RAG_GEMINI_MODEL": "gemini-no-rag",
+                    "KUMC_RAG_GENERATION_REFUSAL_TEMPERATURE": "0.1",
+                    "KUMC_RAG_IDEA_PROMPT_NAME": "idea_generation",
+                    "KUMC_RAG_IDEA_TEMPERATURE": "0.8",
+                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+
+            self.assertEqual(config.rag.generation.rag.prompt_name, "answer_json")
+            self.assertEqual(
+                config.rag.generation.no_rag.gemini_model,
+                "gemini-no-rag",
+            )
+            self.assertEqual(config.rag.generation.refusal.temperature, 0.1)
+            self.assertEqual(
+                config.rag.generation.idea_generation.prompt_name,
+                "idea_generation",
+            )
+            self.assertEqual(config.rag.generation.idea_generation.temperature, 0.8)
 
 
 if __name__ == "__main__":

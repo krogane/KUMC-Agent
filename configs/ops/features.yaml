@@ -18,3 +18,11 @@ features:
     sparse_top_k: 15
     rerank_pool_size: 20
     mmr_lambda: 0.75
+    recency_weight_soft: 0.20
+    recency_weight_hard: 0.60
+    recency_half_life_days: 30.0
+    sudachi_mode: "B"
+    sparse_bm25_k1: 1.5
+    sparse_bm25_b: 0.75
+    sparse_use_normalized_form: true
+    sparse_remove_symbols: true

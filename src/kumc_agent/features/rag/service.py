@@ -8,7 +8,7 @@ from typing import Sequence
 
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.routing import RoutingDecision
-from kumc_agent.features.rag.config import RagConfig
+from kumc_agent.features.rag.config import RagConfig, RagGenerationSettings
 from kumc_agent.features.rag.components.generation import GenerationComponent
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
 from kumc_agent.features.rag.components.routing import QueryRouter
@@ -92,12 +92,18 @@ class RagService:
             )
 
         if decision.target_model == "refusal":
+            refusal_generation = self._resolve_generation_settings(
+                target_model="refusal",
+                idea_generation=False,
+            )
             answer = self._generation.generate_refusal(
                 query=cleaned_query,
                 history=generation_history,
-                temperature=self._config.llm_temperature,
-                max_output_tokens=self._config.llm_max_output_tokens,
-                thinking_level=self._config.llm_thinking_level,
+                provider=refusal_generation.provider,
+                temperature=refusal_generation.temperature,
+                max_output_tokens=refusal_generation.max_output_tokens,
+                thinking_level=refusal_generation.thinking_level,
+                refusal_prompt_name=refusal_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
             )
             return self._finalize_answer(
@@ -109,13 +115,19 @@ class RagService:
             )
 
         if decision.target_model == "no_rag":
+            no_rag_generation = self._resolve_generation_settings(
+                target_model="no_rag",
+                idea_generation=decision.idea_generation,
+            )
             answer = self._generation.generate_no_rag(
                 query=cleaned_query,
                 history=generation_history,
+                provider=no_rag_generation.provider,
                 include_capabilities_info=decision.include_capabilities_info,
-                temperature=self._config.llm_temperature,
-                max_output_tokens=self._config.llm_max_output_tokens,
-                thinking_level=self._config.llm_thinking_level,
+                temperature=no_rag_generation.temperature,
+                max_output_tokens=no_rag_generation.max_output_tokens,
+                thinking_level=no_rag_generation.thinking_level,
+                answer_prompt_name=no_rag_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
             )
             return self._finalize_answer(
@@ -160,17 +172,26 @@ class RagService:
         chunks = self._apply_recency_order(
             chunks=chunks,
             recency_mode=effective_recency_mode,
+            recency_weight_soft=self._config.recency_weight_soft,
+            recency_weight_hard=self._config.recency_weight_hard,
+            recency_half_life_days=self._config.recency_half_life_days,
         )
 
         chunks = chunks[: self._config.top_k]
         if not chunks:
+            no_rag_generation = self._resolve_generation_settings(
+                target_model="no_rag",
+                idea_generation=decision.idea_generation,
+            )
             answer = self._generation.generate_no_rag(
                 query=cleaned_query,
                 history=generation_history,
+                provider=no_rag_generation.provider,
                 include_capabilities_info=decision.include_capabilities_info,
-                temperature=self._config.llm_temperature,
-                max_output_tokens=self._config.llm_max_output_tokens,
-                thinking_level=self._config.llm_thinking_level,
+                temperature=no_rag_generation.temperature,
+                max_output_tokens=no_rag_generation.max_output_tokens,
+                thinking_level=no_rag_generation.thinking_level,
+                answer_prompt_name=no_rag_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
             )
             return self._finalize_answer(
@@ -181,14 +202,20 @@ class RagService:
                 history_scope=history_scope,
             )
 
+        rag_generation = self._resolve_generation_settings(
+            target_model="rag",
+            idea_generation=decision.idea_generation,
+        )
         answer = self._generation.generate_rag_answer(
             query=cleaned_query,
             chunks=chunks,
             history=generation_history,
+            provider=rag_generation.provider,
             include_capabilities_info=decision.include_capabilities_info,
-            temperature=self._config.llm_temperature,
-            max_output_tokens=self._config.llm_max_output_tokens,
-            thinking_level=self._config.llm_thinking_level,
+            temperature=rag_generation.temperature,
+            max_output_tokens=rag_generation.max_output_tokens,
+            thinking_level=rag_generation.thinking_level,
+            answer_prompt_name=rag_generation.prompt_name,
             append_sources_to_response=append_sources_to_response,
             extra_mode_instruction=extra_mode_instruction,
         )
@@ -201,6 +228,30 @@ class RagService:
             force_fast_mode=force_fast_mode,
             history_scope=history_scope,
         )
+
+    def _resolve_generation_settings(
+        self,
+        *,
+        target_model: str,
+        idea_generation: bool,
+    ) -> RagGenerationSettings:
+        normalized = (target_model or "").strip().lower()
+        if normalized == "no_rag":
+            base = self._config.no_rag_generation
+        elif normalized == "refusal":
+            base = self._config.refusal_generation
+        else:
+            base = self._config.rag_generation
+        if normalized != "refusal" and idea_generation:
+            prompt_name = (self._config.idea_generation.prompt_name or "").strip()
+            if not prompt_name:
+                prompt_name = base.prompt_name
+            return replace(
+                base,
+                prompt_name=prompt_name,
+                temperature=self._config.idea_generation.temperature,
+            )
+        return base
 
     def _retrieve_chunks(
         self,
@@ -215,6 +266,9 @@ class RagService:
             dense_top_k=self._config.dense_top_k,
             sparse_top_k=self._config.sparse_top_k,
             recency_mode=recency_mode,
+            recency_weight_soft=self._config.recency_weight_soft,
+            recency_weight_hard=self._config.recency_weight_hard,
+            recency_half_life_days=self._config.recency_half_life_days,
             mmr_lambda=self._config.mmr_lambda,
         )
         if force_fast_mode:
@@ -227,6 +281,9 @@ class RagService:
                     dense_top_k=self._config.dense_top_k,
                     sparse_top_k=self._config.sparse_top_k,
                     recency_mode=recency_mode,
+                    recency_weight_soft=self._config.recency_weight_soft,
+                    recency_weight_hard=self._config.recency_weight_hard,
+                    recency_half_life_days=self._config.recency_half_life_days,
                     mmr_lambda=self._config.mmr_lambda,
                 )
                 for chunk in extra:
@@ -248,6 +305,9 @@ class RagService:
         *,
         chunks,
         recency_mode: str,
+        recency_weight_soft: float,
+        recency_weight_hard: float,
+        recency_half_life_days: float,
     ):
         mode = (recency_mode or "off").strip().lower()
         if mode not in {"soft", "hard"}:
@@ -255,8 +315,10 @@ class RagService:
         if len(chunks) <= 1:
             return chunks
 
-        weight = 0.2 if mode == "soft" else 0.45
-        half_life_days = 45.0 if mode == "soft" else 14.0
+        soft_weight = max(0.0, min(1.0, float(recency_weight_soft)))
+        hard_weight = max(0.0, min(1.0, float(recency_weight_hard)))
+        weight = soft_weight if mode == "soft" else hard_weight
+        half_life_days = max(0.1, float(recency_half_life_days))
         now = datetime.now(timezone.utc)
         scored = []
         count = max(1, len(chunks))

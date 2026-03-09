@@ -18,6 +18,9 @@ from kumc_agent.config.schema import (
     EmbeddingSection,
     FeatureSection,
     FunctionCallSection,
+    RagGenerationProfileSection,
+    RagGenerationSection,
+    RagIdeaGenerationSection,
     IndexingChunkingSection,
     IndexingRefreshSection,
     IndexingSection,
@@ -31,6 +34,7 @@ from kumc_agent.config.schema import (
     OpsSection,
     ProviderSection,
     RagHistorySection,
+    RagPromptTextSection,
     RagRoutingSection,
     RagSection,
     RerankerSection,
@@ -321,6 +325,12 @@ def _to_runtime_config(
 
     rag_routing = rag.get("routing", {})
     rag_history = rag.get("history", {})
+    rag_generation = rag.get("generation", {})
+    rag_prompt_texts = rag.get("prompt_texts", {})
+    rag_generation_rag = rag_generation.get("rag", {})
+    rag_generation_no_rag = rag_generation.get("no_rag", {})
+    rag_generation_refusal = rag_generation.get("refusal", {})
+    rag_generation_idea = rag_generation.get("idea_generation", {})
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
@@ -338,6 +348,88 @@ def _to_runtime_config(
         special_channel_names = ["kumc-agent"]
     if not special_channel_names:
         special_channel_names = ["kumc-agent"]
+
+    def _build_generation_profile(
+        section: dict[str, Any],
+        *,
+        default_prompt_name: str,
+        fallback: RagGenerationProfileSection | None = None,
+    ) -> RagGenerationProfileSection:
+        provider_default = (
+            fallback.provider
+            if fallback is not None
+            else str(providers["llm"]["provider"])
+        )
+        gemini_model_default = (
+            fallback.gemini_model
+            if fallback is not None
+            else str(providers["llm"]["gemini_model"])
+        )
+        llama_model_path_default = (
+            fallback.llama_model_path
+            if fallback is not None
+            else str(providers["llm"]["llama_model_path"])
+        )
+        temperature_default = (
+            fallback.temperature
+            if fallback is not None
+            else float(providers["llm"]["temperature"])
+        )
+        max_output_tokens_default = (
+            fallback.max_output_tokens
+            if fallback is not None
+            else int(providers["llm"]["max_output_tokens"])
+        )
+        thinking_level_default = (
+            fallback.thinking_level
+            if fallback is not None
+            else str(providers["llm"]["thinking_level"])
+        )
+        prompt_name_default = (
+            fallback.prompt_name if fallback is not None else default_prompt_name
+        )
+        return RagGenerationProfileSection(
+            provider=str(section.get("provider", provider_default)),
+            gemini_model=str(section.get("gemini_model", gemini_model_default)),
+            llama_model_path=str(
+                section.get("llama_model_path", llama_model_path_default)
+            ),
+            temperature=float(section.get("temperature", temperature_default)),
+            max_output_tokens=int(
+                section.get("max_output_tokens", max_output_tokens_default)
+            ),
+            thinking_level=str(section.get("thinking_level", thinking_level_default)),
+            prompt_name=str(section.get("prompt_name", prompt_name_default)),
+        )
+
+    rag_generation_profile = _build_generation_profile(
+        rag_generation_rag,
+        default_prompt_name="answer_json",
+    )
+    no_rag_generation_profile = _build_generation_profile(
+        rag_generation_no_rag,
+        default_prompt_name="answer_json",
+        fallback=rag_generation_profile,
+    )
+    refusal_generation_profile = _build_generation_profile(
+        rag_generation_refusal,
+        default_prompt_name="refusal",
+        fallback=no_rag_generation_profile,
+    )
+    idea_generation_profile = RagIdeaGenerationSection(
+        prompt_name=str(
+            rag_generation_idea.get(
+                "prompt_name",
+                rag_generation_profile.prompt_name,
+            )
+        ),
+        temperature=float(
+            rag_generation_idea.get(
+                "temperature",
+                rag_generation_profile.temperature,
+            )
+        ),
+    )
 
     runtime = RuntimeConfig(
         base_dir=base_dir,
@@ -419,6 +511,27 @@ def _to_runtime_config(
                 sparse_top_k=int(features["retrieval"]["sparse_top_k"]),
                 rerank_pool_size=int(features["retrieval"]["rerank_pool_size"]),
                 mmr_lambda=float(features["retrieval"]["mmr_lambda"]),
+                recency_weight_soft=float(
+                    features["retrieval"].get(
+                        "recency_weight_soft",
+                        features["retrieval"].get("recency_weight", 0.20),
+                    )
+                ),
+                recency_weight_hard=float(
+                    features["retrieval"].get("recency_weight_hard", 0.45)
+                ),
+                recency_half_life_days=float(
+                    features["retrieval"].get("recency_half_life_days", 45.0)
+                ),
+                sudachi_mode=str(features["retrieval"].get("sudachi_mode", "B")),
+                sparse_bm25_k1=float(features["retrieval"].get("sparse_bm25_k1", 1.5)),
+                sparse_bm25_b=float(features["retrieval"].get("sparse_bm25_b", 0.75)),
+                sparse_use_normalized_form=bool(
+                    features["retrieval"].get("sparse_use_normalized_form", True)
+                ),
+                sparse_remove_symbols=bool(
+                    features["retrieval"].get("sparse_remove_symbols", True)
+                ),
             ),
         ),
         rag=RagSection(
@@ -468,6 +581,113 @@ def _to_runtime_config(
                 special_channel_names=special_channel_names,
                 special_channel_custom_instruction=str(
                     rag_history.get("special_channel_custom_instruction", "")
+                ),
+            ),
+            generation=RagGenerationSection(
+                rag=rag_generation_profile,
+                no_rag=no_rag_generation_profile,
+                refusal=refusal_generation_profile,
+                idea_generation=idea_generation_profile,
+            ),
+            prompt_texts=RagPromptTextSection(
+                empty_context=str(
+                    rag_prompt_texts.get("empty_context", "(コンテキストなし)")
+                ),
+                empty_history=str(
+                    rag_prompt_texts.get("empty_history", "(履歴なし)")
+                ),
+                history_user_prefix=str(
+                    rag_prompt_texts.get("history_user_prefix", "ユーザー: ")
+                ),
+                history_assistant_prefix=str(
+                    rag_prompt_texts.get(
+                        "history_assistant_prefix",
+                        "アシスタント: ",
+                    )
+                ),
+                history_sources_label=str(
+                    rag_prompt_texts.get("history_sources_label", "参照ソース:")
+                ),
+                gemini_header_chat_history=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_chat_history",
+                        "# チャット履歴",
+                    )
+                ),
+                gemini_header_retry_history=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_retry_history",
+                        "# 再検索前の質問と回答",
+                    )
+                ),
+                gemini_header_circle_info=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_circle_info",
+                        "# サークルの基本情報",
+                    )
+                ),
+                gemini_header_capabilities=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_capabilities",
+                        "# チャットボット自身の機能情報",
+                    )
+                ),
+                gemini_header_context=str(
+                    rag_prompt_texts.get("gemini_header_context", "# コンテキスト")
+                ),
+                gemini_header_output_format=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_output_format",
+                        "# 出力形式",
+                    )
+                ),
+                gemini_header_instructions=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_instructions",
+                        "## 指示",
+                    )
+                ),
+                gemini_header_question=str(
+                    rag_prompt_texts.get(
+                        "gemini_header_question",
+                        "# ユーザーの質問",
+                    )
+                ),
+                llama_header_question=str(
+                    rag_prompt_texts.get("llama_header_question", "### Question")
+                ),
+                llama_header_previous_attempt=str(
+                    rag_prompt_texts.get(
+                        "llama_header_previous_attempt",
+                        "### Previous attempt (Question/Answer)",
+                    )
+                ),
+                llama_header_circle_info=str(
+                    rag_prompt_texts.get(
+                        "llama_header_circle_info",
+                        "### サークルの基本情報",
+                    )
+                ),
+                llama_header_capabilities=str(
+                    rag_prompt_texts.get(
+                        "llama_header_capabilities",
+                        "### チャットボット自身の機能情報",
+                    )
+                ),
+                llama_header_context=str(
+                    rag_prompt_texts.get("llama_header_context", "### Context")
+                ),
+                llama_header_output_format=str(
+                    rag_prompt_texts.get(
+                        "llama_header_output_format",
+                        "### Output format",
+                    )
+                ),
+                llama_header_instructions=str(
+                    rag_prompt_texts.get(
+                        "llama_header_instructions",
+                        "## 指示",
+                    )
                 ),
             ),
             fast_model_notice=str(

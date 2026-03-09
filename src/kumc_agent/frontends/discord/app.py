@@ -377,12 +377,30 @@ def main() -> None:
                     )
                 )
             )
+            metric_text = ""
+            if result.ragas_metrics:
+                ordered_keys = (
+                    "answer_relevancy",
+                    "faithfulness",
+                    "context_precision",
+                    "context_recall",
+                )
+                parts: list[str] = []
+                for key in ordered_keys:
+                    if key in result.ragas_metrics:
+                        parts.append(f"{key}={result.ragas_metrics[key]:.3f}")
+                for key in sorted(result.ragas_metrics.keys()):
+                    if key in ordered_keys:
+                        continue
+                    parts.append(f"{key}={result.ragas_metrics[key]:.3f}")
+                if parts:
+                    metric_text = " metrics=" + ", ".join(parts)
             await _send_status(
                 channel,
                 (
                     "評価が完了しました。"
                     f" total={result.total}, exact_match={result.exact_match:.3f},"
-                    f" token_overlap={result.token_overlap:.3f}"
+                    f" token_overlap={result.token_overlap:.3f}{metric_text}"
                 ),
             )
         except asyncio.CancelledError:

@@ -55,6 +55,35 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                   cache_dir: "data/cache"
                   answer_record_log_path: "logs/answer_records.jsonl"
                   source_max_count: 3
+                rag:
+                  generation:
+                    rag:
+                      provider: "llama"
+                      gemini_model: "gemini-x"
+                      llama_model_path: ""
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "answer_json"
+                    no_rag:
+                      provider: "llama"
+                      gemini_model: "gemini-x"
+                      llama_model_path: ""
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "answer_json"
+                    refusal:
+                      provider: "llama"
+                      gemini_model: "gemini-x"
+                      llama_model_path: ""
+                      temperature: 0.0
+                      max_output_tokens: 128
+                      thinking_level: "minimal"
+                      prompt_name: "refusal"
+                    idea_generation:
+                      prompt_name: "answer_json"
+                      temperature: 0.0
                 integrations:
                   discord: {bot_token: ""}
                   drive: {folder_id: "", google_application_credentials: "", max_files: 0}
@@ -126,6 +155,9 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                     sparse_top_k: 5
                     rerank_pool_size: 10
                     mmr_lambda: 0.5
+                    recency_weight_soft: 0.2
+                    recency_weight_hard: 0.5
+                    recency_half_life_days: 30.0
                 """
             ).strip()
             + "\n",

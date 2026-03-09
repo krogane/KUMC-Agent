@@ -16,7 +16,12 @@ from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.infra.storage.filesystem import FilePromptRepository, FileSystemStorage
 from kumc_agent.features.indexing.service import IndexingService
-from kumc_agent.features.rag.config import RagConfig
+from kumc_agent.features.rag.config import (
+    RagConfig,
+    RagGenerationSettings,
+    RagIdeaGenerationSettings,
+    RagPromptTextSettings,
+)
 from kumc_agent.features.rag.components.generation import GenerationComponent
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
 from kumc_agent.features.rag.components.routing import QueryRouter
@@ -36,6 +41,22 @@ from kumc_agent.usecases.vc.run import VCUsecase
 from kumc_agent.utils.migrate_summary_dir import migrate_summery_chunk_dir
 
 
+def _build_llm_for_route(
+    *,
+    provider: str,
+    gemini_model: str,
+    llama_model_path: str,
+    gemini_api_key: str,
+):
+    normalized = (provider or "").strip().lower()
+    if normalized in {"llama", "llama_cpp"}:
+        return LlamaCppLLM(model_path=llama_model_path)
+    return GeminiLLM(
+        api_key=gemini_api_key,
+        model=gemini_model,
+    )
+
+
 def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     config = load_runtime_config(base_dir=base_dir)
     migrate_summery_chunk_dir(base_dir=config.base_dir)
@@ -52,20 +73,38 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             dimensions=config.providers.embeddings.dimensions,
         )
 
-    if config.providers.llm.provider == "llama":
-        llm = LlamaCppLLM(model_path=config.providers.llm.llama_model_path)
-    else:
-        llm = GeminiLLM(
-            api_key=config.integrations.gemini_api_key,
-            model=config.providers.llm.gemini_model,
-        )
+    rag_llm = _build_llm_for_route(
+        provider=config.rag.generation.rag.provider,
+        gemini_model=config.rag.generation.rag.gemini_model,
+        llama_model_path=config.rag.generation.rag.llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+    )
+    no_rag_llm = _build_llm_for_route(
+        provider=config.rag.generation.no_rag.provider,
+        gemini_model=config.rag.generation.no_rag.gemini_model,
+        llama_model_path=config.rag.generation.no_rag.llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+    )
+    refusal_llm = _build_llm_for_route(
+        provider=config.rag.generation.refusal.provider,
+        gemini_model=config.rag.generation.refusal.gemini_model,
+        llama_model_path=config.rag.generation.refusal.llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+    )
 
     storage = FileSystemStorage(
         chunks_path=config.app.chunks_path,
         raw_dir=config.app.raw_dir,
     )
     dense_index = FaissLikeIndex(index_dir=config.app.index_dir)
-    sparse_index = SudachiBM25Retriever(index_dir=config.app.index_dir)
+    sparse_index = SudachiBM25Retriever(
+        index_dir=config.app.index_dir,
+        sudachi_mode=config.features.retrieval.sudachi_mode,
+        bm25_k1=config.features.retrieval.sparse_bm25_k1,
+        bm25_b=config.features.retrieval.sparse_bm25_b,
+        use_normalized_form=config.features.retrieval.sparse_use_normalized_form,
+        remove_symbols=config.features.retrieval.sparse_remove_symbols,
+    )
 
     retrieval_component = RetrievalComponent(
         embedder=embedder,
@@ -81,9 +120,33 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
 
     prompt_repo = FilePromptRepository(config.base_dir / "assets" / "prompts")
     generation_component = GenerationComponent(
-        llm=llm,
+        llm=rag_llm,
+        no_rag_llm=no_rag_llm,
+        refusal_llm=refusal_llm,
         prompts=prompt_repo,
         source_max_count=config.app.source_max_count,
+        prompt_texts=RagPromptTextSettings(
+            empty_context=config.rag.prompt_texts.empty_context,
+            empty_history=config.rag.prompt_texts.empty_history,
+            history_user_prefix=config.rag.prompt_texts.history_user_prefix,
+            history_assistant_prefix=config.rag.prompt_texts.history_assistant_prefix,
+            history_sources_label=config.rag.prompt_texts.history_sources_label,
+            gemini_header_chat_history=config.rag.prompt_texts.gemini_header_chat_history,
+            gemini_header_retry_history=config.rag.prompt_texts.gemini_header_retry_history,
+            gemini_header_circle_info=config.rag.prompt_texts.gemini_header_circle_info,
+            gemini_header_capabilities=config.rag.prompt_texts.gemini_header_capabilities,
+            gemini_header_context=config.rag.prompt_texts.gemini_header_context,
+            gemini_header_output_format=config.rag.prompt_texts.gemini_header_output_format,
+            gemini_header_instructions=config.rag.prompt_texts.gemini_header_instructions,
+            gemini_header_question=config.rag.prompt_texts.gemini_header_question,
+            llama_header_question=config.rag.prompt_texts.llama_header_question,
+            llama_header_previous_attempt=config.rag.prompt_texts.llama_header_previous_attempt,
+            llama_header_circle_info=config.rag.prompt_texts.llama_header_circle_info,
+            llama_header_capabilities=config.rag.prompt_texts.llama_header_capabilities,
+            llama_header_context=config.rag.prompt_texts.llama_header_context,
+            llama_header_output_format=config.rag.prompt_texts.llama_header_output_format,
+            llama_header_instructions=config.rag.prompt_texts.llama_header_instructions,
+        ),
     )
 
     router = QueryRouter(
@@ -111,11 +174,36 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             sparse_top_k=config.features.retrieval.sparse_top_k,
             rerank_pool_size=config.features.retrieval.rerank_pool_size,
             mmr_lambda=config.features.retrieval.mmr_lambda,
+            recency_weight_soft=config.features.retrieval.recency_weight_soft,
+            recency_weight_hard=config.features.retrieval.recency_weight_hard,
+            recency_half_life_days=config.features.retrieval.recency_half_life_days,
             source_max_count=config.app.source_max_count,
             recency_mode=config.features.recency_mode,
-            llm_temperature=config.providers.llm.temperature,
-            llm_max_output_tokens=config.providers.llm.max_output_tokens,
-            llm_thinking_level=config.providers.llm.thinking_level,
+            rag_generation=RagGenerationSettings(
+                provider=config.rag.generation.rag.provider,
+                temperature=config.rag.generation.rag.temperature,
+                max_output_tokens=config.rag.generation.rag.max_output_tokens,
+                thinking_level=config.rag.generation.rag.thinking_level,
+                prompt_name=config.rag.generation.rag.prompt_name,
+            ),
+            no_rag_generation=RagGenerationSettings(
+                provider=config.rag.generation.no_rag.provider,
+                temperature=config.rag.generation.no_rag.temperature,
+                max_output_tokens=config.rag.generation.no_rag.max_output_tokens,
+                thinking_level=config.rag.generation.no_rag.thinking_level,
+                prompt_name=config.rag.generation.no_rag.prompt_name,
+            ),
+            refusal_generation=RagGenerationSettings(
+                provider=config.rag.generation.refusal.provider,
+                temperature=config.rag.generation.refusal.temperature,
+                max_output_tokens=config.rag.generation.refusal.max_output_tokens,
+                thinking_level=config.rag.generation.refusal.thinking_level,
+                prompt_name=config.rag.generation.refusal.prompt_name,
+            ),
+            idea_generation=RagIdeaGenerationSettings(
+                prompt_name=config.rag.generation.idea_generation.prompt_name,
+                temperature=config.rag.generation.idea_generation.temperature,
+            ),
             history_enabled=config.rag.history.enabled,
             history_max_turns=config.rag.history.max_turns,
             prompt_default_turns=config.rag.history.prompt_default_turns,

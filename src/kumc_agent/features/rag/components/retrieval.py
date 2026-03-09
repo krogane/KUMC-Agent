@@ -60,6 +60,9 @@ class RetrievalComponent:
         dense_top_k: int,
         sparse_top_k: int,
         recency_mode: str = "off",
+        recency_weight_soft: float = 0.20,
+        recency_weight_hard: float = 0.45,
+        recency_half_life_days: float = 45.0,
         mmr_lambda: float = 0.75,
     ) -> list[Chunk]:
         query_vector = np.asarray(self._embedder.embed_query(query), dtype=np.float32)
@@ -72,7 +75,13 @@ class RetrievalComponent:
             top_k=max(0, sparse_top_k),
         )
         scored = self._merge_scores(dense_hits=dense_hits, sparse_hits=sparse_hits)
-        scored = self._apply_recency(scored, mode=recency_mode)
+        scored = self._apply_recency(
+            scored,
+            mode=recency_mode,
+            recency_weight_soft=recency_weight_soft,
+            recency_weight_hard=recency_weight_hard,
+            recency_half_life_days=recency_half_life_days,
+        )
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         _ = mmr_lambda  # Applied explicitly in RagService after rerank stage.
         return [item.chunk for item in ranked]
@@ -118,15 +127,24 @@ class RetrievalComponent:
         return out
 
     @staticmethod
-    def _apply_recency(scored: list[_ScoredChunk], *, mode: str) -> list[_ScoredChunk]:
+    def _apply_recency(
+        scored: list[_ScoredChunk],
+        *,
+        mode: str,
+        recency_weight_soft: float,
+        recency_weight_hard: float,
+        recency_half_life_days: float,
+    ) -> list[_ScoredChunk]:
         normalized_mode = (mode or "off").strip().lower()
         if normalized_mode not in {"soft", "hard"}:
             return scored
         if not scored:
             return scored
 
-        weight = 0.20 if normalized_mode == "soft" else 0.45
-        half_life_days = 45.0 if normalized_mode == "soft" else 14.0
+        soft_weight = max(0.0, min(1.0, float(recency_weight_soft)))
+        hard_weight = max(0.0, min(1.0, float(recency_weight_hard)))
+        weight = soft_weight if normalized_mode == "soft" else hard_weight
+        half_life_days = max(0.1, float(recency_half_life_days))
         now = datetime.now(timezone.utc)
         adjusted: list[_ScoredChunk] = []
         for item in scored:

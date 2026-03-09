@@ -135,10 +135,11 @@ def main() -> None:
             )
         )
         logger.info(
-            "Ragas eval completed. total=%d exact_match=%.3f token_overlap=%.3f",
+            "Ragas eval completed. total=%d exact_match=%.3f token_overlap=%.3f metrics=%s",
             result.total,
             result.exact_match,
             result.token_overlap,
+            result.ragas_metrics,
         )
         print(
             json.dumps(
@@ -146,6 +147,7 @@ def main() -> None:
                     "total": result.total,
                     "exact_match": result.exact_match,
                     "token_overlap": result.token_overlap,
+                    "ragas_metrics": result.ragas_metrics,
                 },
                 ensure_ascii=False,
             )

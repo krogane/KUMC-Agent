@@ -93,6 +93,14 @@ class RetrievalSection:
     sparse_top_k: int
     rerank_pool_size: int
     mmr_lambda: float
+    recency_weight_soft: float
+    recency_weight_hard: float
+    recency_half_life_days: float
+    sudachi_mode: str
+    sparse_bm25_k1: float
+    sparse_bm25_b: float
+    sparse_use_normalized_form: bool
+    sparse_remove_symbols: bool
 
 
 @dataclass(frozen=True)
@@ -142,9 +150,60 @@ class RagHistorySection:
 
 
 @dataclass(frozen=True)
+class RagGenerationProfileSection:
+    provider: str
+    gemini_model: str
+    llama_model_path: str
+    temperature: float
+    max_output_tokens: int
+    thinking_level: str
+    prompt_name: str
+
+
+@dataclass(frozen=True)
+class RagIdeaGenerationSection:
+    prompt_name: str
+    temperature: float
+
+
+@dataclass(frozen=True)
+class RagGenerationSection:
+    rag: RagGenerationProfileSection
+    no_rag: RagGenerationProfileSection
+    refusal: RagGenerationProfileSection
+    idea_generation: RagIdeaGenerationSection
+
+
+@dataclass(frozen=True)
+class RagPromptTextSection:
+    empty_context: str
+    empty_history: str
+    history_user_prefix: str
+    history_assistant_prefix: str
+    history_sources_label: str
+    gemini_header_chat_history: str
+    gemini_header_retry_history: str
+    gemini_header_circle_info: str
+    gemini_header_capabilities: str
+    gemini_header_context: str
+    gemini_header_output_format: str
+    gemini_header_instructions: str
+    gemini_header_question: str
+    llama_header_question: str
+    llama_header_previous_attempt: str
+    llama_header_circle_info: str
+    llama_header_capabilities: str
+    llama_header_context: str
+    llama_header_output_format: str
+    llama_header_instructions: str
+
+
+@dataclass(frozen=True)
 class RagSection:
     routing: RagRoutingSection
     history: RagHistorySection
+    generation: RagGenerationSection
+    prompt_texts: RagPromptTextSection
     fast_model_notice: str
 
 
