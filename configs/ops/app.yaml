@@ -13,6 +13,7 @@ app:
   source_max_count: 3
 rag:
   fast_model_notice: "※負荷軽減のために軽量モードを使用しました。"
+  answer_json_max_retries: 2
   prompt_texts:
     empty_context: "(コンテキストなし)"
     empty_history: "(履歴なし)"
@@ -87,6 +88,13 @@ indexing:
     second_recursive_chunk_size: 384
     second_recursive_chunk_overlap: 64
     summary_characters: 200
+    summary_batch_size: 1000
+    summary_llm_provider: "gemini"
+    summary_gemini_model: "gemini-2.5-flash-lite"
+    summary_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
+    summary_temperature: 0.0
+    summary_max_output_tokens: 1024
+    summary_thinking_level: "minimal"
   stages:
     second_recursive_enabled: true
     sparse_second_recursive_enabled: true
@@ -111,6 +119,12 @@ ops:
   warmup_interval_minutes: 60
   index_update_estimate_min_minutes: 30
   index_update_estimate_max_minutes: 60
+  ragas_batch_size: 1000
+  ragas_metrics:
+    answer_relevancy_enabled: true
+    faithfulness_enabled: true
+    context_precision_enabled: false
+    context_recall_enabled: true
   answer_record_log_enabled: true
   answer_record_log_path: "logs/answer_records.jsonl"
 integrations:
@@ -120,8 +134,13 @@ integrations:
     folder_id: ""
     google_application_credentials: ""
     max_files: 0
+    batch_size: 20
+    pdf_ocr_model_path: "model/ocr/tencent/HunyuanOCR"
   crafters_colony:
     author_url: ""
     max_pages: 100
     max_articles: 0
   gemini_api_key: ""
+  gemini_requests_per_minute: 30
+  gemini_summary_requests_per_minute: 1000
+  gemini_ragas_requests_per_minute: 1000

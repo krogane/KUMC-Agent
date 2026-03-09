@@ -686,6 +686,11 @@ class RagPipeline:
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
                 thinking_level=thinking_level,
+                requests_per_minute=getattr(
+                    self._config,
+                    "gemini_requests_per_minute",
+                    60,
+                ),
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM output (gemini): %s", text)
@@ -776,6 +781,11 @@ class RagPipeline:
                 temperature=self._config.no_rag_temperature,
                 max_output_tokens=self._config.no_rag_max_output_tokens,
                 thinking_level=self._config.no_rag_thinking_level,
+                requests_per_minute=getattr(
+                    self._config,
+                    "gemini_requests_per_minute",
+                    60,
+                ),
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("No-RAG LLM output (gemini): %s", text)
@@ -878,6 +888,11 @@ class RagPipeline:
                     self._config.thinking_level
                     if fast_mode
                     else self._config.refusal_thinking_level
+                ),
+                requests_per_minute=getattr(
+                    self._config,
+                    "gemini_requests_per_minute",
+                    60,
                 ),
             )
         elif provider == "llama":
@@ -2706,6 +2721,11 @@ class RagPipeline:
                 response = generate_text(
                     provider=provider,
                     api_key=self._config.gemini_api_key,
+                    gemini_requests_per_minute=getattr(
+                        self._config,
+                        "gemini_requests_per_minute",
+                        60,
+                    ),
                     prompt=user_prompt,
                     model=model,
                     system_prompt=system_prompt,

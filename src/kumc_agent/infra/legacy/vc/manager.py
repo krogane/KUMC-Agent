@@ -1611,6 +1611,11 @@ class VoiceMeetingManager:
             llama_threads=self._config.llama_threads,
             llama_gpu_layers=self._config.llama_gpu_layers,
             response_mime_type=response_mime_type,
+            gemini_requests_per_minute=getattr(
+                self._config,
+                "gemini_requests_per_minute",
+                60,
+            ),
         )
 
     def _allocate_meeting_dir(self) -> tuple[Path, str, str, str]:

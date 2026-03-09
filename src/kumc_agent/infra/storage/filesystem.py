@@ -9,6 +9,8 @@ from kumc_agent.domain.models.document import Document
 from kumc_agent.domain.ports.prompts import PromptRepositoryPort
 from kumc_agent.domain.ports.storage import StoragePort
 
+FileSignature = tuple[int, int]
+
 
 class FileSystemStorage(StoragePort):
     def __init__(self, *, chunks_path: Path, raw_dir: Path) -> None:
@@ -80,13 +82,34 @@ class FileSystemStorage(StoragePort):
 class FilePromptRepository(PromptRepositoryPort):
     def __init__(self, prompts_dir: Path) -> None:
         self._prompts_dir = prompts_dir
+        self._cache: dict[Path, tuple[FileSignature, str]] = {}
 
     def get(self, name: str) -> str:
         file_name = name if name.endswith(".md") else f"{name}.md"
         path = self._prompts_dir / file_name
         if not path.exists():
+            self._cache.pop(path, None)
             raise FileNotFoundError(f"Prompt not found: {path}")
-        return path.read_text(encoding="utf-8").strip()
+        signature = self._file_signature(path)
+        cached = self._cache.get(path)
+        if (
+            cached is not None
+            and signature is not None
+            and cached[0] == signature
+        ):
+            return cached[1]
+        value = path.read_text(encoding="utf-8").strip()
+        if signature is not None:
+            self._cache[path] = (signature, value)
+        return value
+
+    @staticmethod
+    def _file_signature(path: Path) -> FileSignature | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return (int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

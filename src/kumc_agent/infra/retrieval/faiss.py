@@ -12,6 +12,8 @@ from kumc_agent.utils.hashing import cosine_similarity_matrix
 
 logger = logging.getLogger(__name__)
 
+FileSignature = tuple[int, int]
+
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -26,7 +28,11 @@ class FaissLikeIndex:
         self._vectors_path = self._index_dir / "dense_vectors.npy"
         self._chunks_path = self._index_dir / "dense_chunks.jsonl"
         self._cached_index = None
-        self._cached_index_mtime: float | None = None
+        self._cached_index_signature: FileSignature | None = None
+        self._cached_vectors: np.ndarray | None = None
+        self._cached_vectors_signature: FileSignature | None = None
+        self._cached_chunks: list[Chunk] | None = None
+        self._cached_chunks_signature: FileSignature | None = None
         self._index_dir.mkdir(parents=True, exist_ok=True)
 
     def build(self, *, chunks: list[Chunk], embeddings: np.ndarray) -> None:
@@ -36,6 +42,8 @@ class FaissLikeIndex:
         if matrix.ndim != 2:
             raise ValueError("embeddings must be 2-dimensional")
         np.save(self._vectors_path, matrix)
+        self._cached_vectors = matrix
+        self._cached_vectors_signature = self._file_signature(self._vectors_path)
 
         try:
             import faiss
@@ -47,13 +55,13 @@ class FaissLikeIndex:
             index.add(normalized)
             faiss.write_index(index, str(self._faiss_path))
             self._cached_index = index
-            self._cached_index_mtime = self._faiss_path.stat().st_mtime
+            self._cached_index_signature = self._file_signature(self._faiss_path)
         except Exception:
             logger.exception(
                 "FAISS index build failed. Falling back to NumPy-based dense search."
             )
             self._cached_index = None
-            self._cached_index_mtime = None
+            self._cached_index_signature = None
 
         with self._chunks_path.open("w", encoding="utf-8") as fw:
             for chunk in chunks:
@@ -70,28 +78,27 @@ class FaissLikeIndex:
                     )
                     + "\n"
                 )
+        self._cached_chunks = list(chunks)
+        self._cached_chunks_signature = self._file_signature(self._chunks_path)
 
     def search(self, *, query_vector: np.ndarray, top_k: int) -> list[SearchResult]:
-        if not self._chunks_path.exists():
-            return []
         chunks = self._load_chunks()
         if not chunks:
             return []
 
+        dense_query = query_vector.astype(np.float32)
         results = self._search_faiss(
-            query_vector=query_vector.astype(np.float32),
+            query_vector=dense_query,
             top_k=max(0, top_k),
             chunks=chunks,
         )
         if results is not None:
             return results
 
-        if not self._vectors_path.exists():
-            return []
-        matrix = np.load(self._vectors_path)
+        matrix = self._load_vectors()
         if matrix.size == 0:
             return []
-        scores = cosine_similarity_matrix(query_vector.astype(np.float32), matrix)
+        scores = cosine_similarity_matrix(dense_query, matrix)
         order = np.argsort(-scores)[: max(0, top_k)]
         return [
             SearchResult(chunk=chunks[int(i)], score=float(scores[int(i)]))
@@ -143,20 +150,33 @@ class FaissLikeIndex:
         except Exception:
             return None
         if not self._faiss_path.exists():
+            self._cached_index = None
+            self._cached_index_signature = None
             return None
-        current_mtime = self._faiss_path.stat().st_mtime
+        current_signature = self._file_signature(self._faiss_path)
         if (
             self._cached_index is not None
-            and self._cached_index_mtime is not None
-            and self._cached_index_mtime == current_mtime
+            and self._cached_index_signature is not None
+            and self._cached_index_signature == current_signature
         ):
             return self._cached_index
         index = faiss.read_index(str(self._faiss_path))
         self._cached_index = index
-        self._cached_index_mtime = current_mtime
+        self._cached_index_signature = current_signature
         return index
 
     def _load_chunks(self) -> list[Chunk]:
+        if not self._chunks_path.exists():
+            self._cached_chunks = None
+            self._cached_chunks_signature = None
+            return []
+        current_signature = self._file_signature(self._chunks_path)
+        if (
+            self._cached_chunks is not None
+            and self._cached_chunks_signature is not None
+            and self._cached_chunks_signature == current_signature
+        ):
+            return self._cached_chunks
         out: list[Chunk] = []
         with self._chunks_path.open("r", encoding="utf-8") as fr:
             for line in fr:
@@ -170,4 +190,31 @@ class FaissLikeIndex:
                         metadata=dict(payload.get("metadata", {})),
                     )
                 )
+        self._cached_chunks = out
+        self._cached_chunks_signature = current_signature
         return out
+
+    def _load_vectors(self) -> np.ndarray:
+        if not self._vectors_path.exists():
+            self._cached_vectors = None
+            self._cached_vectors_signature = None
+            return np.empty((0, 0), dtype=np.float32)
+        current_signature = self._file_signature(self._vectors_path)
+        if (
+            self._cached_vectors is not None
+            and self._cached_vectors_signature is not None
+            and self._cached_vectors_signature == current_signature
+        ):
+            return self._cached_vectors
+        matrix = np.load(self._vectors_path)
+        self._cached_vectors = matrix
+        self._cached_vectors_signature = current_signature
+        return matrix
+
+    @staticmethod
+    def _file_signature(path: Path) -> FileSignature | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return (int(stat.st_mtime_ns), int(stat.st_size))

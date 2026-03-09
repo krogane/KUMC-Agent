@@ -10,6 +10,7 @@ from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from kumc_agent.infra.legacy.config import AppConfig
+from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,13 @@ def _generate_routing_payload_gemini_response(
         request_config["thinking_config"] = genai_module.types.ThinkingConfig(
             thinking_level=config.thinking_level
         )
+    wait_for_gemini_rate_limit(
+        max_requests_per_minute=getattr(
+            config,
+            "gemini_requests_per_minute",
+            60,
+        )
+    )
     return client.models.generate_content(
         model=config.function_call_gemini_model,
         contents=[

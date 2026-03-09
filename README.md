@@ -86,6 +86,7 @@ KUMC-Agent/
 
 - `KUMC_DISCORD_BOT_TOKEN`
 - `KUMC_GEMINI_API_KEY`
+- `KUMC_GEMINI_REQUESTS_PER_MINUTE` (Gemini API の1分あたり呼び出し上限)
 - `KUMC_GOOGLE_APPLICATION_CREDENTIALS`
 - `KUMC_DRIVE_FOLDER_ID`
 - `KUMC_EXPERIMENT_PROFILE`
@@ -131,7 +132,7 @@ PYTHONPATH=src python -m kumc_agent.cli repl
 PYTHONPATH=src python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
 PYTHONPATH=src python -m kumc_agent.cli index build
 PYTHONPATH=src python -m kumc_agent.cli index update
-PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl
+PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl --ragas-batch-size 10
 ```
 
 ### HTTP (stub)

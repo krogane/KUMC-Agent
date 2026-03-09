@@ -28,11 +28,17 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
         (base / "data" / "raw" / "docs").mkdir(parents=True)
         (base / "data" / "eval").mkdir(parents=True)
 
-        (base / "assets" / "prompts" / "answer_json.md").write_text(
+        (base / "assets" / "prompts" / "answer_rag.md").write_text(
             '{"answer": "...", "sources": ["1"]}', encoding="utf-8"
         )
-        (base / "assets" / "prompts" / "refusal.md").write_text(
+        (base / "assets" / "prompts" / "answer_no_rag.md").write_text(
+            '{"answer": "...", "sources": []}', encoding="utf-8"
+        )
+        (base / "assets" / "prompts" / "answer_refusal.md").write_text(
             "回答できません", encoding="utf-8"
+        )
+        (base / "assets" / "prompts" / "answer_idea.md").write_text(
+            '{"answer": "...", "sources": ["1"]}', encoding="utf-8"
         )
         (base / "assets" / "prompts" / "routing.md").write_text("routing", encoding="utf-8")
         (base / "assets" / "prompts" / "summarization.md").write_text("sum", encoding="utf-8")
@@ -64,7 +70,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_rag"
                     no_rag:
                       provider: "llama"
                       gemini_model: "gemini-x"
@@ -72,7 +78,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_no_rag"
                     refusal:
                       provider: "llama"
                       gemini_model: "gemini-x"
@@ -80,15 +86,16 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "refusal"
+                      prompt_name: "answer_refusal"
                     idea_generation:
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_idea"
                       temperature: 0.0
                 integrations:
                   discord: {bot_token: ""}
                   drive: {folder_id: "", google_application_credentials: "", max_files: 0}
                   crafters_colony: {author_url: "", max_pages: 100, max_articles: 0}
                   gemini_api_key: ""
+                  gemini_requests_per_minute: 60
                 """
             ).strip()
             + "\n",

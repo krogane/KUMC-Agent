@@ -6,6 +6,7 @@ import logging
 import numpy as np
 
 from kumc_agent.domain.ports.embedders import EmbedderPort
+from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
 from kumc_agent.utils.hashing import hashed_vector
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,12 @@ class GeminiEmbedder(EmbedderPort):
         api_key: str,
         model_name: str,
         dimensions: int = 256,
+        requests_per_minute: int = 60,
     ) -> None:
         self._api_key = api_key
         self._model_name = model_name
         self._dimensions = max(1, dimensions)
+        self._requests_per_minute = max(0, int(requests_per_minute))
         self._client = _gemini_embedding_client(api_key)
 
     def embed_query(self, text: str) -> np.ndarray:
@@ -31,6 +34,9 @@ class GeminiEmbedder(EmbedderPort):
         if self._client is None or not self._model_name:
             return hashed_vector(query, dimensions=self._dimensions)
         try:
+            wait_for_gemini_rate_limit(
+                max_requests_per_minute=self._requests_per_minute
+            )
             response = self._client.models.embed_content(
                 model=self._model_name,
                 contents=[query],
@@ -60,6 +66,9 @@ class GeminiEmbedder(EmbedderPort):
         try:
             for i in range(0, len(normalized), self._BATCH_SIZE):
                 batch = normalized[i : i + self._BATCH_SIZE]
+                wait_for_gemini_rate_limit(
+                    max_requests_per_minute=self._requests_per_minute
+                )
                 response = self._client.models.embed_content(
                     model=self._model_name,
                     contents=batch,

@@ -11,16 +11,20 @@ class GoogleDriveLoader:
         credentials_path: str,
         raw_dir: Path,
         max_files: int,
+        batch_size: int,
+        pdf_ocr_model_path: str,
     ) -> None:
         self._folder_id = folder_id
         self._credentials_path = credentials_path
         self._raw_dir = raw_dir
         self._max_files = max_files
+        self._batch_size = batch_size
+        self._pdf_ocr_model_path = pdf_ocr_model_path
 
     def load(self) -> int:
         if not self._folder_id:
             return 0
-        from kumc_agent.infra.legacy.indexing.drive_loader import (
+        from kumc_agent.infra.loaders.google_drive_impl import (
             download_drive_markdown,
         )
 
@@ -28,14 +32,16 @@ class GoogleDriveLoader:
         sheets_dir = self._raw_dir / "sheets"
         docs_dir.mkdir(parents=True, exist_ok=True)
         sheets_dir.mkdir(parents=True, exist_ok=True)
-        download_drive_markdown(
+        docs_count, sheets_count = download_drive_markdown(
             drive_folder_id=self._folder_id,
             docs_dir=docs_dir,
             sheets_dir=sheets_dir,
             google_application_credentials=self._credentials_path,
+            pdf_ocr_model_path=self._pdf_ocr_model_path,
             drive_max_files=self._max_files,
+            drive_batch_size=self._batch_size,
             skip_existing=False,
             update_existing=True,
             sync_deleted=True,
         )
-        return 1
+        return int(docs_count) + int(sheets_count)

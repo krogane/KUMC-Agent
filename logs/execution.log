@@ -1,90 +1,72 @@
-2026-03-07 00:59:45,197 INFO kumc_agent.smoke: smoke-log
-2026-03-07 01:00:45,735 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
-2026-03-07 01:00:45,735 INFO google_genai.models: AFC is enabled with max remote calls: 10.
-2026-03-07 01:00:46,233 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 400 Bad Request"
-2026-03-07 01:00:46,234 ERROR kumc_agent.features.rag.components.routing: Legacy function-call routing failed. Fallback to heuristic.
-Traceback (most recent call last):
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/features/rag/components/routing.py", line 96, in _route_with_legacy_function_calling
-    decision = decide_tools(
-        query=query,
-    ...<2 lines>...
-        history=history,
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 86, in decide_tools
-    raw = _generate_routing_payload(
-        query=query,
-    ...<2 lines>...
-        history=history,
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 126, in _generate_routing_payload
-    return _generate_routing_payload_gemini(
-        query=query,
-    ...<2 lines>...
-        history=history,
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 245, in _generate_routing_payload_gemini
-    response = _generate_routing_payload_gemini_response(
-        client=client,
-    ...<5 lines>...
-        include_thinking=include_thinking,
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/src/kumc_agent/infra/legacy/pipeline/function_calling.py", line 294, in _generate_routing_payload_gemini_response
-    return client.models.generate_content(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        model=config.function_call_gemini_model,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    ...<24 lines>...
-        config=genai_module.types.GenerateContentConfig(**request_config),
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/models.py", line 5227, in generate_content
-    response = self._generate_content(
-        model=model, contents=contents, config=parsed_config
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/models.py", line 4009, in _generate_content
-    response = self._api_client.request(
-        'post', path, request_dict, http_options
-    )
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1386, in request
-    response = self._request(http_request, http_options, stream=False)
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1222, in _request
-    return self._retry(self._request_once, http_request, stream)  # type: ignore[no-any-return]
-           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 477, in __call__
-    do = self.iter(retry_state=retry_state)
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 378, in iter
-    result = action(retry_state)
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 420, in exc_check
-    raise retry_exc.reraise()
-          ~~~~~~~~~~~~~~~~~^^
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 187, in reraise
-    raise self.last_attempt.result()
-          ~~~~~~~~~~~~~~~~~~~~~~~~^^
-  File "/opt/homebrew/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/lib/python3.13/concurrent/futures/_base.py", line 449, in result
-    return self.__get_result()
-           ~~~~~~~~~~~~~~~~~^^
-  File "/opt/homebrew/Cellar/python@3.13/3.13.7/Frameworks/Python.framework/Versions/3.13/lib/python3.13/concurrent/futures/_base.py", line 401, in __get_result
-    raise self._exception
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/tenacity/__init__.py", line 480, in __call__
-    result = fn(*args, **kwargs)
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/_api_client.py", line 1199, in _request_once
-    errors.APIError.raise_for_response(response)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/errors.py", line 121, in raise_for_response
-    cls.raise_error(response.status_code, response_json, response)
-    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/tatsuya.s/Documents/Documents/Programming/ChatBot/KUMC-Agent/app/.venv/lib/python3.13/site-packages/google/genai/errors.py", line 146, in raise_error
-    raise ClientError(status_code, response_json, response)
-google.genai.errors.ClientError: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Please use a valid role: user, model.', 'status': 'INVALID_ARGUMENT'}}
-2026-03-07 01:00:46,264 INFO google_genai.models: AFC is enabled with max remote calls: 10.
-2026-03-07 01:00:47,510 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
-2026-03-07 01:19:16,938 INFO __main__: CLI command started: repl
-2026-03-07 01:19:16,939 INFO __main__: Starting REPL session
-2026-03-07 01:19:24,314 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
-2026-03-07 01:19:24,315 INFO google_genai.models: AFC is enabled with max remote calls: 10.
-2026-03-07 01:19:25,593 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
-2026-03-07 01:19:25,595 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling raw output: {
+2026-03-08 23:29:18,460 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
+2026-03-08 23:29:18,461 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:29:20,537 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-08 23:29:20,539 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling raw output: {
+  "target_model": "no_rag",
+  "material_names": [],
+  "idea_generation": false,
+  "include_capabilities_info": false,
+  "recency_mode": "off",
+  "use_additional_memory": true,
+  "needs_additional_query": false,
+  "additional_queries": []
+}
+2026-03-08 23:29:20,539 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling parsed decision: FunctionRoutingDecision(target_model='no_rag', material_names=[], idea_generation=False, include_capabilities_info=False, recency_mode='off', use_additional_memory=True, needs_additional_query=False, additional_queries=[])
+2026-03-08 23:29:20,568 INFO kumc_agent.infra.llm.gemini_thinking: Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-08 23:29:20,568 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:29:21,832 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-08 23:29:35,210 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
+2026-03-08 23:29:35,211 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:29:36,516 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-08 23:29:36,518 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling raw output: {
+  "target_model": "no_rag",
+  "material_names": [],
+  "idea_generation": false,
+  "include_capabilities_info": false,
+  "recency_mode": "off",
+  "use_additional_memory": true,
+  "needs_additional_query": false,
+  "additional_queries": []
+}
+2026-03-08 23:29:36,518 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling parsed decision: FunctionRoutingDecision(target_model='no_rag', material_names=[], idea_generation=False, include_capabilities_info=False, recency_mode='off', use_additional_memory=True, needs_additional_query=False, additional_queries=[])
+2026-03-08 23:29:36,543 INFO kumc_agent.infra.llm.gemini_thinking: Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-08 23:29:36,543 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:29:37,652 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-08 23:31:55,367 INFO kumc_agent.infra.legacy.pipeline.function_calling: Routing Gemini model gemini-2.5-flash-lite does not support thinking_level. Send request without thinking_config.
+2026-03-08 23:31:55,369 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:31:56,610 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-08 23:31:56,611 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling raw output: {
+  "target_model": "rag",
+  "material_names": [],
+  "idea_generation": true,
+  "include_capabilities_info": false,
+  "recency_mode": "soft",
+  "use_additional_memory": true,
+  "needs_additional_query": false,
+  "additional_queries": []
+}
+2026-03-08 23:31:56,612 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling parsed decision: FunctionRoutingDecision(target_model='rag', material_names=[], idea_generation=True, include_capabilities_info=False, recency_mode='soft', use_additional_memory=True, needs_additional_query=False, additional_queries=[])
+2026-03-08 23:31:57,107 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+2026-03-08 23:31:57,239 INFO kumc_agent.infra.llm.gemini_thinking: Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-08 23:31:57,239 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-08 23:31:59,711 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:17:57,311 INFO discord.client: logging in using static token
+2026-03-09 00:17:59,507 INFO discord.gateway: Shard ID None has connected to Gateway (Session ID: b9341ddea8447c176d00e3e1edb6f463).
+2026-03-09 00:18:01,526 INFO kumc_agent.frontends.discord.app: Logged in as KUMC-Agent#5262
+2026-03-09 00:18:01,527 INFO kumc_agent.infra.vc.manager: VC feature disabled.
+2026-03-09 00:18:01,528 INFO kumc_agent.usecases.warmup.run: Warmup started. trigger=startup
+2026-03-09 00:18:01,528 INFO kumc_agent.usecases.warmup.run: Warmup skipped: embedding (provider='gemini' is not local)
+2026-03-09 00:18:02,046 INFO sentence_transformers.cross_encoder.CrossEncoder: Use pytorch device: mps
+2026-03-09 00:18:02,695 INFO kumc_agent.usecases.warmup.run: Warmup completed: cross_encoder_reranker
+2026-03-09 00:18:02,695 INFO kumc_agent.usecases.warmup.run: Warmup skipped: routing_function_calling (provider='gemini' is not local)
+2026-03-09 00:18:02,695 INFO kumc_agent.usecases.warmup.run: Warmup finished. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:18:02,695 INFO kumc_agent.frontends.discord.app: Warmup completed. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:18:02,695 INFO kumc_agent.frontends.discord.app: Auto index scheduler started. enabled=True time=06:00 weekdays=[0, 1, 2, 3, 4]
+2026-03-09 00:18:02,695 INFO kumc_agent.frontends.discord.app: Periodic warmup scheduler started. interval_minutes=60
+2026-03-09 00:18:11,818 INFO kumc_agent.infra.llm.gemini_thinking: Routing Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-09 00:18:11,819 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-09 00:18:13,575 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:18:13,578 INFO kumc_agent.features.rag.components.routing: Routing raw output: {
   "target_model": "no_rag",
   "material_names": [],
   "idea_generation": false,
@@ -94,6 +76,64 @@ google.genai.errors.ClientError: 400 INVALID_ARGUMENT. {'error': {'code': 400, '
   "needs_additional_query": false,
   "additional_queries": []
 }
-2026-03-07 01:19:25,595 INFO kumc_agent.infra.legacy.pipeline.function_calling: Function-calling parsed decision: FunctionRoutingDecision(target_model='no_rag', material_names=[], idea_generation=False, include_capabilities_info=False, recency_mode='off', use_additional_memory=False, needs_additional_query=False, additional_queries=[])
-2026-03-07 01:19:25,607 INFO google_genai.models: AFC is enabled with max remote calls: 10.
-2026-03-07 01:19:26,933 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:18:13,578 INFO kumc_agent.features.rag.components.routing: Routing parsed decision: RoutingDecision(target_model='no_rag', recency_mode='off', material_names=[], idea_generation=False, include_capabilities_info=False, use_additional_memory=False, needs_additional_query=False, additional_queries=[])
+2026-03-09 00:18:13,606 INFO kumc_agent.infra.llm.gemini_thinking: Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-09 00:18:13,606 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-09 00:18:14,921 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:18:46,104 INFO kumc_agent.infra.llm.gemini_thinking: Routing Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-09 00:18:46,104 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-09 00:18:47,119 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:18:47,120 INFO kumc_agent.features.rag.components.routing: Routing raw output: {
+  "target_model": "rag",
+  "material_names": [],
+  "idea_generation": true,
+  "include_capabilities_info": false,
+  "recency_mode": "soft",
+  "use_additional_memory": false,
+  "needs_additional_query": false,
+  "additional_queries": []
+}
+2026-03-09 00:18:47,121 INFO kumc_agent.features.rag.components.routing: Routing parsed decision: RoutingDecision(target_model='rag', recency_mode='soft', material_names=[], idea_generation=True, include_capabilities_info=False, use_additional_memory=False, needs_additional_query=False, additional_queries=[])
+2026-03-09 00:18:47,644 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents "HTTP/1.1 200 OK"
+2026-03-09 00:18:47,771 INFO kumc_agent.infra.llm.gemini_thinking: Gemini generation Gemini model gemini-2.5-flash-lite does not support thinking_level. Sending request without thinking_config.
+2026-03-09 00:18:47,771 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-03-09 00:18:50,218 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent "HTTP/1.1 200 OK"
+2026-03-09 00:33:11,643 INFO discord.client: logging in using static token
+2026-03-09 00:33:13,822 INFO discord.gateway: Shard ID None has connected to Gateway (Session ID: 9f68dfaacb3a4c3a785a6826f7e485fe).
+2026-03-09 00:33:15,847 INFO kumc_agent.frontends.discord.app: Logged in as KUMC-Agent#5262
+2026-03-09 00:33:15,847 INFO kumc_agent.infra.vc.manager: VC feature disabled.
+2026-03-09 00:33:15,847 INFO kumc_agent.usecases.warmup.run: Warmup started. trigger=startup
+2026-03-09 00:33:15,847 INFO kumc_agent.usecases.warmup.run: Warmup skipped: embedding (provider='gemini' is not local)
+2026-03-09 00:33:16,341 INFO sentence_transformers.cross_encoder.CrossEncoder: Use pytorch device: mps
+2026-03-09 00:33:16,861 INFO kumc_agent.usecases.warmup.run: Warmup completed: cross_encoder_reranker
+2026-03-09 00:33:16,861 INFO kumc_agent.usecases.warmup.run: Warmup skipped: routing_function_calling (provider='gemini' is not local)
+2026-03-09 00:33:16,861 INFO kumc_agent.usecases.warmup.run: Warmup finished. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:33:16,862 INFO kumc_agent.frontends.discord.app: Warmup completed. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:33:16,862 INFO kumc_agent.frontends.discord.app: Auto index scheduler started. enabled=True time=06:00 weekdays=[0, 1, 2, 3, 4]
+2026-03-09 00:33:16,862 INFO kumc_agent.frontends.discord.app: Periodic warmup scheduler started. interval_minutes=60
+2026-03-09 00:33:32,661 INFO discord.client: logging in using static token
+2026-03-09 00:33:34,064 INFO discord.gateway: Shard ID None has connected to Gateway (Session ID: 3753a7dff397958a25fd61a3b5dda885).
+2026-03-09 00:33:36,087 INFO kumc_agent.frontends.discord.app: Logged in as KUMC-Agent#5262
+2026-03-09 00:33:36,088 INFO kumc_agent.infra.vc.manager: VC feature disabled.
+2026-03-09 00:33:36,088 INFO kumc_agent.usecases.warmup.run: Warmup started. trigger=startup
+2026-03-09 00:33:36,088 INFO kumc_agent.usecases.warmup.run: Warmup skipped: embedding (provider='gemini' is not local)
+2026-03-09 00:33:36,522 INFO sentence_transformers.cross_encoder.CrossEncoder: Use pytorch device: mps
+2026-03-09 00:33:36,811 INFO kumc_agent.usecases.warmup.run: Warmup completed: cross_encoder_reranker
+2026-03-09 00:33:36,811 INFO kumc_agent.usecases.warmup.run: Warmup skipped: routing_function_calling (provider='gemini' is not local)
+2026-03-09 00:33:36,811 INFO kumc_agent.usecases.warmup.run: Warmup finished. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:33:36,812 INFO kumc_agent.frontends.discord.app: Warmup completed. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:33:36,812 INFO kumc_agent.frontends.discord.app: Auto index scheduler started. enabled=True time=06:00 weekdays=[0, 1, 2, 3, 4]
+2026-03-09 00:33:36,812 INFO kumc_agent.frontends.discord.app: Periodic warmup scheduler started. interval_minutes=60
+2026-03-09 00:35:35,030 INFO discord.client: logging in using static token
+2026-03-09 00:35:37,566 INFO discord.gateway: Shard ID None has connected to Gateway (Session ID: b08d17a661fddb8ccea10724513428cf).
+2026-03-09 00:35:39,580 INFO kumc_agent.frontends.discord.app: Logged in as KUMC-Agent#5262
+2026-03-09 00:35:39,581 INFO kumc_agent.infra.vc.manager: VC feature disabled.
+2026-03-09 00:35:39,581 INFO kumc_agent.usecases.warmup.run: Warmup started. trigger=startup
+2026-03-09 00:35:39,581 INFO kumc_agent.usecases.warmup.run: Warmup skipped: embedding (provider='gemini' is not local)
+2026-03-09 00:35:40,037 INFO sentence_transformers.cross_encoder.CrossEncoder: Use pytorch device: mps
+2026-03-09 00:35:40,448 INFO kumc_agent.usecases.warmup.run: Warmup completed: cross_encoder_reranker
+2026-03-09 00:35:40,449 INFO kumc_agent.usecases.warmup.run: Warmup skipped: routing_function_calling (provider='gemini' is not local)
+2026-03-09 00:35:40,449 INFO kumc_agent.usecases.warmup.run: Warmup finished. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:35:40,449 INFO kumc_agent.frontends.discord.app: Warmup completed. trigger=startup completed=1 skipped=5 failed=0
+2026-03-09 00:35:40,449 INFO kumc_agent.frontends.discord.app: Auto index scheduler started. enabled=True time=06:00 weekdays=[0, 1, 2, 3, 4]
+2026-03-09 00:35:40,449 INFO kumc_agent.frontends.discord.app: Periodic warmup scheduler started. interval_minutes=60

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
+import logging
 import re
 import threading
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.document import Document
 from kumc_agent.domain.ports.embedders import EmbedderPort
+from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.infra.storage.filesystem import FileSystemStorage
@@ -20,6 +22,8 @@ from kumc_agent.utils.hashing import stable_hash
 KEYWORD_CORPUS_SPARSE = "sparse"
 KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,7 @@ class IndexingService:
         bm25_index: SudachiBM25Retriever,
         raw_dir: Path,
         app_config: RuntimeConfig,
+        summary_llm: LLMPort | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -47,6 +52,7 @@ class IndexingService:
         self._bm25_index = bm25_index
         self._raw_dir = raw_dir
         self._runtime = app_config
+        self._summary_llm = summary_llm
         self._chunks_root = self._runtime.app.data_dir / "chunks"
         self._first_rec_dir = self._chunks_root / "first_rec_chunk"
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
@@ -363,10 +369,12 @@ class IndexingService:
         limit = max(32, target_characters)
         chunks: list[Chunk] = []
         for idx, chunk in enumerate(first_chunks):
-            summary = (chunk.text or "").strip()
+            summary = self._build_summary_text(
+                text=chunk.text or "",
+                target_characters=limit,
+            )
             if not summary:
                 continue
-            summary = summary[:limit]
             metadata = dict(chunk.metadata)
             metadata["chunk_stage"] = "summary"
             metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
@@ -382,6 +390,57 @@ class IndexingService:
             )
         self._write_stage_chunks(self._summary_dir, chunks)
         return chunks
+
+    def _build_summary_text(
+        self,
+        *,
+        text: str,
+        target_characters: int,
+    ) -> str:
+        source_text = (text or "").strip()
+        if not source_text:
+            return ""
+        fallback = source_text[:target_characters]
+        llm_provider = (
+            self._runtime.indexing.chunking.summary_llm_provider or ""
+        ).strip().lower()
+        if llm_provider in {"", "none", "off", "disabled", "false", "0"}:
+            return fallback
+        if self._summary_llm is None:
+            return fallback
+        user_prompt = (
+            f"次の本文を{target_characters}文字以内で要約してください。"
+            "\n箇条書きにせず、重要な固有名詞・数値・日付は残してください。"
+            f"\n\n本文:\n{source_text}"
+        )
+        try:
+            summary = self._summary_llm.generate(
+                system_prompt=(
+                    "You summarize Japanese documents concisely and faithfully."
+                ),
+                user_prompt=user_prompt,
+                temperature=self._runtime.indexing.chunking.summary_temperature,
+                max_output_tokens=(
+                    self._runtime.indexing.chunking.summary_max_output_tokens
+                ),
+                thinking_level=self._runtime.indexing.chunking.summary_thinking_level,
+            )
+        except Exception:
+            logger.exception(
+                "Summary chunk generation failed. Fallback to truncation."
+            )
+            return fallback
+        normalized = (summary or "").strip()
+        if not normalized or self._is_llm_error_text(normalized):
+            return fallback
+        return normalized[:target_characters]
+
+    @staticmethod
+    def _is_llm_error_text(text: str) -> bool:
+        return (
+            "ローカルフォールバック回答" in text
+            or text.endswith("回答生成に失敗しました。")
+        )
 
     def _load_or_build_proposition_chunks(
         self,

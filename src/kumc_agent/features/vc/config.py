@@ -19,6 +19,7 @@ class VCManagerConfig:
     drive_folder_id: str
     google_application_credentials: str
     gemini_api_key: str
+    gemini_requests_per_minute: int
     llama_threads: int
     llama_gpu_layers: int
     vc_feature_enabled: bool
@@ -85,6 +86,7 @@ class VCManagerConfig:
             drive_folder_id=config.integrations.drive.folder_id,
             google_application_credentials=config.integrations.drive.google_application_credentials,
             gemini_api_key=config.integrations.gemini_api_key,
+            gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
             llama_threads=config.providers.llm.threads,
             llama_gpu_layers=config.providers.llm.gpu_layers,
             vc_feature_enabled=bool(config.features.vc and config.vc.feature_enabled),

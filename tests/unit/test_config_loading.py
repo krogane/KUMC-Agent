@@ -67,7 +67,7 @@ class ConfigLoadingTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_rag"
                     no_rag:
                       provider: "gemini"
                       gemini_model: "gemini-x"
@@ -75,7 +75,7 @@ class ConfigLoadingTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_no_rag"
                     refusal:
                       provider: "gemini"
                       gemini_model: "gemini-x"
@@ -83,10 +83,31 @@ class ConfigLoadingTests(unittest.TestCase):
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
-                      prompt_name: "refusal"
+                      prompt_name: "answer_refusal"
                     idea_generation:
-                      prompt_name: "answer_json"
+                      prompt_name: "answer_idea"
                       temperature: 0.0
+                indexing:
+                  chunking:
+                    summary_batch_size: 1
+                    summary_llm_provider: "gemini"
+                    summary_gemini_model: "gemini-summary"
+                    summary_llama_model_path: "summary.gguf"
+                    summary_temperature: 0.1
+                    summary_max_output_tokens: 96
+                    summary_thinking_level: "minimal"
+                ops:
+                  warmup_interval_minutes: 60
+                  index_update_estimate_min_minutes: 30
+                  index_update_estimate_max_minutes: 60
+                  ragas_batch_size: 10
+                  ragas_metrics:
+                    answer_relevancy_enabled: true
+                    faithfulness_enabled: true
+                    context_precision_enabled: true
+                    context_recall_enabled: true
+                  answer_record_log_enabled: true
+                  answer_record_log_path: "logs/answer_records.jsonl"
                 integrations:
                   discord:
                     bot_token: ""
@@ -94,11 +115,15 @@ class ConfigLoadingTests(unittest.TestCase):
                     folder_id: ""
                     google_application_credentials: ""
                     max_files: 0
+                    batch_size: 20
                   crafters_colony:
                     author_url: ""
                     max_pages: 100
                     max_articles: 0
                   gemini_api_key: ""
+                  gemini_requests_per_minute: 60
+                  gemini_summary_requests_per_minute: 8
+                  gemini_ragas_requests_per_minute: 10
                 """
             ).strip()
             + "\n",
@@ -261,7 +286,17 @@ class ConfigLoadingTests(unittest.TestCase):
                 {
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_GEMINI_REQUESTS_PER_MINUTE": "12",
+                    "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE": "7",
+                    "KUMC_GEMINI_RAGAS_REQUESTS_PER_MINUTE": "5",
+                    "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_DRIVE_BATCH_SIZE": "11",
+                    "KUMC_RAGAS_BATCH_SIZE": "4",
+                    "KUMC_RAGAS_METRIC_ANSWER_RELEVANCY_ENABLED": "0",
+                    "KUMC_RAGAS_METRIC_FAITHFULNESS_ENABLED": "1",
+                    "KUMC_RAGAS_METRIC_CONTEXT_PRECISION_ENABLED": "0",
+                    "KUMC_RAGAS_METRIC_CONTEXT_RECALL_ENABLED": "1",
                     "KUMC_RETRIEVAL_TOP_K": "9",
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_SOFT": "0.33",
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_HARD": "0.66",
@@ -287,6 +322,22 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertFalse(config.features.retrieval.sparse_use_normalized_form)
             self.assertFalse(config.features.retrieval.sparse_remove_symbols)
             self.assertEqual(config.integrations.discord.bot_token, "token")
+            self.assertEqual(config.integrations.gemini_requests_per_minute, 12)
+            self.assertEqual(config.integrations.gemini_summary_requests_per_minute, 7)
+            self.assertEqual(config.integrations.gemini_ragas_requests_per_minute, 5)
+            self.assertEqual(config.integrations.drive.batch_size, 11)
+            self.assertEqual(config.indexing.chunking.summary_batch_size, 3)
+            self.assertEqual(config.indexing.chunking.summary_llm_provider, "gemini")
+            self.assertEqual(config.indexing.chunking.summary_gemini_model, "gemini-summary")
+            self.assertEqual(config.indexing.chunking.summary_llama_model_path, "summary.gguf")
+            self.assertEqual(config.indexing.chunking.summary_temperature, 0.1)
+            self.assertEqual(config.indexing.chunking.summary_max_output_tokens, 96)
+            self.assertEqual(config.indexing.chunking.summary_thinking_level, "minimal")
+            self.assertEqual(config.ops.ragas_batch_size, 4)
+            self.assertFalse(config.ops.ragas_metrics.answer_relevancy_enabled)
+            self.assertTrue(config.ops.ragas_metrics.faithfulness_enabled)
+            self.assertFalse(config.ops.ragas_metrics.context_precision_enabled)
+            self.assertTrue(config.ops.ragas_metrics.context_recall_enabled)
 
     def test_unknown_key_in_experiment_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,7 +380,7 @@ class ConfigLoadingTests(unittest.TestCase):
             ):
                 config = load_runtime_config(base_dir=base)
 
-            self.assertEqual(config.rag.generation.rag.prompt_name, "answer_json")
+            self.assertEqual(config.rag.generation.rag.prompt_name, "answer_rag")
             self.assertEqual(
                 config.rag.generation.no_rag.gemini_model,
                 "gemini-no-rag",

@@ -9,6 +9,7 @@ from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from langchain_core.embeddings import Embeddings
+from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
 
 ## コンフィグ ##
 # Embedding Model Settings
@@ -26,6 +27,8 @@ DEFAULT_LLM_PROVIDER: str = "llama" # gemini or llama
 DEFAULT_GENAI_MODEL: str = "gemini-3-flash-preview" # gemini
 DEFAULT_TEMPERATURE: float = 0.0
 DEFAULT_THINKING_LEVEL: str = "minimal"
+DEFAULT_GEMINI_REQUESTS_PER_MINUTE: int = 60
+DEFAULT_GEMINI_SUMMARY_REQUESTS_PER_MINUTE: int = DEFAULT_GEMINI_REQUESTS_PER_MINUTE
 DEFAULT_LLAMA_CTX_SIZE: int = 4096 # llama
 DEFAULT_MAX_OUTPUT_TOKENS: int = 512
 DEFAULT_CHAT_HISTORY_ENABLED: bool = False
@@ -214,6 +217,7 @@ DEFAULT_SUMMERY_LLAMA_CTX_SIZE: int = 2048
 DEFAULT_SUMMERY_MAX_OUTPUT_TOKENS: int = 1024
 DEFAULT_SUMMERY_TEMPERATURE: float = 0.2
 DEFAULT_SUMMERY_MAX_RETRIES: int = 2
+DEFAULT_SUMMERY_BATCH_SIZE: int = 1
 
 def get_llm_chunk_system_prompt() -> str:
     return get_required_prompt_env("PROMPT_LLM_CHUNK_SYSTEM_PROMPT")
@@ -598,6 +602,10 @@ class AppConfig:
     discord_guild_allow_list: tuple[int, ...] = ()
     maintenance_command_author_ids: tuple[int, ...] = ()
     gemini_api_key: str = ""
+    gemini_requests_per_minute: int = DEFAULT_GEMINI_REQUESTS_PER_MINUTE
+    gemini_summary_requests_per_minute: int = (
+        DEFAULT_GEMINI_SUMMARY_REQUESTS_PER_MINUTE
+    )
     drive_folder_id: str = ""
     google_application_credentials: str = ""
     drive_max_files: int = DEFAULT_DRIVE_MAX_FILES
@@ -623,6 +631,7 @@ class AppConfig:
     summery_temperature: float = DEFAULT_SUMMERY_TEMPERATURE
     summery_max_output_tokens: int = DEFAULT_SUMMERY_MAX_OUTPUT_TOKENS
     summery_max_retries: int = DEFAULT_SUMMERY_MAX_RETRIES
+    summery_batch_size: int = DEFAULT_SUMMERY_BATCH_SIZE
     llm_provider: str = DEFAULT_LLM_PROVIDER
     genai_model: str = DEFAULT_GENAI_MODEL
     llama_model_path: str = ""
@@ -892,12 +901,15 @@ class AppConfig:
         summery_temperature: float | None = None,
         summery_max_output_tokens: int | None = None,
         summery_max_retries: int | None = None,
+        summery_batch_size: int | None = None,
         llm_provider: str | None = None,
         genai_model: str | None = None,
         discord_bot_token: str | None = None,
         discord_guild_allow_list: str | None = None,
         maintenance_command_author_ids: str | None = None,
         gemini_api_key: str | None = None,
+        gemini_requests_per_minute: int | None = None,
+        gemini_summary_requests_per_minute: int | None = None,
         drive_folder_id: str | None = None,
         google_application_credentials: str | None = None,
         drive_max_files: int | None = None,
@@ -1446,6 +1458,46 @@ class AppConfig:
             gemini_api_key=gemini_api_key
             if gemini_api_key is not None
             else os.getenv("GEMINI_API_KEY", ""),
+            gemini_requests_per_minute=max(
+                0,
+                gemini_requests_per_minute
+                if gemini_requests_per_minute is not None
+                else int(
+                    os.getenv(
+                        "KUMC_GEMINI_REQUESTS_PER_MINUTE",
+                        os.getenv(
+                            "GEMINI_REQUESTS_PER_MINUTE",
+                            str(DEFAULT_GEMINI_REQUESTS_PER_MINUTE),
+                        ),
+                    )
+                ),
+            ),
+            gemini_summary_requests_per_minute=max(
+                0,
+                gemini_summary_requests_per_minute
+                if gemini_summary_requests_per_minute is not None
+                else (
+                    gemini_requests_per_minute
+                    if gemini_requests_per_minute is not None
+                    else int(
+                        os.getenv(
+                            "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE",
+                            os.getenv(
+                                "GEMINI_SUMMARY_REQUESTS_PER_MINUTE",
+                                os.getenv(
+                                    "KUMC_GEMINI_REQUESTS_PER_MINUTE",
+                                    os.getenv(
+                                        "GEMINI_REQUESTS_PER_MINUTE",
+                                        str(
+                                            DEFAULT_GEMINI_SUMMARY_REQUESTS_PER_MINUTE
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        )
+                    )
+                ),
+            ),
             drive_folder_id=drive_folder_id
             if drive_folder_id is not None
             else os.getenv("FOLDER_ID", ""),
@@ -1574,6 +1626,23 @@ class AppConfig:
                     os.getenv(
                         "SUMMERY_MAX_RETRIES",
                         str(DEFAULT_SUMMERY_MAX_RETRIES),
+                    )
+                ),
+            ),
+            summery_batch_size=max(
+                1,
+                summery_batch_size
+                if summery_batch_size is not None
+                else int(
+                    os.getenv(
+                        "KUMC_INDEXING_SUMMARY_BATCH_SIZE",
+                        os.getenv(
+                            "KUMC_SUMMERY_BATCH_SIZE",
+                            os.getenv(
+                                "SUMMERY_BATCH_SIZE",
+                                str(DEFAULT_SUMMERY_BATCH_SIZE),
+                            ),
+                        ),
                     )
                 ),
             ),
@@ -2535,7 +2604,13 @@ class SentenceTransformerEmbeddings(Embeddings):
 class GeminiEmbeddings(Embeddings):
     _BATCH_SIZE = 96
 
-    def __init__(self, *, model_name: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        api_key: str | None = None,
+        requests_per_minute: int | None = None,
+    ) -> None:
         self._model_name = (model_name or "").strip()
         if not self._model_name:
             raise RuntimeError("Gemini embedding model name is required.")
@@ -2545,6 +2620,20 @@ class GeminiEmbeddings(Embeddings):
             raise RuntimeError("GEMINI_API_KEY is not set. Please set it in .env")
 
         self._api_key = resolved_api_key
+        self._requests_per_minute = max(
+            0,
+            requests_per_minute
+            if requests_per_minute is not None
+            else int(
+                os.getenv(
+                    "KUMC_GEMINI_REQUESTS_PER_MINUTE",
+                    os.getenv(
+                        "GEMINI_REQUESTS_PER_MINUTE",
+                        str(DEFAULT_GEMINI_REQUESTS_PER_MINUTE),
+                    ),
+                )
+            ),
+        )
         self._client = _gemini_embedding_client(self._api_key)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -2554,6 +2643,9 @@ class GeminiEmbeddings(Embeddings):
         vectors: list[list[float]] = []
         for i in range(0, len(normalized_texts), self._BATCH_SIZE):
             batch = normalized_texts[i : i + self._BATCH_SIZE]
+            wait_for_gemini_rate_limit(
+                max_requests_per_minute=self._requests_per_minute
+            )
             response = self._client.models.embed_content(
                 model=self._model_name,
                 contents=batch,
@@ -2568,6 +2660,9 @@ class GeminiEmbeddings(Embeddings):
         return vectors
 
     def embed_query(self, text: str) -> list[float]:
+        wait_for_gemini_rate_limit(
+            max_requests_per_minute=self._requests_per_minute
+        )
         response = self._client.models.embed_content(
             model=self._model_name,
             contents=[_normalize_embedding_text(text)],

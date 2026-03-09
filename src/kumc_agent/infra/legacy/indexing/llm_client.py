@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
 from kumc_agent.infra.legacy.pipeline.llama_lock import LLAMA_LOCK, reset_llama_cache
 
 
@@ -21,6 +22,8 @@ def generate_text(
     llama_threads: int,
     llama_gpu_layers: int,
     response_mime_type: str | None = None,
+    gemini_requests_per_minute: int = 60,
+    gemini_rate_limiter_name: str = "",
 ) -> str:
     provider = (provider or "").lower()
     if provider == "gemini":
@@ -33,6 +36,8 @@ def generate_text(
             max_output_tokens=max_output_tokens,
             thinking_level=thinking_level,
             response_mime_type=response_mime_type,
+            requests_per_minute=gemini_requests_per_minute,
+            limiter_name=gemini_rate_limiter_name,
         )
     if provider == "llama":
         return _generate_with_llama(
@@ -60,6 +65,8 @@ def _generate_with_gemini(
     max_output_tokens: int,
     thinking_level: str,
     response_mime_type: str | None,
+    requests_per_minute: int,
+    limiter_name: str,
 ) -> str:
     try:
         from google import genai
@@ -77,6 +84,10 @@ def _generate_with_gemini(
     if response_mime_type:
         config_kwargs["response_mime_type"] = response_mime_type
 
+    wait_for_gemini_rate_limit(
+        max_requests_per_minute=requests_per_minute,
+        limiter_name=limiter_name,
+    )
     response = client.models.generate_content(
         model=model,
         contents=[

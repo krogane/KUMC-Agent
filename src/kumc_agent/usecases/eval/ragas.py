@@ -6,6 +6,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kumc_agent.infra.llm.gemini_rate_limit import (
+    ragas_rate_limiter_name,
+    wait_for_gemini_rate_limit,
+)
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase, ChatRequest
 
 logger = logging.getLogger(__name__)
@@ -16,6 +20,7 @@ class EvaluateRagasRequest:
     eval_file: Path
     limit: int | None = None
     result_path: Path | None = None
+    ragas_batch_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -27,8 +32,47 @@ class RagasResult:
 
 
 class EvaluateRagasUsecase:
-    def __init__(self, *, chat_usecase: ChatAnswerUsecase) -> None:
+    def __init__(
+        self,
+        *,
+        chat_usecase: ChatAnswerUsecase,
+        gemini_api_key: str = "",
+        ragas_gemini_model: str = "",
+        ragas_gemini_requests_per_minute: int = 0,
+        default_ragas_batch_size: int = 0,
+        eval_answer_relevancy_enabled: bool | None = None,
+        eval_faithfulness_enabled: bool | None = None,
+        eval_context_precision_enabled: bool | None = None,
+        eval_context_recall_enabled: bool | None = None,
+    ) -> None:
         self._chat_usecase = chat_usecase
+        self._gemini_api_key = str(gemini_api_key or "").strip()
+        self._ragas_gemini_model = str(ragas_gemini_model or "").strip()
+        self._ragas_gemini_requests_per_minute = max(
+            0,
+            int(ragas_gemini_requests_per_minute),
+        )
+        self._default_ragas_batch_size = max(0, int(default_ragas_batch_size))
+        self._eval_answer_relevancy_enabled = _resolve_metric_toggle(
+            env_name="EVAL_ANSWER_RELEVANCY_ENABLED",
+            config_value=eval_answer_relevancy_enabled,
+            default=True,
+        )
+        self._eval_faithfulness_enabled = _resolve_metric_toggle(
+            env_name="EVAL_FAITHFULNESS_ENABLED",
+            config_value=eval_faithfulness_enabled,
+            default=True,
+        )
+        self._eval_context_precision_enabled = _resolve_metric_toggle(
+            env_name="EVAL_CONTEXT_PRECISION_ENABLED",
+            config_value=eval_context_precision_enabled,
+            default=True,
+        )
+        self._eval_context_recall_enabled = _resolve_metric_toggle(
+            env_name="EVAL_CONTEXT_RECALL_ENABLED",
+            config_value=eval_context_recall_enabled,
+            default=True,
+        )
 
     def execute(self, request: EvaluateRagasRequest) -> RagasResult:
         items = self._load_items(request.eval_file)
@@ -68,7 +112,10 @@ class EvaluateRagasUsecase:
         total = len(records)
         exact_match = (exact_count / total) if total else 0.0
         token_overlap = (sum(overlap_scores) / total) if total else 0.0
-        ragas_metrics = self._run_ragas(records)
+        ragas_metrics = self._run_ragas(
+            records,
+            ragas_batch_size=self._resolve_batch_size(request.ragas_batch_size),
+        )
 
         result = RagasResult(
             total=total,
@@ -142,7 +189,20 @@ class EvaluateRagasUsecase:
                 contexts.append(text)
         return contexts
 
-    def _run_ragas(self, records: list[dict[str, object]]) -> dict[str, float]:
+    def _resolve_batch_size(self, request_batch_size: int | None) -> int | None:
+        if request_batch_size is not None:
+            size = int(request_batch_size)
+            return size if size > 0 else None
+        if self._default_ragas_batch_size > 0:
+            return self._default_ragas_batch_size
+        return None
+
+    def _run_ragas(
+        self,
+        records: list[dict[str, object]],
+        *,
+        ragas_batch_size: int | None,
+    ) -> dict[str, float]:
         if not records:
             return {}
         try:
@@ -164,22 +224,22 @@ class EvaluateRagasUsecase:
             (
                 "answer_relevancy",
                 answer_relevancy,
-                _env_bool("EVAL_ANSWER_RELEVANCY_ENABLED", True),
+                self._eval_answer_relevancy_enabled,
             ),
             (
                 "faithfulness",
                 faithfulness,
-                _env_bool("EVAL_FAITHFULNESS_ENABLED", True),
+                self._eval_faithfulness_enabled,
             ),
             (
                 "context_precision",
                 context_precision,
-                _env_bool("EVAL_CONTEXT_PRECISION_ENABLED", True),
+                self._eval_context_precision_enabled,
             ),
             (
                 "context_recall",
                 context_recall,
-                _env_bool("EVAL_CONTEXT_RECALL_ENABLED", True),
+                self._eval_context_recall_enabled,
             ),
         ]
         metrics = [metric for _, metric, enabled in metric_options if enabled]
@@ -188,9 +248,105 @@ class EvaluateRagasUsecase:
             raise ValueError("At least one RAGAS metric must be enabled.")
         logger.info("Enabled RAGAS metrics (current): %s", ", ".join(metric_names))
 
-        dataset = Dataset.from_list(records)
-        result = evaluate(dataset, metrics=metrics)
-        return self._extract_summary_metrics(result)
+        eval_kwargs: dict[str, object] = {"metrics": metrics}
+        llm = self._build_ragas_llm()
+        if llm is not None:
+            eval_kwargs["llm"] = llm
+
+        batches = _split_batches(records, batch_size=ragas_batch_size)
+        if len(batches) > 1:
+            logger.info(
+                "Running RAGAS evaluation in %d batches (batch_size=%d).",
+                len(batches),
+                ragas_batch_size,
+            )
+
+        weighted_sums: dict[str, float] = {}
+        weighted_counts: dict[str, int] = {}
+
+        for batch in batches:
+            wait_for_gemini_rate_limit(
+                max_requests_per_minute=self._ragas_gemini_requests_per_minute,
+                limiter_name=ragas_rate_limiter_name(),
+            )
+            dataset = Dataset.from_list(batch)
+            try:
+                result = self._evaluate_ragas(
+                    evaluate=evaluate,
+                    dataset=dataset,
+                    eval_kwargs=eval_kwargs,
+                    metrics=metrics,
+                )
+            except Exception:
+                logger.exception("RAGAS evaluation failed. Skipping ragas metrics.")
+                return {}
+            batch_metrics = self._extract_summary_metrics(result)
+            if not batch_metrics:
+                continue
+            weight = len(batch)
+            for metric_name, metric_value in batch_metrics.items():
+                weighted_sums[metric_name] = (
+                    weighted_sums.get(metric_name, 0.0)
+                    + (metric_value * float(weight))
+                )
+                weighted_counts[metric_name] = weighted_counts.get(metric_name, 0) + weight
+
+        if not weighted_sums:
+            return {}
+
+        return {
+            metric_name: weighted_sums[metric_name] / float(weighted_counts[metric_name])
+            for metric_name in sorted(weighted_sums.keys())
+            if weighted_counts.get(metric_name, 0) > 0
+        }
+
+    @staticmethod
+    def _evaluate_ragas(
+        *,
+        evaluate,
+        dataset: object,
+        eval_kwargs: dict[str, object],
+        metrics: list[object],
+    ) -> object:
+        try:
+            return evaluate(dataset, **eval_kwargs)
+        except TypeError:
+            return evaluate(dataset, metrics=metrics)
+
+    def _build_ragas_llm(self):
+        if not self._gemini_api_key or not self._ragas_gemini_model:
+            return None
+        try:
+            from google import genai
+        except ImportError:
+            logger.info("google-genai is not available. Running ragas without custom LLM.")
+            return None
+
+        try:
+            from ragas.llms import llm_factory
+        except ImportError:
+            logger.info("ragas.llms is not available. Running ragas without custom LLM.")
+            return None
+
+        client = _RateLimitedGeminiClient(
+            genai.Client(api_key=self._gemini_api_key),
+            max_requests_per_minute=self._ragas_gemini_requests_per_minute,
+        )
+        try:
+            return llm_factory(self._ragas_gemini_model, provider="google", client=client)
+        except TypeError:
+            try:
+                return llm_factory(self._ragas_gemini_model, client=client)
+            except Exception:
+                logger.exception(
+                    "Failed to build custom RAGAS LLM with rate-limited Gemini client."
+                )
+                return None
+        except Exception:
+            logger.exception(
+                "Failed to build custom RAGAS LLM with rate-limited Gemini client."
+            )
+            return None
 
     @staticmethod
     def _extract_summary_metrics(result: object) -> dict[str, float]:
@@ -244,8 +400,66 @@ def _coerce_numeric_metrics(values: dict[str, object]) -> dict[str, float]:
     return normalized
 
 
+def _split_batches(
+    records: list[dict[str, object]],
+    *,
+    batch_size: int | None,
+) -> list[list[dict[str, object]]]:
+    size = int(batch_size or 0)
+    if size <= 0:
+        return [records]
+    return [records[i : i + size] for i in range(0, len(records), size)]
+
+
+def _resolve_metric_toggle(
+    *,
+    env_name: str,
+    config_value: bool | None,
+    default: bool,
+) -> bool:
+    if config_value is not None:
+        return bool(config_value)
+    return _env_bool(env_name, default)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class _RateLimitedGeminiClient:
+    def __init__(self, client: object, *, max_requests_per_minute: int) -> None:
+        self._client = client
+        models = getattr(client, "models", None)
+        if models is None:
+            self.models = None
+        else:
+            self.models = _RateLimitedGeminiModelsProxy(
+                models,
+                max_requests_per_minute=max_requests_per_minute,
+            )
+
+    def __getattr__(self, item: str):
+        return getattr(self._client, item)
+
+
+class _RateLimitedGeminiModelsProxy:
+    def __init__(self, models: object, *, max_requests_per_minute: int) -> None:
+        self._models = models
+        self._max_requests_per_minute = max(0, int(max_requests_per_minute))
+
+    def __getattr__(self, item: str):
+        target = getattr(self._models, item)
+        if not callable(target):
+            return target
+
+        def _wrapped(*args, **kwargs):
+            wait_for_gemini_rate_limit(
+                max_requests_per_minute=self._max_requests_per_minute,
+                limiter_name=ragas_rate_limiter_name(),
+            )
+            return target(*args, **kwargs)
+
+        return _wrapped

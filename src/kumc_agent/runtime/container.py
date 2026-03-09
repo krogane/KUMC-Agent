@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from kumc_agent.config.load import load_runtime_config
+from kumc_agent.config.schema import RuntimeConfig
+from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.infra.embeddings.gemini import GeminiEmbedder
 from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.llm.gemini import GeminiLLM
@@ -11,6 +13,7 @@ from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
+from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
@@ -38,6 +41,7 @@ from kumc_agent.usecases.indexing.build import BuildIndexUsecase
 from kumc_agent.usecases.indexing.update import UpdateIndexUsecase
 from kumc_agent.usecases.summarization.run import SummarizationUsecase
 from kumc_agent.usecases.vc.run import VCUsecase
+from kumc_agent.usecases.warmup.run import WarmupUsecase
 from kumc_agent.utils.migrate_summary_dir import migrate_summery_chunk_dir
 
 
@@ -47,6 +51,7 @@ def _build_llm_for_route(
     gemini_model: str,
     llama_model_path: str,
     gemini_api_key: str,
+    gemini_requests_per_minute: int,
 ):
     normalized = (provider or "").strip().lower()
     if normalized in {"llama", "llama_cpp"}:
@@ -54,6 +59,29 @@ def _build_llm_for_route(
     return GeminiLLM(
         api_key=gemini_api_key,
         model=gemini_model,
+        requests_per_minute=gemini_requests_per_minute,
+    )
+
+
+def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
+    chunking = config.indexing.chunking
+    provider = (chunking.summary_llm_provider or "").strip().lower()
+    if provider in {"", "none", "off", "disabled", "false", "0"}:
+        return None
+    if provider in {"llama", "llama_cpp"}:
+        if not chunking.summary_llama_model_path:
+            return None
+        return LlamaCppLLM(model_path=chunking.summary_llama_model_path)
+    if provider == "gemini":
+        if not config.integrations.gemini_api_key:
+            return None
+        return GeminiLLM(
+            api_key=config.integrations.gemini_api_key,
+            model=chunking.summary_gemini_model,
+            requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
+        )
+    raise ValueError(
+        "Unsupported indexing.chunking.summary_llm_provider. Use 'none', 'gemini', or 'llama'."
     )
 
 
@@ -66,6 +94,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             api_key=config.integrations.gemini_api_key,
             model_name=config.providers.embeddings.model,
             dimensions=config.providers.embeddings.dimensions,
+            requests_per_minute=config.integrations.gemini_requests_per_minute,
         )
     else:
         embedder = LocalEmbedder(
@@ -78,19 +107,23 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         gemini_model=config.rag.generation.rag.gemini_model,
         llama_model_path=config.rag.generation.rag.llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
     no_rag_llm = _build_llm_for_route(
         provider=config.rag.generation.no_rag.provider,
         gemini_model=config.rag.generation.no_rag.gemini_model,
         llama_model_path=config.rag.generation.no_rag.llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
     refusal_llm = _build_llm_for_route(
         provider=config.rag.generation.refusal.provider,
         gemini_model=config.rag.generation.refusal.gemini_model,
         llama_model_path=config.rag.generation.refusal.llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
+    summary_chunk_llm = _build_summary_chunk_llm(config)
 
     storage = FileSystemStorage(
         chunks_path=config.app.chunks_path,
@@ -125,6 +158,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         refusal_llm=refusal_llm,
         prompts=prompt_repo,
         source_max_count=config.app.source_max_count,
+        raw_dir=config.app.raw_dir,
         prompt_texts=RagPromptTextSettings(
             empty_context=config.rag.prompt_texts.empty_context,
             empty_history=config.rag.prompt_texts.empty_history,
@@ -165,6 +199,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         llm_gpu_layers=config.providers.llm.gpu_layers,
         llm_ctx_size=4096,
         gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
 
     rag_service = RagService(
@@ -204,6 +239,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 prompt_name=config.rag.generation.idea_generation.prompt_name,
                 temperature=config.rag.generation.idea_generation.temperature,
             ),
+            parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
+            parent_chunk_cap=config.features.retrieval.parent_chunk_cap,
+            answer_json_max_retries=config.rag.answer_json_max_retries,
             history_enabled=config.rag.history.enabled,
             history_max_turns=config.rag.history.max_turns,
             prompt_default_turns=config.rag.history.prompt_default_turns,
@@ -223,6 +261,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         bm25_index=sparse_index,
         raw_dir=config.app.raw_dir,
         app_config=config,
+        summary_llm=summary_chunk_llm,
     )
 
     drive_loader = (
@@ -231,6 +270,8 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             credentials_path=config.integrations.drive.google_application_credentials,
             raw_dir=config.app.raw_dir,
             max_files=config.integrations.drive.max_files,
+            batch_size=config.integrations.drive.batch_size,
+            pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
         )
         if config.features.sources.drive
         else None
@@ -259,6 +300,11 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         if config.features.sources.crafters_colony
         else None
     )
+    x_loader = (
+        XPostsLoader(raw_dir=config.app.raw_dir)
+        if config.features.sources.x
+        else None
+    )
 
     build_index_usecase = BuildIndexUsecase(
         indexing_service=indexing_service,
@@ -266,22 +312,43 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         discord_loader=discord_loader,
         hatenablog_loader=hatena_loader,
         crafters_colony_loader=crafters_loader,
+        x_loader=x_loader,
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
     chat_route_usecase = ChatRouteUsecase(router=router)
+    warmup_usecase = WarmupUsecase(
+        config=config,
+        embedder=embedder,
+        reranker=reranker,
+        route_usecase=chat_route_usecase,
+        rag_llm=rag_llm,
+        no_rag_llm=no_rag_llm,
+        refusal_llm=refusal_llm,
+    )
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
 
     return RuntimeContext(
         config=config,
         chat_answer=chat_answer_usecase,
         chat_route=chat_route_usecase,
+        warmup=warmup_usecase,
         build_index=build_index_usecase,
         update_index=UpdateIndexUsecase(
             build_usecase=build_index_usecase,
             indexing_service=indexing_service,
         ),
-        eval_ragas=EvaluateRagasUsecase(chat_usecase=chat_answer_usecase),
+        eval_ragas=EvaluateRagasUsecase(
+            chat_usecase=chat_answer_usecase,
+            gemini_api_key=config.integrations.gemini_api_key,
+            ragas_gemini_model=config.providers.llm.gemini_model,
+            ragas_gemini_requests_per_minute=config.integrations.gemini_ragas_requests_per_minute,
+            default_ragas_batch_size=config.ops.ragas_batch_size,
+            eval_answer_relevancy_enabled=config.ops.ragas_metrics.answer_relevancy_enabled,
+            eval_faithfulness_enabled=config.ops.ragas_metrics.faithfulness_enabled,
+            eval_context_precision_enabled=config.ops.ragas_metrics.context_precision_enabled,
+            eval_context_recall_enabled=config.ops.ragas_metrics.context_recall_enabled,
+        ),
         summarize=SummarizationUsecase(
             service=SummarizationService(
                 config=SummarizationConfig(

@@ -96,6 +96,8 @@ class RetrievalSection:
     recency_weight_soft: float
     recency_weight_hard: float
     recency_half_life_days: float
+    parent_doc_enabled: bool
+    parent_chunk_cap: int
     sudachi_mode: str
     sparse_bm25_k1: float
     sparse_bm25_b: float
@@ -109,6 +111,7 @@ class SourcesSection:
     discord: bool
     hatenablog: bool
     crafters_colony: bool
+    x: bool
 
 
 @dataclass(frozen=True)
@@ -205,6 +208,7 @@ class RagSection:
     generation: RagGenerationSection
     prompt_texts: RagPromptTextSection
     fast_model_notice: str
+    answer_json_max_retries: int
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,13 @@ class IndexingChunkingSection:
     second_recursive_chunk_size: int
     second_recursive_chunk_overlap: int
     summary_characters: int
+    summary_batch_size: int
+    summary_llm_provider: str
+    summary_gemini_model: str
+    summary_llama_model_path: str
+    summary_temperature: float
+    summary_max_output_tokens: int
+    summary_thinking_level: str
 
 
 @dataclass(frozen=True)
@@ -250,10 +261,20 @@ class IndexingSection:
 
 
 @dataclass(frozen=True)
+class OpsRagasMetricsSection:
+    answer_relevancy_enabled: bool
+    faithfulness_enabled: bool
+    context_precision_enabled: bool
+    context_recall_enabled: bool
+
+
+@dataclass(frozen=True)
 class OpsSection:
     warmup_interval_minutes: int
     index_update_estimate_min_minutes: int
     index_update_estimate_max_minutes: int
+    ragas_batch_size: int
+    ragas_metrics: OpsRagasMetricsSection
     answer_record_log_enabled: bool
     answer_record_log_path: Path
 
@@ -268,6 +289,8 @@ class IntegrationDriveSection:
     folder_id: str
     google_application_credentials: str
     max_files: int
+    batch_size: int
+    pdf_ocr_model_path: str
 
 
 @dataclass(frozen=True)
@@ -283,6 +306,9 @@ class IntegrationSection:
     drive: IntegrationDriveSection
     crafters_colony: IntegrationCraftersColonySection
     gemini_api_key: str
+    gemini_requests_per_minute: int
+    gemini_summary_requests_per_minute: int
+    gemini_ragas_requests_per_minute: int
 
 
 @dataclass(frozen=True)

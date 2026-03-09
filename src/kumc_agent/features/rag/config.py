@@ -58,6 +58,9 @@ class RagConfig:
     no_rag_generation: RagGenerationSettings
     refusal_generation: RagGenerationSettings
     idea_generation: RagIdeaGenerationSettings
+    parent_doc_enabled: bool = True
+    parent_chunk_cap: int = 2
+    answer_json_max_retries: int = 2
     history_enabled: bool = False
     history_max_turns: int = 5
     prompt_default_turns: int = 3

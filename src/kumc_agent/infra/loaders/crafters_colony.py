@@ -20,13 +20,13 @@ class CraftersColonyLoader:
     def load(self) -> int:
         if not self._author_url:
             return 0
-        from kumc_agent.infra.legacy.indexing.crafters_colony_loader import (
+        from kumc_agent.infra.loaders.crafters_colony_impl import (
             download_crafters_colony_articles,
         )
 
         output_dir = self._raw_dir / "crafters_colony"
         output_dir.mkdir(parents=True, exist_ok=True)
-        download_crafters_colony_articles(
+        downloaded = download_crafters_colony_articles(
             author_url=self._author_url,
             output_dir=output_dir,
             max_pages=self._max_pages,
@@ -35,4 +35,4 @@ class CraftersColonyLoader:
             update_existing=True,
             sync_deleted=True,
         )
-        return 1
+        return int(downloaded)

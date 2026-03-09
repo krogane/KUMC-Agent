@@ -75,13 +75,12 @@ class RetrievalComponent:
             top_k=max(0, sparse_top_k),
         )
         scored = self._merge_scores(dense_hits=dense_hits, sparse_hits=sparse_hits)
-        scored = self._apply_recency(
-            scored,
-            mode=recency_mode,
-            recency_weight_soft=recency_weight_soft,
-            recency_weight_hard=recency_weight_hard,
-            recency_half_life_days=recency_half_life_days,
-        )
+        _ = (
+            recency_mode,
+            recency_weight_soft,
+            recency_weight_hard,
+            recency_half_life_days,
+        )  # Recency is applied in RagService during rerank scoring.
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         _ = mmr_lambda  # Applied explicitly in RagService after rerank stage.
         return [item.chunk for item in ranked]
@@ -188,8 +187,9 @@ class RetrievalComponent:
             doc_norm = _normalize_matrix(doc_vectors)
 
             sim_to_query = doc_norm @ query_norm
-            selected: list[int] = [int(np.argmax(sim_to_query))]
-            remaining = [idx for idx in range(len(chunks)) if idx not in selected]
+            fixed = min(3, len(chunks))
+            selected: list[int] = list(range(fixed))
+            remaining = list(range(fixed, len(chunks)))
 
             while remaining:
                 selected_vecs = doc_norm[selected]

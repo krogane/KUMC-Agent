@@ -15,9 +15,10 @@ from kumc_agent.features.rag.config import RagPromptTextSettings
 
 
 class _RecordingLLM:
-    def __init__(self) -> None:
+    def __init__(self, response_text: str = '{"answer":"ok","sources":[]}') -> None:
         self.last_system_prompt = ""
         self.last_user_prompt = ""
+        self.response_text = response_text
 
     def generate(
         self,
@@ -30,7 +31,7 @@ class _RecordingLLM:
     ) -> str:
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
-        return '{"answer":"ok","sources":[]}'
+        return self.response_text
 
 
 class _DictPromptRepo:
@@ -49,8 +50,9 @@ class GenerationComponentTests(unittest.TestCase):
         prompt_payload: dict[str, str],
         *,
         prompt_texts: RagPromptTextSettings | None = None,
+        llm_response: str = '{"answer":"ok","sources":[]}',
     ) -> tuple[GenerationComponent, _RecordingLLM]:
-        llm = _RecordingLLM()
+        llm = _RecordingLLM(response_text=llm_response)
         component = GenerationComponent(
             llm=llm,
             no_rag_llm=llm,
@@ -64,7 +66,7 @@ class GenerationComponentTests(unittest.TestCase):
     def test_rag_prompt_includes_circle_basic_info(self) -> None:
         component, llm = self._component(
             {
-                "answer_json": '{"answer":"...", "sources":[1]}',
+                "answer_rag": '{"answer":"...", "sources":[1]}',
                 "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
                 "circle_basic_info": "KUMCはMinecraftサークルです。",
             }
@@ -91,7 +93,7 @@ class GenerationComponentTests(unittest.TestCase):
     def test_no_rag_prompt_does_not_include_circle_basic_info(self) -> None:
         component, llm = self._component(
             {
-                "answer_json": '{"answer":"...", "sources":[1]}',
+                "answer_no_rag": '{"answer":"...", "sources":[1]}',
                 "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
                 "circle_basic_info": "KUMCはMinecraftサークルです。",
             }
@@ -109,7 +111,7 @@ class GenerationComponentTests(unittest.TestCase):
     def test_history_prompt_texts_are_configurable(self) -> None:
         component, llm = self._component(
             {
-                "answer_json": '{"answer":"...", "sources":[1]}',
+                "answer_rag": '{"answer":"...", "sources":[1]}',
                 "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
             },
             prompt_texts=RagPromptTextSettings(
@@ -153,6 +155,128 @@ class GenerationComponentTests(unittest.TestCase):
             thinking_level="minimal",
         )
         self.assertIn("CHAT\nU> 質問\nA> 回答\nSRC: docs/guide.md", llm.last_user_prompt)
+
+    def test_no_rag_parses_code_fenced_json(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_no_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='```json\n{"answer":"フェンス回答","sources":[]}\n```',
+        )
+        answer = component.generate_no_rag(
+            query="質問",
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            thinking_level="minimal",
+        )
+        self.assertEqual(answer.text, "フェンス回答")
+
+    def test_no_rag_parses_json_embedded_in_text(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_no_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='補足です。\n{"answer":"埋め込み回答","sources":[]}\n以上です。',
+        )
+        answer = component.generate_no_rag(
+            query="質問",
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            thinking_level="minimal",
+        )
+        self.assertEqual(answer.text, "埋め込み回答")
+
+    def test_no_rag_returns_raw_text_when_json_is_invalid(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_no_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='{"answer":"壊れたJSON",}',
+        )
+        answer = component.generate_no_rag(
+            query="質問",
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            thinking_level="minimal",
+        )
+        self.assertEqual(answer.text, '{"answer":"壊れたJSON",}')
+
+    def test_rag_parses_hyphenated_source_selection(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='{"answer":"参照あり","sources":["1-2"]}',
+        )
+        answer = component.generate_rag_answer(
+            query="質問",
+            chunks=[
+                Chunk(
+                    id="1",
+                    document_id="doc-1",
+                    text="本文",
+                    index=0,
+                    metadata={"source_type": "docs", "drive_file_id": "file-123"},
+                )
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            thinking_level="minimal",
+            append_sources_to_response=False,
+        )
+        self.assertEqual(answer.text, "参照あり")
+        self.assertEqual(len(answer.sources), 1)
+        self.assertEqual(answer.sources[0].label, "https://docs.google.com/document/d/file-123/")
+
+    def test_discord_context_annotation_keeps_date_line_plain(self) -> None:
+        component, llm = self._component(
+            {
+                "answer_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            }
+        )
+        component.generate_rag_answer(
+            query="質問",
+            chunks=[
+                Chunk(
+                    id="1",
+                    document_id="doc-1",
+                    text="2025/01/01\nalice: hello",
+                    index=0,
+                    metadata={
+                        "source_type": "messages",
+                        "guild_name": "KUMC",
+                        "category_name": "雑談",
+                        "channel_name": "general",
+                        "first_message_date": "2025-01-01",
+                    },
+                )
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            thinking_level="minimal",
+            append_sources_to_response=False,
+        )
+        self.assertIn(
+            "channel_name: KUMC / 雑談 / general\nfirst_message_date: 2025-01-01",
+            llm.last_user_prompt,
+        )
+        self.assertIn("2025/01/01\n[1-1] alice: hello", llm.last_user_prompt)
+        self.assertNotIn("[1-1] 2025/01/01", llm.last_user_prompt)
 
 
 if __name__ == "__main__":

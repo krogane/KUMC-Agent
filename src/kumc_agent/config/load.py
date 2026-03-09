@@ -31,6 +31,7 @@ from kumc_agent.config.schema import (
     IntegrationSection,
     LLMSection,
     ModelSection,
+    OpsRagasMetricsSection,
     OpsSection,
     ProviderSection,
     RagHistorySection,
@@ -334,6 +335,7 @@ def _to_runtime_config(
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
+    ops_ragas_metrics = ops.get("ragas_metrics", {})
 
     special_channel_names_raw = rag_history.get("special_channel_names", ["kumc-agent"])
     if isinstance(special_channel_names_raw, str):
@@ -404,23 +406,23 @@ def _to_runtime_config(
 
     rag_generation_profile = _build_generation_profile(
         rag_generation_rag,
-        default_prompt_name="answer_json",
+        default_prompt_name="answer_rag",
     )
     no_rag_generation_profile = _build_generation_profile(
         rag_generation_no_rag,
-        default_prompt_name="answer_json",
+        default_prompt_name="answer_no_rag",
         fallback=rag_generation_profile,
     )
     refusal_generation_profile = _build_generation_profile(
         rag_generation_refusal,
-        default_prompt_name="refusal",
+        default_prompt_name="answer_refusal",
         fallback=no_rag_generation_profile,
     )
     idea_generation_profile = RagIdeaGenerationSection(
         prompt_name=str(
             rag_generation_idea.get(
                 "prompt_name",
-                rag_generation_profile.prompt_name,
+                "answer_idea",
             )
         ),
         temperature=float(
@@ -504,6 +506,7 @@ def _to_runtime_config(
                 discord=bool(features["sources"]["discord"]),
                 hatenablog=bool(features["sources"]["hatenablog"]),
                 crafters_colony=bool(features["sources"]["crafters_colony"]),
+                x=bool(features["sources"].get("x", True)),
             ),
             retrieval=RetrievalSection(
                 top_k=int(features["retrieval"]["top_k"]),
@@ -522,6 +525,12 @@ def _to_runtime_config(
                 ),
                 recency_half_life_days=float(
                     features["retrieval"].get("recency_half_life_days", 45.0)
+                ),
+                parent_doc_enabled=bool(
+                    features["retrieval"].get("parent_doc_enabled", True)
+                ),
+                parent_chunk_cap=int(
+                    features["retrieval"].get("parent_chunk_cap", 2)
                 ),
                 sudachi_mode=str(features["retrieval"].get("sudachi_mode", "B")),
                 sparse_bm25_k1=float(features["retrieval"].get("sparse_bm25_k1", 1.5)),
@@ -696,6 +705,10 @@ def _to_runtime_config(
                     "※負荷軽減のために軽量モードを使用しました。",
                 )
             ),
+            answer_json_max_retries=max(
+                0,
+                int(rag.get("answer_json_max_retries", 2)),
+            ),
         ),
         indexing=IndexingSection(
             chunking=IndexingChunkingSection(
@@ -712,6 +725,43 @@ def _to_runtime_config(
                     indexing_chunking.get("second_recursive_chunk_overlap", 32)
                 ),
                 summary_characters=int(indexing_chunking.get("summary_characters", 200)),
+                summary_batch_size=max(
+                    1,
+                    int(indexing_chunking.get("summary_batch_size", 1)),
+                ),
+                summary_llm_provider=str(
+                    indexing_chunking.get("summary_llm_provider", "none")
+                ),
+                summary_gemini_model=str(
+                    indexing_chunking.get(
+                        "summary_gemini_model",
+                        providers["llm"]["gemini_model"],
+                    )
+                ),
+                summary_llama_model_path=str(
+                    indexing_chunking.get(
+                        "summary_llama_model_path",
+                        providers["llm"]["llama_model_path"],
+                    )
+                ),
+                summary_temperature=float(
+                    indexing_chunking.get(
+                        "summary_temperature",
+                        providers["llm"]["temperature"],
+                    )
+                ),
+                summary_max_output_tokens=int(
+                    indexing_chunking.get(
+                        "summary_max_output_tokens",
+                        providers["llm"]["max_output_tokens"],
+                    )
+                ),
+                summary_thinking_level=str(
+                    indexing_chunking.get(
+                        "summary_thinking_level",
+                        providers["llm"]["thinking_level"],
+                    )
+                ),
             ),
             stages=IndexingStagesSection(
                 second_recursive_enabled=bool(
@@ -775,6 +825,24 @@ def _to_runtime_config(
             index_update_estimate_max_minutes=int(
                 ops.get("index_update_estimate_max_minutes", 60)
             ),
+            ragas_batch_size=max(
+                0,
+                int(ops.get("ragas_batch_size", 10)),
+            ),
+            ragas_metrics=OpsRagasMetricsSection(
+                answer_relevancy_enabled=bool(
+                    ops_ragas_metrics.get("answer_relevancy_enabled", True)
+                ),
+                faithfulness_enabled=bool(
+                    ops_ragas_metrics.get("faithfulness_enabled", True)
+                ),
+                context_precision_enabled=bool(
+                    ops_ragas_metrics.get("context_precision_enabled", True)
+                ),
+                context_recall_enabled=bool(
+                    ops_ragas_metrics.get("context_recall_enabled", True)
+                ),
+            ),
             answer_record_log_enabled=bool(
                 ops.get("answer_record_log_enabled", True)
             ),
@@ -801,6 +869,16 @@ def _to_runtime_config(
                     )
                 ),
                 max_files=int(integrations.get("drive", {}).get("max_files", 0)),
+                batch_size=max(
+                    1,
+                    int(integrations.get("drive", {}).get("batch_size", 20)),
+                ),
+                pdf_ocr_model_path=str(
+                    integrations.get("drive", {}).get(
+                        "pdf_ocr_model_path",
+                        "model/ocr/tencent/HunyuanOCR",
+                    )
+                ),
             ),
             crafters_colony=IntegrationCraftersColonySection(
                 author_url=str(
@@ -814,6 +892,28 @@ def _to_runtime_config(
                 ),
             ),
             gemini_api_key=str(integrations.get("gemini_api_key", "")),
+            gemini_requests_per_minute=max(
+                0,
+                int(integrations.get("gemini_requests_per_minute", 60)),
+            ),
+            gemini_summary_requests_per_minute=max(
+                0,
+                int(
+                    integrations.get(
+                        "gemini_summary_requests_per_minute",
+                        integrations.get("gemini_requests_per_minute", 60),
+                    )
+                ),
+            ),
+            gemini_ragas_requests_per_minute=max(
+                0,
+                int(
+                    integrations.get(
+                        "gemini_ragas_requests_per_minute",
+                        integrations.get("gemini_requests_per_minute", 60),
+                    )
+                ),
+            ),
         ),
         model=ModelSection(
             root_dir=_resolve_path(

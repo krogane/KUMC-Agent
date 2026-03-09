@@ -9,17 +9,17 @@ class HatenaBlogLoader:
         self._blog_url = blog_url
 
     def load(self) -> int:
-        from kumc_agent.infra.legacy.indexing.hatenablog_loader import (
+        from kumc_agent.infra.loaders.hatenablog_impl import (
             download_hatenablog_articles,
         )
 
         output_dir = self._raw_dir / "hatenablog"
         output_dir.mkdir(parents=True, exist_ok=True)
-        download_hatenablog_articles(
+        downloaded = download_hatenablog_articles(
             blog_url=self._blog_url,
             output_dir=output_dir,
             skip_existing=False,
             update_existing=True,
             sync_deleted=True,
         )
-        return 1
+        return int(downloaded)

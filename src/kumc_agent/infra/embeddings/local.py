@@ -95,22 +95,14 @@ def _load_sentence_transformer(model_name: str):
             local_files_only=True,
             trust_remote_code=False,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Local model was not found locally (%s). Trying remote fetch.",
+            "SentenceTransformer model load failed in local-only mode (%s): %s. "
+            "Falling back to hashed embeddings.",
             model_name,
+            exc,
         )
-        try:
-            return SentenceTransformer(
-                model_name,
-                local_files_only=False,
-                trust_remote_code=False,
-            )
-        except Exception:
-            logger.exception(
-                "SentenceTransformer model load failed. Falling back to hashed embeddings."
-            )
-            return None
+        return None
 
 
 def _resize_and_normalize(vectors: np.ndarray, *, dimensions: int) -> np.ndarray:

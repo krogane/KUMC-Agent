@@ -19,7 +19,7 @@ class DiscordLoader:
     def load(self) -> int:
         if not self._bot_token:
             return 0
-        from kumc_agent.infra.legacy.indexing.discord_loader import (
+        from kumc_agent.infra.loaders.discord_impl import (
             download_discord_messages,
         )
 

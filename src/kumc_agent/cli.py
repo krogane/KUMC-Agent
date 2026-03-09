@@ -44,6 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ragas_parser.add_argument("--eval-file", type=Path, default=None)
     ragas_parser.add_argument("--limit", type=int, default=None)
     ragas_parser.add_argument("--result-path", type=Path, default=None)
+    ragas_parser.add_argument("--ragas-batch-size", type=int, default=None)
 
     subparsers.add_parser("discord", help="Run Discord frontend")
     subparsers.add_parser("http", help="Run HTTP stub frontend")
@@ -132,6 +133,7 @@ def main() -> None:
                 eval_file=eval_file,
                 limit=args.limit,
                 result_path=args.result_path,
+                ragas_batch_size=args.ragas_batch_size,
             )
         )
         logger.info(

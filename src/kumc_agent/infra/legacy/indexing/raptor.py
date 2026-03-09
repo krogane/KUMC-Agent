@@ -350,6 +350,11 @@ def _run_summary_llm(*, prompt: str, source_name: str, config: AppConfig) -> str
             response = generate_text(
                 provider=config.raptor_summery_provider,
                 api_key=config.gemini_api_key,
+                gemini_requests_per_minute=getattr(
+                    config,
+                    "gemini_requests_per_minute",
+                    60,
+                ),
                 prompt=prompt,
                 model=_select_model_for_provider(
                     provider=config.raptor_summery_provider,

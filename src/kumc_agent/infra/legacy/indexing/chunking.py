@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import Sequence
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from kumc_agent.infra.llm.gemini_rate_limit import index_summary_rate_limiter_name
 from kumc_agent.infra.legacy.config import (
     AppConfig,
     build_proposition_chunk_prompt,
@@ -911,11 +913,13 @@ def summery_chunk_jsonl_dir(
 
     provider = (config.summery_provider or "").lower()
     max_retries = max(1, config.summery_max_retries)
+    summary_batch_size = max(1, int(getattr(config, "summery_batch_size", 1)))
     logger.info(
-        "Summery chunking enabled (%s) for %d files in %s",
+        "Summery chunking enabled (%s) for %d files in %s (batch_size=%d)",
         provider,
         len(jsonl_files),
         input_chunk_dir,
+        summary_batch_size,
     )
 
     expected_output_names = {path.name for path in jsonl_files}
@@ -946,6 +950,72 @@ def summery_chunk_jsonl_dir(
 
         output_chunks: list[Chunk] = []
         output_index = 0
+        summary_requests_per_minute = getattr(
+            config,
+            "gemini_summary_requests_per_minute",
+            getattr(config, "gemini_requests_per_minute", 60),
+        )
+        summary_model = _select_model_for_provider(
+            provider=provider,
+            gemini_model=config.summery_gemini_model,
+            llama_model=config.summery_llama_model,
+        )
+        pending_prompts: list[str] = []
+        pending_metadatas: list[dict[str, object]] = []
+
+        def _run_summary_prompt(prompt: str) -> list[str] | None:
+            return _run_llm_chunking(
+                prompt=prompt,
+                source_name=path.name,
+                provider=provider,
+                api_key=config.gemini_api_key,
+                gemini_requests_per_minute=summary_requests_per_minute,
+                model=summary_model,
+                llama_model_path=config.summery_llama_model_path,
+                llama_ctx_size=config.summery_llama_ctx_size,
+                temperature=config.summery_temperature,
+                max_output_tokens=config.summery_max_output_tokens,
+                max_retries=max_retries,
+                thinking_level=config.thinking_level,
+                llama_threads=config.llama_threads,
+                llama_gpu_layers=config.llama_gpu_layers,
+                action_label="Summery chunking",
+                gemini_rate_limiter_name=index_summary_rate_limiter_name(),
+                output_format="raw_text",
+                response_mime_type="text/plain",
+            )
+
+        def _flush_summary_batch() -> None:
+            nonlocal output_index
+            if not pending_prompts:
+                return
+
+            if len(pending_prompts) == 1:
+                batch_results = [_run_summary_prompt(pending_prompts[0])]
+            else:
+                with ThreadPoolExecutor(max_workers=len(pending_prompts)) as executor:
+                    futures = [
+                        executor.submit(_run_summary_prompt, prompt)
+                        for prompt in pending_prompts
+                    ]
+                    batch_results = [future.result() for future in futures]
+
+            for base_metadata, chunk_texts in zip(
+                pending_metadatas,
+                batch_results,
+                strict=False,
+            ):
+                if chunk_texts is None:
+                    continue
+                for chunk_text in chunk_texts:
+                    metadata = dict(base_metadata)
+                    metadata["chunk_id"] = output_index
+                    metadata = _with_stage(metadata, "summery")
+                    output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
+                    output_index += 1
+
+            pending_prompts.clear()
+            pending_metadatas.clear()
 
         for chunk in chunks:
             source_text = chunk.text
@@ -972,37 +1042,12 @@ def summery_chunk_jsonl_dir(
                 source_type=source_type,
                 drive_file_path=drive_file_path,
             )
-            chunk_texts = _run_llm_chunking(
-                prompt=prompt,
-                source_name=path.name,
-                provider=provider,
-                api_key=config.gemini_api_key,
-                model=_select_model_for_provider(
-                    provider=provider,
-                    gemini_model=config.summery_gemini_model,
-                    llama_model=config.summery_llama_model,
-                ),
-                llama_model_path=config.summery_llama_model_path,
-                llama_ctx_size=config.summery_llama_ctx_size,
-                temperature=config.summery_temperature,
-                max_output_tokens=config.summery_max_output_tokens,
-                max_retries=max_retries,
-                thinking_level=config.thinking_level,
-                llama_threads=config.llama_threads,
-                llama_gpu_layers=config.llama_gpu_layers,
-                action_label="Summery chunking",
-                output_format="raw_text",
-                response_mime_type="text/plain",
-            )
-            if chunk_texts is None:
-                continue
+            pending_prompts.append(prompt)
+            pending_metadatas.append(base_metadata)
+            if len(pending_prompts) >= summary_batch_size:
+                _flush_summary_batch()
 
-            for chunk_text in chunk_texts:
-                metadata = dict(base_metadata)
-                metadata["chunk_id"] = output_index
-                metadata = _with_stage(metadata, "summery")
-                output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
-                output_index += 1
+        _flush_summary_batch()
 
         write_chunks(out_path, output_chunks)
         _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
@@ -1088,6 +1133,11 @@ def proposition_chunk_jsonl_dir(
                 source_name=source_name,
                 provider=provider,
                 api_key=config.gemini_api_key,
+                gemini_requests_per_minute=getattr(
+                    config,
+                    "gemini_requests_per_minute",
+                    60,
+                ),
                 model=_select_model_for_provider(
                     provider=provider,
                     gemini_model=config.prop_gemini_model,
@@ -1292,6 +1342,7 @@ def _run_llm_chunking(
     source_name: str,
     provider: str,
     api_key: str,
+    gemini_requests_per_minute: int,
     model: str,
     llama_model_path: str,
     llama_ctx_size: int,
@@ -1302,6 +1353,7 @@ def _run_llm_chunking(
     llama_threads: int,
     llama_gpu_layers: int,
     action_label: str,
+    gemini_rate_limiter_name: str = "",
     output_format: str = "json_list",
     response_mime_type: str | None = "application/json",
 ) -> list[str] | None:
@@ -1323,6 +1375,8 @@ def _run_llm_chunking(
                 llama_threads=llama_threads,
                 llama_gpu_layers=llama_gpu_layers,
                 response_mime_type=response_mime_type,
+                gemini_requests_per_minute=gemini_requests_per_minute,
+                gemini_rate_limiter_name=gemini_rate_limiter_name,
             )
             last_response = response
             if output_format == "raw_text":

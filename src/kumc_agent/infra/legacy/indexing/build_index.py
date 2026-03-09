@@ -14,6 +14,7 @@ APP_SRC = Path(__file__).resolve().parents[1]
 if str(APP_SRC) not in sys.path:
     sys.path.insert(0, str(APP_SRC))
 
+from kumc_agent.config.load import ConfigLoadError, load_runtime_config
 from kumc_agent.infra.legacy.config import AppConfig
 from kumc_agent.infra.legacy.indexing.chunking import (
     message_chunk_jsonl_dir,
@@ -199,7 +200,19 @@ def main() -> None:
 
     resolved_base = Path(__file__).resolve().parents[3]
     load_dotenv(resolved_base / ".env", override=True)
-    cfg = AppConfig.from_here(base_dir=resolved_base)
+    summery_batch_size_override: int | None = None
+    try:
+        runtime_config = load_runtime_config(base_dir=resolved_base)
+        summery_batch_size_override = runtime_config.indexing.chunking.summary_batch_size
+    except ConfigLoadError as exc:
+        logger.info(
+            "Failed to load runtime config for summery batch size; using env/default. reason=%s",
+            exc,
+        )
+    cfg = AppConfig.from_here(
+        base_dir=resolved_base,
+        summery_batch_size=summery_batch_size_override,
+    )
     drive_folder_id = cfg.drive_folder_id
     if not drive_folder_id:
         raise RuntimeError(
@@ -329,10 +342,11 @@ def main() -> None:
             ),
         )
         logger.info(
-            "SUMMERY_CFG   : chars=%d temp=%s retries=%d",
+            "SUMMERY_CFG   : chars=%d temp=%s retries=%d batch=%d",
             cfg.summery_characters,
             cfg.summery_temperature,
             cfg.summery_max_retries,
+            cfg.summery_batch_size,
         )
 
     logger.info(

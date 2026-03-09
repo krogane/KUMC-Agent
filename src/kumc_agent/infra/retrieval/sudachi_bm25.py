@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - fallback for minimal runtime
             return scores
 
 logger = logging.getLogger(__name__)
+FileSignature = tuple[int, int]
 
 try:
     from sudachipy import dictionary as sudachi_dictionary
@@ -65,6 +66,12 @@ class SudachiBM25Retriever:
         self._remove_symbols = bool(remove_symbols)
         self._sudachi = self._build_sudachi_tokenizer()
         self._split_mode = self._resolve_split_mode(self._sudachi_mode)
+        self._cached_tokens: list[list[str]] | None = None
+        self._cached_tokens_signature: FileSignature | None = None
+        self._cached_chunks: list[Chunk] | None = None
+        self._cached_chunks_signature: FileSignature | None = None
+        self._cached_bm25: BM25Okapi | None = None
+        self._cached_bm25_signature: FileSignature | None = None
         self._index_dir.mkdir(parents=True, exist_ok=True)
 
     def build(self, chunks: list[Chunk]) -> None:
@@ -85,17 +92,20 @@ class SudachiBM25Retriever:
                     )
                     + "\n"
                 )
+        self._cached_tokens = tokenized
+        self._cached_tokens_signature = self._file_signature(self._tokens_path)
+        self._cached_chunks = list(chunks)
+        self._cached_chunks_signature = self._file_signature(self._chunks_path)
+        self._cached_bm25 = self._build_bm25(tokenized)
+        self._cached_bm25_signature = self._cached_tokens_signature
 
     def search(self, query: str, *, top_k: int) -> list[Chunk]:
         return [chunk for chunk, _ in self.search_with_scores(query, top_k=top_k)]
 
     def search_with_scores(self, query: str, *, top_k: int) -> list[tuple[Chunk, float]]:
-        if not self._tokens_path.exists() or not self._chunks_path.exists():
+        bm25 = self._load_bm25()
+        if bm25 is None:
             return []
-        tokenized = json.loads(self._tokens_path.read_text(encoding="utf-8"))
-        if not tokenized:
-            return []
-        bm25 = BM25Okapi(tokenized, k1=self._bm25_k1, b=self._bm25_b)
         scores = bm25.get_scores(self._tokenize(query))
         order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         chunks = self._load_chunks()
@@ -105,7 +115,61 @@ class SudachiBM25Retriever:
                 out.append((chunks[idx], float(scores[idx])))
         return out
 
+    def _load_bm25(self) -> BM25Okapi | None:
+        tokenized = self._load_tokenized()
+        if not tokenized:
+            self._cached_bm25 = None
+            self._cached_bm25_signature = self._cached_tokens_signature
+            return None
+        if (
+            self._cached_bm25 is not None
+            and self._cached_bm25_signature is not None
+            and self._cached_bm25_signature == self._cached_tokens_signature
+        ):
+            return self._cached_bm25
+        bm25 = self._build_bm25(tokenized)
+        self._cached_bm25 = bm25
+        self._cached_bm25_signature = self._cached_tokens_signature
+        return bm25
+
+    def _load_tokenized(self) -> list[list[str]]:
+        if not self._tokens_path.exists():
+            self._cached_tokens = None
+            self._cached_tokens_signature = None
+            return []
+        current_signature = self._file_signature(self._tokens_path)
+        if (
+            self._cached_tokens is not None
+            and self._cached_tokens_signature is not None
+            and self._cached_tokens_signature == current_signature
+        ):
+            return self._cached_tokens
+        tokenized = json.loads(self._tokens_path.read_text(encoding="utf-8"))
+        if not isinstance(tokenized, list):
+            tokenized = []
+        normalized: list[list[str]] = []
+        for item in tokenized:
+            if not isinstance(item, list):
+                continue
+            normalized.append(
+                [str(token).strip() for token in item if str(token).strip()]
+            )
+        self._cached_tokens = normalized
+        self._cached_tokens_signature = current_signature
+        return normalized
+
     def _load_chunks(self) -> list[Chunk]:
+        if not self._chunks_path.exists():
+            self._cached_chunks = None
+            self._cached_chunks_signature = None
+            return []
+        current_signature = self._file_signature(self._chunks_path)
+        if (
+            self._cached_chunks is not None
+            and self._cached_chunks_signature is not None
+            and self._cached_chunks_signature == current_signature
+        ):
+            return self._cached_chunks
         out: list[Chunk] = []
         with self._chunks_path.open("r", encoding="utf-8") as fr:
             for line in fr:
@@ -119,7 +183,12 @@ class SudachiBM25Retriever:
                         metadata=dict(payload.get("metadata", {})),
                     )
                 )
+        self._cached_chunks = out
+        self._cached_chunks_signature = current_signature
         return out
+
+    def _build_bm25(self, tokenized: list[list[str]]) -> BM25Okapi:
+        return BM25Okapi(tokenized, k1=self._bm25_k1, b=self._bm25_b)
 
     def _tokenize(self, text: str) -> list[str]:
         value = (text or "").strip()
@@ -194,3 +263,11 @@ class SudachiBM25Retriever:
                 "Sudachi tokenizer initialization failed. Falling back to whitespace tokenization."
             )
             return None
+
+    @staticmethod
+    def _file_signature(path: Path) -> FileSignature | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return (int(stat.st_mtime_ns), int(stat.st_size))

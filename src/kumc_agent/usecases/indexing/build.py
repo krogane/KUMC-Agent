@@ -8,6 +8,7 @@ from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
+from kumc_agent.infra.loaders.x import XPostsLoader
 
 
 @dataclass(frozen=True)
@@ -28,12 +29,14 @@ class BuildIndexUsecase:
         discord_loader: DiscordLoader | None,
         hatenablog_loader: HatenaBlogLoader | None,
         crafters_colony_loader: CraftersColonyLoader | None,
+        x_loader: XPostsLoader | None,
     ) -> None:
         self._indexing_service = indexing_service
         self._drive_loader = drive_loader
         self._discord_loader = discord_loader
         self._hatenablog_loader = hatenablog_loader
         self._crafters_colony_loader = crafters_colony_loader
+        self._x_loader = x_loader
 
     def execute(self, request: BuildIndexRequest) -> IndexBuildResult:
         loaded = 0
@@ -43,6 +46,7 @@ class BuildIndexUsecase:
                 self._drive_loader,
                 self._hatenablog_loader,
                 self._crafters_colony_loader,
+                self._x_loader,
             ):
                 if loader is None:
                     continue

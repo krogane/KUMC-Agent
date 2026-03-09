@@ -12,7 +12,7 @@ from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
-from kumc_agent.usecases.chat.route import RouteRequest
+from kumc_agent.usecases.warmup.run import WarmupRequest
 from kumc_agent.utils.logging import configure_logging, default_execution_log_path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ def main() -> None:
     periodic_warmup_task: asyncio.Task[None] | None = None
     auto_index_last_run: date | None = None
     answer_record_lock = threading.Lock()
+    warmup_lock = asyncio.Lock()
 
     context.vc.bind_discord_client(
         discord_client=client,
@@ -343,6 +344,7 @@ def main() -> None:
                     )
                 )
             )
+            await _run_warmup(trigger="index_update", force=True)
             await _send_status(
                 channel,
                 (
@@ -467,6 +469,8 @@ def main() -> None:
             channel_generation_tasks.pop(channel_id, None)
 
     def _warmup_skip_reason() -> str | None:
+        if warmup_lock.locked():
+            return "warmup is running"
         if indexing_in_progress or indexing_task is not None:
             return "indexing is running"
         if evaluating_task is not None:
@@ -477,6 +481,36 @@ def main() -> None:
             return "voice model processing is running"
         return None
 
+    async def _run_warmup(*, trigger: str, force: bool = False) -> None:
+        if not force:
+            reason = _warmup_skip_reason()
+            if reason:
+                logger.info("Warmup skipped: trigger=%s reason=%s", trigger, reason)
+                return
+
+        if force:
+            await warmup_lock.acquire()
+        else:
+            if warmup_lock.locked():
+                logger.info("Warmup skipped: trigger=%s reason=warmup is running", trigger)
+                return
+            await warmup_lock.acquire()
+        try:
+            result = await asyncio.to_thread(
+                lambda: context.warmup.execute(WarmupRequest(trigger=trigger))
+            )
+            logger.info(
+                "Warmup completed. trigger=%s completed=%s skipped=%s failed=%s",
+                trigger,
+                result.completed,
+                result.skipped,
+                result.failed,
+            )
+        except Exception:
+            logger.exception("Warmup failed. trigger=%s", trigger)
+        finally:
+            warmup_lock.release()
+
     async def _periodic_warmup_loop() -> None:
         interval_minutes = max(0, int(context.config.ops.warmup_interval_minutes))
         if interval_minutes <= 0:
@@ -486,16 +520,7 @@ def main() -> None:
         logger.info("Periodic warmup scheduler started. interval_minutes=%s", interval_minutes)
         while True:
             await asyncio.sleep(interval_seconds)
-            reason = _warmup_skip_reason()
-            if reason:
-                logger.info("Periodic warmup skipped: %s", reason)
-                continue
-            try:
-                await asyncio.to_thread(
-                    lambda: context.chat_route.execute(RouteRequest(query="warmup"))
-                )
-            except Exception:
-                logger.exception("Warmup failed.")
+            await _run_warmup(trigger="periodic", force=False)
 
     async def _auto_index_loop() -> None:
         nonlocal auto_index_last_run, indexing_task
@@ -534,6 +559,7 @@ def main() -> None:
         nonlocal auto_index_task, periodic_warmup_task
         logger.info("Logged in as %s", client.user)
         await context.vc.start()
+        await _run_warmup(trigger="startup", force=True)
         if auto_index_task is None or auto_index_task.done():
             auto_index_task = asyncio.create_task(_auto_index_loop())
         if periodic_warmup_task is None or periodic_warmup_task.done():

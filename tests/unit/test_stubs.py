@@ -24,6 +24,7 @@ class StubTests(unittest.TestCase):
             drive_folder_id="",
             google_application_credentials="",
             gemini_api_key="",
+            gemini_requests_per_minute=60,
             llama_threads=4,
             llama_gpu_layers=0,
             vc_feature_enabled=False,

@@ -68,6 +68,21 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_MAX_INPUT_CHARACTERS", "app.max_input_characters", _to_int),
     EnvBinding("KUMC_DISCORD_BOT_TOKEN", "integrations.discord.bot_token", str),
     EnvBinding("KUMC_GEMINI_API_KEY", "integrations.gemini_api_key", str),
+    EnvBinding(
+        "KUMC_GEMINI_REQUESTS_PER_MINUTE",
+        "integrations.gemini_requests_per_minute",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE",
+        "integrations.gemini_summary_requests_per_minute",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_GEMINI_RAGAS_REQUESTS_PER_MINUTE",
+        "integrations.gemini_ragas_requests_per_minute",
+        _to_int,
+    ),
     EnvBinding("KUMC_DRIVE_FOLDER_ID", "integrations.drive.folder_id", str),
     EnvBinding(
         "KUMC_GOOGLE_APPLICATION_CREDENTIALS",
@@ -75,6 +90,12 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding("KUMC_DRIVE_MAX_FILES", "integrations.drive.max_files", _to_int),
+    EnvBinding("KUMC_DRIVE_BATCH_SIZE", "integrations.drive.batch_size", _to_int),
+    EnvBinding(
+        "KUMC_DRIVE_PDF_OCR_MODEL_PATH",
+        "integrations.drive.pdf_ocr_model_path",
+        str,
+    ),
     EnvBinding(
         "KUMC_CRAFTERS_COLONY_AUTHOR_URL",
         "integrations.crafters_colony.author_url",
@@ -131,6 +152,27 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "KUMC_RAG_MATERIAL_SEARCH_MAX_NAMES",
         "rag.routing.material_search_max_names",
         _to_int,
+    ),
+    EnvBinding("KUMC_RAGAS_BATCH_SIZE", "ops.ragas_batch_size", _to_int),
+    EnvBinding(
+        "KUMC_RAGAS_METRIC_ANSWER_RELEVANCY_ENABLED",
+        "ops.ragas_metrics.answer_relevancy_enabled",
+        _to_bool,
+    ),
+    EnvBinding(
+        "KUMC_RAGAS_METRIC_FAITHFULNESS_ENABLED",
+        "ops.ragas_metrics.faithfulness_enabled",
+        _to_bool,
+    ),
+    EnvBinding(
+        "KUMC_RAGAS_METRIC_CONTEXT_PRECISION_ENABLED",
+        "ops.ragas_metrics.context_precision_enabled",
+        _to_bool,
+    ),
+    EnvBinding(
+        "KUMC_RAGAS_METRIC_CONTEXT_RECALL_ENABLED",
+        "ops.ragas_metrics.context_recall_enabled",
+        _to_bool,
     ),
     EnvBinding("KUMC_CHAT_HISTORY_ENABLED", "rag.history.enabled", _to_bool),
     EnvBinding("KUMC_CHAT_HISTORY_MAX_TURNS", "rag.history.max_turns", _to_int),
@@ -370,6 +412,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_INDEXING_SUMMARY_CHARACTERS",
         "indexing.chunking.summary_characters",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_SUMMARY_BATCH_SIZE",
+        "indexing.chunking.summary_batch_size",
         _to_int,
     ),
     EnvBinding(
