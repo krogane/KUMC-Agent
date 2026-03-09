@@ -7,7 +7,7 @@ import logging
 import threading
 from zoneinfo import ZoneInfo
 
-from kumc_agent.frontends.discord.commands import parse_command
+from kumc_agent.frontends.discord.commands import parse_command, parse_interaction_command
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
@@ -143,14 +143,17 @@ def main() -> None:
             return display_name
         return "unknown"
 
-    def _is_maintenance_authorized(message: discord.Message) -> bool:
+    def _is_maintenance_authorized_user(author: object) -> bool:
         allow = set(context.config.security.maintenance_command_author_ids)
         if not allow:
             return False
-        author_id = getattr(getattr(message, "author", None), "id", None)
+        author_id = getattr(author, "id", None)
         if author_id is None:
             return False
         return int(author_id) in allow
+
+    def _is_maintenance_authorized(message: discord.Message) -> bool:
+        return _is_maintenance_authorized_user(getattr(message, "author", None))
 
     def _append_answer_record(
         *,
@@ -327,12 +330,14 @@ def main() -> None:
         *,
         channel: discord.abc.Messageable | None,
         history_query: str | None = None,
+        announce_start: bool = True,
     ) -> None:
         nonlocal indexing_in_progress, indexing_task, indexing_started_at
         indexing_in_progress = True
         indexing_started_at = datetime.now(_JST)
         indexing_cancel_event.clear()
-        await _send_status(channel, "インデックス更新を開始します。")
+        if announce_start:
+            await _send_status(channel, "インデックス更新を開始します。")
         try:
             result = await asyncio.to_thread(
                 lambda: context.build_index.execute(
@@ -362,6 +367,17 @@ def main() -> None:
             indexing_in_progress = False
             indexing_task = None
             indexing_started_at = None
+
+    async def _send_interaction_response(
+        interaction: discord.Interaction,
+        text: str,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=ephemeral)
+            return
+        await interaction.response.send_message(text, ephemeral=ephemeral)
 
     async def _run_eval_job(
         *,
@@ -572,6 +588,113 @@ def main() -> None:
         after: discord.VoiceState,
     ) -> None:
         await context.vc.on_voice_state_update(member, before, after)
+
+    @client.event
+    async def on_interaction(interaction: discord.Interaction) -> None:
+        nonlocal indexing_task, evaluating_task
+        if interaction.type != discord.InteractionType.application_command:
+            return
+        if getattr(interaction.user, "bot", False):
+            return
+        data = interaction.data
+        if not isinstance(data, dict):
+            return
+
+        parsed = parse_interaction_command(
+            name=str(data.get("name") or ""),
+            options=data.get("options"),
+        )
+        if parsed.kind == "none":
+            return
+
+        if parsed.kind == "build_index":
+            if not _is_maintenance_authorized_user(interaction.user):
+                await _send_interaction_response(
+                    interaction,
+                    "このコマンドを実行する権限がありません。",
+                    ephemeral=True,
+                )
+                return
+            if context.vc.has_active_session():
+                await _send_interaction_response(
+                    interaction,
+                    "VC参加中のため、新規のインデックス更新は開始できません。",
+                    ephemeral=True,
+                )
+                return
+            if indexing_in_progress or (indexing_task is not None and not indexing_task.done()):
+                await _send_interaction_response(
+                    interaction,
+                    "インデックス更新は既に実行中です。",
+                    ephemeral=True,
+                )
+                return
+            await _send_interaction_response(interaction, "インデックス更新を開始します。")
+            indexing_task = asyncio.create_task(
+                _run_build_index_job(
+                    channel=interaction.channel,
+                    history_query="/ai build-index",
+                    announce_start=False,
+                )
+            )
+            return
+
+        if parsed.kind == "eval":
+            if not _is_maintenance_authorized_user(interaction.user):
+                await _send_interaction_response(
+                    interaction,
+                    "このコマンドを実行する権限がありません。",
+                    ephemeral=True,
+                )
+                return
+            if evaluating_task is not None and not evaluating_task.done():
+                await _send_interaction_response(
+                    interaction,
+                    "評価は既に実行中です。",
+                    ephemeral=True,
+                )
+                return
+            await _send_interaction_response(interaction, "評価を開始します。")
+            evaluating_task = asyncio.create_task(_run_eval_job(channel=interaction.channel))
+            return
+
+        if parsed.kind == "stop":
+            actions: list[str] = []
+            channel_id = getattr(interaction.channel, "id", None)
+            channel_id_int = int(channel_id) if channel_id is not None else -1
+            cancel_event = channel_cancel_events.get(channel_id_int)
+            answer_task = channel_generation_tasks.get(channel_id_int)
+            if answer_task and not answer_task.done() and cancel_event is not None:
+                cancel_event.set()
+                answer_task.cancel()
+                actions.append("回答生成を中止します。")
+            if indexing_task is not None and not indexing_task.done():
+                indexing_cancel_event.set()
+                indexing_task.cancel()
+                actions.append("インデックス更新を中止します。")
+            if evaluating_task is not None and not evaluating_task.done():
+                evaluating_task.cancel()
+                actions.append("評価を中止します。")
+            if not actions:
+                actions.append("停止対象の処理は実行中ではありません。")
+            await _send_interaction_response(interaction, "\n".join(actions))
+            return
+
+        if parsed.kind in {"join_vc", "quit_vc"}:
+            await _send_interaction_response(
+                interaction,
+                "この操作は通常メッセージの `/ai join` / `/ai quit` で実行してください。",
+                ephemeral=True,
+            )
+            return
+
+        if parsed.kind == "chat":
+            await _send_interaction_response(
+                interaction,
+                "質問は通常メッセージで `/ai <query>` を送信してください。",
+                ephemeral=True,
+            )
+            return
 
     @client.event
     async def on_message(message: discord.Message) -> None:

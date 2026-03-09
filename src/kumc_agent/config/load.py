@@ -873,6 +873,37 @@ def _to_runtime_config(
                     1,
                     int(integrations.get("drive", {}).get("batch_size", 20)),
                 ),
+                download_max_retries=max(
+                    0,
+                    int(integrations.get("drive", {}).get("download_max_retries", 3)),
+                ),
+                download_retry_initial_delay_seconds=max(
+                    0.0,
+                    float(
+                        integrations.get("drive", {}).get(
+                            "download_retry_initial_delay_seconds",
+                            0.5,
+                        )
+                    ),
+                ),
+                download_retry_max_delay_seconds=max(
+                    0.0,
+                    float(
+                        integrations.get("drive", {}).get(
+                            "download_retry_max_delay_seconds",
+                            8.0,
+                        )
+                    ),
+                ),
+                download_retry_backoff_multiplier=max(
+                    1.0,
+                    float(
+                        integrations.get("drive", {}).get(
+                            "download_retry_backoff_multiplier",
+                            2.0,
+                        )
+                    ),
+                ),
                 pdf_ocr_model_path=str(
                     integrations.get("drive", {}).get(
                         "pdf_ocr_model_path",

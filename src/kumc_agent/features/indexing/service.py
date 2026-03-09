@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import logging
 import re
@@ -367,12 +368,44 @@ class IndexingService:
             return self._load_stage_chunks(self._summary_dir)
 
         limit = max(32, target_characters)
+        batch_size = max(1, int(self._runtime.indexing.chunking.summary_batch_size))
+        total_batches = (len(first_chunks) + batch_size - 1) // batch_size
+        if total_batches > 1:
+            logger.info(
+                "Generating summary chunks in %d batches (batch_size=%d).",
+                total_batches,
+                batch_size,
+            )
+        summaries = [""] * len(first_chunks)
+        for batch_start in range(0, len(first_chunks), batch_size):
+            batch = first_chunks[batch_start : batch_start + batch_size]
+            max_workers = max(1, min(len(batch), batch_size))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures: dict[Future[str], tuple[int, Chunk]] = {}
+                for offset, source_chunk in enumerate(batch):
+                    idx = batch_start + offset
+                    futures[
+                        executor.submit(
+                            self._build_summary_text,
+                            text=source_chunk.text or "",
+                            target_characters=limit,
+                        )
+                    ] = (idx, source_chunk)
+                for future in as_completed(futures):
+                    idx, source_chunk = futures[future]
+                    fallback = (source_chunk.text or "").strip()[:limit]
+                    try:
+                        summary_text = (future.result() or "").strip()
+                    except Exception:
+                        logger.exception(
+                            "Summary chunk worker failed. Fallback to truncation."
+                        )
+                        summary_text = fallback
+                    summaries[idx] = summary_text or fallback
+
         chunks: list[Chunk] = []
         for idx, chunk in enumerate(first_chunks):
-            summary = self._build_summary_text(
-                text=chunk.text or "",
-                target_characters=limit,
-            )
+            summary = summaries[idx]
             if not summary:
                 continue
             metadata = dict(chunk.metadata)

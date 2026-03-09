@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.features.indexing.service import IndexingService
 
 
@@ -38,12 +41,47 @@ class _StubLLM:
         return self.response_text
 
 
-def _runtime_config(*, data_dir: Path, provider: str) -> object:
+class _ParallelStubLLM(_StubLLM):
+    def __init__(self, *, response_text: str, delay_seconds: float = 0.05) -> None:
+        super().__init__(response_text=response_text)
+        self._delay_seconds = delay_seconds
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+        thinking_level: str,
+    ) -> str:
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(self._delay_seconds)
+            return super().generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_level=thinking_level,
+            )
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+
+
+def _runtime_config(*, data_dir: Path, provider: str, summary_batch_size: int = 1) -> object:
     return SimpleNamespace(
         app=SimpleNamespace(data_dir=data_dir),
         indexing=SimpleNamespace(
             chunking=SimpleNamespace(
                 summary_llm_provider=provider,
+                summary_batch_size=summary_batch_size,
                 summary_temperature=0.15,
                 summary_max_output_tokens=64,
                 summary_thinking_level="minimal",
@@ -117,6 +155,47 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
             )
 
             self.assertEqual(summary, "abcdef")
+
+    def test_summary_batch_size_controls_parallelism(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = _ParallelStubLLM(response_text="要約")
+            service = IndexingService(
+                storage=object(),  # type: ignore[arg-type]
+                embedder=object(),  # type: ignore[arg-type]
+                faiss_index=object(),  # type: ignore[arg-type]
+                bm25_index=object(),  # type: ignore[arg-type]
+                raw_dir=Path(tmp),
+                app_config=_runtime_config(  # type: ignore[arg-type]
+                    data_dir=Path(tmp),
+                    provider="gemini",
+                    summary_batch_size=2,
+                ),
+                summary_llm=llm,
+            )
+            first_chunks = [
+                Chunk(
+                    id=f"chunk-{idx}",
+                    document_id="doc-1",
+                    text=f"本文{idx}",
+                    index=idx,
+                    metadata={"source_type": "test"},
+                )
+                for idx in range(5)
+            ]
+
+            result = service._load_or_build_summary_chunks(  # noqa: SLF001
+                first_chunks=first_chunks,
+                enabled=True,
+                target_characters=20,
+                should_update=True,
+                force=True,
+                selected=set(),
+            )
+
+            self.assertEqual(len(result), 5)
+            self.assertEqual(llm.calls, 5)
+            self.assertGreaterEqual(llm.max_in_flight, 2)
+            self.assertLessEqual(llm.max_in_flight, 2)
 
 
 if __name__ == "__main__":

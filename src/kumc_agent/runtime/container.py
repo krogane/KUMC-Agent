@@ -8,6 +8,7 @@ from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.infra.embeddings.gemini import GeminiEmbedder
 from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.llm.gemini import GeminiLLM
+from kumc_agent.infra.llm.gemini_rate_limit import index_summary_rate_limiter_name
 from kumc_agent.infra.llm.llama_cpp import LlamaCppLLM
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
@@ -79,6 +80,7 @@ def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
             api_key=config.integrations.gemini_api_key,
             model=chunking.summary_gemini_model,
             requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
+            limiter_name=index_summary_rate_limiter_name(),
         )
     raise ValueError(
         "Unsupported indexing.chunking.summary_llm_provider. Use 'none', 'gemini', or 'llama'."
@@ -271,6 +273,16 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             raw_dir=config.app.raw_dir,
             max_files=config.integrations.drive.max_files,
             batch_size=config.integrations.drive.batch_size,
+            download_max_retries=config.integrations.drive.download_max_retries,
+            download_retry_initial_delay_seconds=(
+                config.integrations.drive.download_retry_initial_delay_seconds
+            ),
+            download_retry_max_delay_seconds=(
+                config.integrations.drive.download_retry_max_delay_seconds
+            ),
+            download_retry_backoff_multiplier=(
+                config.integrations.drive.download_retry_backoff_multiplier
+            ),
             pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
         )
         if config.features.sources.drive

@@ -92,6 +92,26 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_DRIVE_MAX_FILES", "integrations.drive.max_files", _to_int),
     EnvBinding("KUMC_DRIVE_BATCH_SIZE", "integrations.drive.batch_size", _to_int),
     EnvBinding(
+        "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES",
+        "integrations.drive.download_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS",
+        "integrations.drive.download_retry_initial_delay_seconds",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_DRIVE_DOWNLOAD_RETRY_MAX_DELAY_SECONDS",
+        "integrations.drive.download_retry_max_delay_seconds",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_DRIVE_DOWNLOAD_RETRY_BACKOFF_MULTIPLIER",
+        "integrations.drive.download_retry_backoff_multiplier",
+        _to_float,
+    ),
+    EnvBinding(
         "KUMC_DRIVE_PDF_OCR_MODEL_PATH",
         "integrations.drive.pdf_ocr_model_path",
         str,

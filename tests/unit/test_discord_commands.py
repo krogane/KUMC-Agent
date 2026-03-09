@@ -9,7 +9,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.frontends.discord.commands import parse_command
+from kumc_agent.frontends.discord.commands import (
+    parse_command,
+    parse_interaction_command,
+)
 
 
 class DiscordCommandParseTests(unittest.TestCase):
@@ -47,6 +50,40 @@ class DiscordCommandParseTests(unittest.TestCase):
         self.assertEqual(parsed.kind, "chat")
         self.assertEqual(parsed.payload, "KUMCとは")
         self.assertTrue(parsed.force_fast_mode)
+
+    def test_build_index_command(self) -> None:
+        parsed = parse_command(
+            content="/ai build-index",
+            prefix="/ai",
+            index_command_prefix="/ai build-index",
+        )
+        self.assertEqual(parsed.kind, "build_index")
+
+    def test_interaction_build_index_subcommand(self) -> None:
+        parsed = parse_interaction_command(
+            name="ai",
+            options=[
+                {
+                    "name": "build-index",
+                    "type": 1,
+                    "options": [],
+                }
+            ],
+        )
+        self.assertEqual(parsed.kind, "build_index")
+
+    def test_interaction_build_index_action_option(self) -> None:
+        parsed = parse_interaction_command(
+            name="ai",
+            options=[
+                {
+                    "name": "action",
+                    "type": 3,
+                    "value": "build-index",
+                }
+            ],
+        )
+        self.assertEqual(parsed.kind, "build_index")
 
 
 if __name__ == "__main__":

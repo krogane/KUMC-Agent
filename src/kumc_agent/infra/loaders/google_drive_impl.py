@@ -4,12 +4,13 @@ import io
 import json
 import logging
 import re
+import time
 import zipfile
 from csv import writer
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
 from kumc_agent.infra.loaders.common import (
@@ -158,40 +159,144 @@ def _split_batches(
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _download_export_bytes(service: Any, *, file_id: str, mime_type: str) -> bytes:
-    try:
-        from googleapiclient.http import MediaIoBaseDownload
-    except ImportError as e:
-        raise RuntimeError(
-            "google-api-python-client is required to download Drive files."
-        ) from e
-
-    request = service.files().export_media(
-        fileId=file_id, mimeType=mime_type,
+def _download_export_bytes(
+    service: Any,
+    *,
+    file_id: str,
+    mime_type: str,
+    max_retries: int,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+    backoff_multiplier: float,
+) -> bytes:
+    return _download_drive_bytes_with_retry(
+        service,
+        file_id=file_id,
+        operation_name=f"export({mime_type})",
+        request_builder=lambda files_api: files_api.export_media(
+            fileId=file_id,
+            mimeType=mime_type,
+        ),
+        max_retries=max_retries,
+        initial_delay_seconds=initial_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        backoff_multiplier=backoff_multiplier,
     )
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return buffer.getvalue()
 
 
-def _download_file_bytes(service: Any, *, file_id: str) -> bytes:
+def _download_file_bytes(
+    service: Any,
+    *,
+    file_id: str,
+    max_retries: int,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+    backoff_multiplier: float,
+) -> bytes:
+    return _download_drive_bytes_with_retry(
+        service,
+        file_id=file_id,
+        operation_name="get_media",
+        request_builder=lambda files_api: files_api.get_media(
+            fileId=file_id,
+            supportsAllDrives=True,
+        ),
+        max_retries=max_retries,
+        initial_delay_seconds=initial_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        backoff_multiplier=backoff_multiplier,
+    )
+
+
+def _drive_error_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "resp", None)
+    status = getattr(response, "status", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_retryable_drive_exception(
+    exc: Exception,
+    *,
+    http_error_type: type[Any],
+) -> bool:
+    if isinstance(exc, http_error_type):
+        status = _drive_error_status_code(exc)
+        return status == 429 or (status is not None and status >= 500)
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError))
+
+
+def _download_drive_bytes_with_retry(
+    service: Any,
+    *,
+    file_id: str,
+    operation_name: str,
+    request_builder: Callable[[Any], Any],
+    max_retries: int = 3,
+    initial_delay_seconds: float = 0.5,
+    max_delay_seconds: float = 8.0,
+    backoff_multiplier: float = 2.0,
+) -> bytes:
     try:
+        from googleapiclient.errors import HttpError
         from googleapiclient.http import MediaIoBaseDownload
     except ImportError as e:
         raise RuntimeError(
             "google-api-python-client is required to download Drive files."
         ) from e
 
-    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return buffer.getvalue()
+    retries = max(0, int(max_retries))
+    delay = max(0.0, float(initial_delay_seconds))
+    max_delay = max(0.0, float(max_delay_seconds))
+    multiplier = max(1.0, float(backoff_multiplier))
+    attempts = retries + 1
+
+    for attempt in range(1, attempts + 1):
+        request = request_builder(service.files())
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        try:
+            while not done:
+                _, done = downloader.next_chunk()
+            if attempt > 1:
+                logger.info(
+                    "Drive %s succeeded on retry for file %s (attempt %d/%d).",
+                    operation_name,
+                    file_id,
+                    attempt,
+                    attempts,
+                )
+            return buffer.getvalue()
+        except Exception as exc:
+            is_retryable = _is_retryable_drive_exception(
+                exc,
+                http_error_type=HttpError,
+            )
+            if not is_retryable or attempt >= attempts:
+                raise
+            status = _drive_error_status_code(exc)
+            sleep_seconds = min(delay, max_delay) if max_delay > 0 else delay
+            logger.warning(
+                (
+                    "Drive %s failed for file %s (status=%s, attempt %d/%d). "
+                    "Retrying in %.2fs."
+                ),
+                operation_name,
+                file_id,
+                status,
+                attempt,
+                attempts,
+                sleep_seconds,
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            if delay > 0:
+                next_delay = delay * multiplier
+                delay = min(next_delay, max_delay) if max_delay > 0 else next_delay
+
+    raise RuntimeError(
+        f"Unreachable retry loop while downloading Drive file {file_id}."
+    )
 
 
 def _excel_column_index(cell_ref: str) -> int | None:
@@ -600,6 +705,10 @@ def download_drive_markdown(
     pdf_ocr_model_path: str,
     drive_max_files: int | None = None,
     drive_batch_size: int | None = 20,
+    drive_download_max_retries: int = 3,
+    drive_download_retry_initial_delay_seconds: float = 0.5,
+    drive_download_retry_max_delay_seconds: float = 8.0,
+    drive_download_retry_backoff_multiplier: float = 2.0,
     skip_existing: bool = False,
     update_existing: bool = True,
     sync_deleted: bool = False,
@@ -648,6 +757,12 @@ def download_drive_markdown(
 
     docs_count = 0
     sheets_count = 0
+    download_retry_options = {
+        "max_retries": drive_download_max_retries,
+        "initial_delay_seconds": drive_download_retry_initial_delay_seconds,
+        "max_delay_seconds": drive_download_retry_max_delay_seconds,
+        "backoff_multiplier": drive_download_retry_backoff_multiplier,
+    }
 
     batches = _split_batches(drive_files, batch_size=drive_batch_size)
     if len(batches) > 1:
@@ -685,6 +800,7 @@ def download_drive_markdown(
                             drive_service,
                             file_id=drive_file.file_id,
                             mime_type="text/markdown",
+                            **download_retry_options,
                         )
                         text = content.decode("utf-8", errors="replace")
                         text = _strip_drive_image_placeholders(text)
@@ -693,6 +809,7 @@ def download_drive_markdown(
                             drive_service,
                             file_id=drive_file.file_id,
                             mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            **download_retry_options,
                         )
                         text = _extract_pptx_text(content)
                     elif drive_file.mime_type in DRIVE_WORD_MIMES:
@@ -703,7 +820,9 @@ def download_drive_markdown(
                             )
                             continue
                         content = _download_file_bytes(
-                            drive_service, file_id=drive_file.file_id
+                            drive_service,
+                            file_id=drive_file.file_id,
+                            **download_retry_options,
                         )
                         text = _extract_docx_text(content)
                     elif drive_file.mime_type in DRIVE_POWERPOINT_MIMES:
@@ -714,12 +833,16 @@ def download_drive_markdown(
                             )
                             continue
                         content = _download_file_bytes(
-                            drive_service, file_id=drive_file.file_id
+                            drive_service,
+                            file_id=drive_file.file_id,
+                            **download_retry_options,
                         )
                         text = _extract_pptx_text(content)
                     elif drive_file.mime_type == DRIVE_PDF_MIME:
                         content = _download_file_bytes(
-                            drive_service, file_id=drive_file.file_id
+                            drive_service,
+                            file_id=drive_file.file_id,
+                            **download_retry_options,
                         )
                         text = _extract_pdf_text(
                             content,
@@ -753,6 +876,7 @@ def download_drive_markdown(
                             drive_service,
                             file_id=drive_file.file_id,
                             mime_type="text/csv",
+                            **download_retry_options,
                         )
                         csv_text = csv_bytes.decode("utf-8", errors="replace")
                     elif drive_file.mime_type in DRIVE_EXCEL_MIMES:
@@ -763,7 +887,9 @@ def download_drive_markdown(
                             )
                             continue
                         xlsx_bytes = _download_file_bytes(
-                            drive_service, file_id=drive_file.file_id
+                            drive_service,
+                            file_id=drive_file.file_id,
+                            **download_retry_options,
                         )
                         csv_text = _extract_xlsx_csv_text(xlsx_bytes)
                     else:

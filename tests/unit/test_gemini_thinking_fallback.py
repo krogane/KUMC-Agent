@@ -84,6 +84,35 @@ class GeminiThinkingFallbackTests(unittest.TestCase):
         self.assertEqual(models.calls[0]["config_kwargs"]["system_instruction"], "system")
         self.assertNotIn("thinking_config", models.calls[0]["config_kwargs"])
 
+    def test_gemini_llm_uses_custom_limiter_name(self) -> None:
+        models = _FakeModels()
+        llm = GeminiLLM(
+            api_key="dummy",
+            model="gemini-2.5-flash-lite",
+            requests_per_minute=60,
+            limiter_name="index_summary",
+        )
+
+        with patch.dict(sys.modules, _fake_google_modules(models=models), clear=False):
+            with patch(
+                "kumc_agent.infra.llm.gemini.wait_for_gemini_rate_limit"
+            ) as wait_mock:
+                text = llm.generate(
+                    system_prompt="system",
+                    user_prompt="user",
+                    temperature=0.1,
+                    max_output_tokens=128,
+                    thinking_level="minimal",
+                )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(wait_mock.call_count, 1)
+        self.assertEqual(
+            wait_mock.call_args.kwargs["max_requests_per_minute"],
+            60,
+        )
+        self.assertEqual(wait_mock.call_args.kwargs["limiter_name"], "index_summary")
+
     def test_gemini_llm_retries_without_thinking_on_error(self) -> None:
         models = _FakeModels()
         llm = GeminiLLM(

@@ -290,6 +290,10 @@ class IntegrationDriveSection:
     google_application_credentials: str
     max_files: int
     batch_size: int
+    download_max_retries: int
+    download_retry_initial_delay_seconds: float
+    download_retry_max_delay_seconds: float
+    download_retry_backoff_multiplier: float
     pdf_ocr_model_path: str
 
 

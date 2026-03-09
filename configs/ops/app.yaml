@@ -135,6 +135,10 @@ integrations:
     google_application_credentials: ""
     max_files: 0
     batch_size: 20
+    download_max_retries: 3
+    download_retry_initial_delay_seconds: 0.5
+    download_retry_max_delay_seconds: 8.0
+    download_retry_backoff_multiplier: 2.0
     pdf_ocr_model_path: "model/ocr/tencent/HunyuanOCR"
   crafters_colony:
     author_url: ""

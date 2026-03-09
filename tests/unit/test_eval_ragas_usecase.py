@@ -57,6 +57,25 @@ class EvaluateRagasUsecaseTests(unittest.TestCase):
         )
         return path
 
+    def _write_eval_jsonl_with_query_key(self, base: Path, *, count: int = 1) -> Path:
+        path = base / "ragas.jsonl"
+        lines = []
+        for i in range(count):
+            lines.append(
+                json.dumps(
+                    {
+                        "query": f"KUMCは何のサークル？{i}",
+                        "ground_truth": "Minecraft",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        path.write_text(
+            "\n".join(lines) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
     def test_execute_runs_enabled_ragas_metrics(self) -> None:
         fake_chat = _FakeChatUsecase()
         usecase = EvaluateRagasUsecase(
@@ -214,6 +233,25 @@ class EvaluateRagasUsecaseTests(unittest.TestCase):
 
         self.assertEqual(result.total, 1)
         self.assertEqual(result.ragas_metrics, {})
+
+    def test_execute_accepts_query_field_alias(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = EvaluateRagasUsecase(chat_usecase=fake_chat)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            eval_file = self._write_eval_jsonl_with_query_key(Path(tmp), count=2)
+            with patch.dict(
+                sys.modules,
+                {"datasets": None, "ragas": None, "ragas.metrics": None},
+                clear=False,
+            ):
+                result = usecase.execute(EvaluateRagasRequest(eval_file=eval_file))
+
+        self.assertEqual(result.total, 2)
+        self.assertEqual(
+            fake_chat.queries,
+            ["KUMCは何のサークル？0", "KUMCは何のサークル？1"],
+        )
 
 
 if __name__ == "__main__":

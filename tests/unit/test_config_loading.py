@@ -116,6 +116,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     google_application_credentials: ""
                     max_files: 0
                     batch_size: 20
+                    download_max_retries: 3
+                    download_retry_initial_delay_seconds: 0.5
+                    download_retry_max_delay_seconds: 8.0
+                    download_retry_backoff_multiplier: 2.0
                   crafters_colony:
                     author_url: ""
                     max_pages: 100
@@ -292,6 +296,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
+                    "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
+                    "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
+                    "KUMC_DRIVE_DOWNLOAD_RETRY_MAX_DELAY_SECONDS": "5",
+                    "KUMC_DRIVE_DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "1.5",
                     "KUMC_RAGAS_BATCH_SIZE": "4",
                     "KUMC_RAGAS_METRIC_ANSWER_RELEVANCY_ENABLED": "0",
                     "KUMC_RAGAS_METRIC_FAITHFULNESS_ENABLED": "1",
@@ -326,6 +334,19 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.integrations.gemini_summary_requests_per_minute, 7)
             self.assertEqual(config.integrations.gemini_ragas_requests_per_minute, 5)
             self.assertEqual(config.integrations.drive.batch_size, 11)
+            self.assertEqual(config.integrations.drive.download_max_retries, 4)
+            self.assertEqual(
+                config.integrations.drive.download_retry_initial_delay_seconds,
+                0.25,
+            )
+            self.assertEqual(
+                config.integrations.drive.download_retry_max_delay_seconds,
+                5.0,
+            )
+            self.assertEqual(
+                config.integrations.drive.download_retry_backoff_multiplier,
+                1.5,
+            )
             self.assertEqual(config.indexing.chunking.summary_batch_size, 3)
             self.assertEqual(config.indexing.chunking.summary_llm_provider, "gemini")
             self.assertEqual(config.indexing.chunking.summary_gemini_model, "gemini-summary")

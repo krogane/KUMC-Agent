@@ -84,7 +84,7 @@ class EvaluateRagasUsecase:
         overlap_scores: list[float] = []
 
         for item in items:
-            question = str(item.get("question") or "").strip()
+            question = self._question_text(item)
             if not question:
                 continue
             answer_obj = self._chat_usecase.execute(
@@ -154,6 +154,15 @@ class EvaluateRagasUsecase:
                     continue
                 out.append(json.loads(line))
         return out
+
+    @staticmethod
+    def _question_text(item: dict[str, object]) -> str:
+        # Backward compatibility: some eval datasets use "query" instead of "question".
+        for key in ("question", "query"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+        return ""
 
     @staticmethod
     def _ground_truths(item: dict[str, object]) -> list[str]:

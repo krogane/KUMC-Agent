@@ -17,10 +17,12 @@ class GeminiLLM(LLMPort):
         api_key: str,
         model: str,
         requests_per_minute: int = 60,
+        limiter_name: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._requests_per_minute = max(0, int(requests_per_minute))
+        self._limiter_name = (limiter_name or "").strip()
 
     def generate(
         self,
@@ -51,7 +53,8 @@ class GeminiLLM(LLMPort):
                         thinking_level=thinking_level
                     )
                 wait_for_gemini_rate_limit(
-                    max_requests_per_minute=self._requests_per_minute
+                    max_requests_per_minute=self._requests_per_minute,
+                    limiter_name=self._limiter_name,
                 )
                 return client.models.generate_content(
                     model=self._model,

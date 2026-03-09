@@ -12,6 +12,10 @@ class GoogleDriveLoader:
         raw_dir: Path,
         max_files: int,
         batch_size: int,
+        download_max_retries: int,
+        download_retry_initial_delay_seconds: float,
+        download_retry_max_delay_seconds: float,
+        download_retry_backoff_multiplier: float,
         pdf_ocr_model_path: str,
     ) -> None:
         self._folder_id = folder_id
@@ -19,6 +23,14 @@ class GoogleDriveLoader:
         self._raw_dir = raw_dir
         self._max_files = max_files
         self._batch_size = batch_size
+        self._download_max_retries = download_max_retries
+        self._download_retry_initial_delay_seconds = (
+            download_retry_initial_delay_seconds
+        )
+        self._download_retry_max_delay_seconds = download_retry_max_delay_seconds
+        self._download_retry_backoff_multiplier = (
+            download_retry_backoff_multiplier
+        )
         self._pdf_ocr_model_path = pdf_ocr_model_path
 
     def load(self) -> int:
@@ -40,6 +52,16 @@ class GoogleDriveLoader:
             pdf_ocr_model_path=self._pdf_ocr_model_path,
             drive_max_files=self._max_files,
             drive_batch_size=self._batch_size,
+            drive_download_max_retries=self._download_max_retries,
+            drive_download_retry_initial_delay_seconds=(
+                self._download_retry_initial_delay_seconds
+            ),
+            drive_download_retry_max_delay_seconds=(
+                self._download_retry_max_delay_seconds
+            ),
+            drive_download_retry_backoff_multiplier=(
+                self._download_retry_backoff_multiplier
+            ),
             skip_existing=False,
             update_existing=True,
             sync_deleted=True,
