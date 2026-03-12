@@ -9,6 +9,7 @@ _WINDOW_SECONDS = 60.0
 _DEFAULT_LIMITER_NAME = "default"
 _RAGAS_LIMITER_NAME = "ragas_eval"
 _INDEX_SUMMARY_LIMITER_NAME = "index_summary"
+_EMBEDDING_LIMITER_NAME = "embedding"
 
 logger = logging.getLogger(__name__)
 
@@ -71,3 +72,7 @@ def ragas_rate_limiter_name() -> str:
 
 def index_summary_rate_limiter_name() -> str:
     return _INDEX_SUMMARY_LIMITER_NAME
+
+
+def embedding_rate_limiter_name() -> str:
+    return _EMBEDDING_LIMITER_NAME

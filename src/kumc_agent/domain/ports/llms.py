@@ -11,6 +11,5 @@ class LLMPort(Protocol):
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         ...

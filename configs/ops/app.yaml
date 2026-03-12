@@ -40,6 +40,48 @@ rag:
     provider: "gemini"
     gemini_model: "gemini-2.5-flash-lite"
     llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+    prompt_name: "routing"
+    tasks:
+      target_model:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_target_model"
+      use_additional_memory:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_use_additional_memory"
+      include_capabilities_info:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_include_capabilities_info"
+      idea_generation:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_idea_generation"
+      needs_additional_query:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_needs_additional_query"
+      additional_queries:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_additional_queries"
+      material_names:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_material_names"
+      recency_mode:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
+        prompt_name: "routing_recency_mode"
     temperature: 0.0
     max_new_tokens: 128
     max_retries: 1
@@ -56,7 +98,7 @@ rag:
   generation:
     rag:
       provider: "gemini"
-      gemini_model: "gemini-3.1-flash-lite-preview"
+      gemini_model: "gemini-3-flash-preview"
       llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
       temperature: 0.0
       max_output_tokens: 1024
@@ -88,13 +130,31 @@ indexing:
     second_recursive_chunk_size: 384
     second_recursive_chunk_overlap: 64
     summary_characters: 200
-    summary_batch_size: 1000
+    summary_batch_size: 2000
     summary_llm_provider: "gemini"
     summary_gemini_model: "gemini-2.5-flash-lite"
     summary_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
     summary_temperature: 0.0
     summary_max_output_tokens: 1024
     summary_thinking_level: "minimal"
+    proposition_llm_provider: "gemini"
+    proposition_gemini_model: "gemini-2.5-flash-lite"
+    proposition_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
+    proposition_temperature: 0.0
+    proposition_max_output_tokens: 4096
+    proposition_thinking_level: "minimal"
+    proposition_max_retries: 2
+    raptor_llm_provider: "gemini"
+    raptor_gemini_model: "gemini-2.5-flash-lite"
+    raptor_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
+    raptor_temperature: 0.0
+    raptor_max_output_tokens: 256
+    raptor_thinking_level: "minimal"
+    raptor_max_retries: 2
+    raptor_cluster_max_tokens: 1024
+    raptor_stop_chunk_count: 20
+    raptor_k_max: 8
+    raptor_k_selection: "elbow"
   stages:
     second_recursive_enabled: true
     sparse_second_recursive_enabled: true
@@ -119,7 +179,7 @@ ops:
   warmup_interval_minutes: 60
   index_update_estimate_min_minutes: 30
   index_update_estimate_max_minutes: 60
-  ragas_batch_size: 1000
+  ragas_batch_size: 2000
   ragas_metrics:
     answer_relevancy_enabled: true
     faithfulness_enabled: true
@@ -139,12 +199,13 @@ integrations:
     download_retry_initial_delay_seconds: 0.5
     download_retry_max_delay_seconds: 8.0
     download_retry_backoff_multiplier: 2.0
-    pdf_ocr_model_path: "model/ocr/tencent/HunyuanOCR"
+    pdf_ocr_model_path: "model/ocr/PaddlePaddle/PP-OCRv5_mobile"
   crafters_colony:
     author_url: ""
     max_pages: 100
     max_articles: 0
   gemini_api_key: ""
   gemini_requests_per_minute: 30
-  gemini_summary_requests_per_minute: 1000
-  gemini_ragas_requests_per_minute: 1000
+  gemini_embedding_requests_per_minute: 20
+  gemini_summary_requests_per_minute: 2000
+  gemini_ragas_requests_per_minute: 2000

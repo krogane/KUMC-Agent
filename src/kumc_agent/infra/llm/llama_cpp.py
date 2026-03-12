@@ -18,7 +18,6 @@ class LlamaCppLLM(LLMPort):
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         if not self._model_path:
             return "llama.cppモデルが未設定のため、ローカルフォールバック回答です。"

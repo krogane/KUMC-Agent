@@ -4,7 +4,6 @@ from functools import lru_cache
 from typing import Any
 
 from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
-from kumc_agent.infra.llm.gemini_thinking import run_with_optional_thinking
 from kumc_agent.infra.llm.llama_lock import LLAMA_LOCK, reset_llama_cache
 
 
@@ -19,7 +18,6 @@ def generate_text(
     llama_ctx_size: int,
     temperature: float,
     max_output_tokens: int,
-    thinking_level: str,
     llama_threads: int,
     llama_gpu_layers: int,
     response_mime_type: str | None = None,
@@ -34,7 +32,6 @@ def generate_text(
             model=model,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            thinking_level=thinking_level,
             response_mime_type=response_mime_type,
             requests_per_minute=gemini_requests_per_minute,
         )
@@ -62,7 +59,6 @@ def _generate_with_gemini(
     model: str,
     temperature: float,
     max_output_tokens: int,
-    thinking_level: str,
     response_mime_type: str | None,
     requests_per_minute: int,
 ) -> str:
@@ -74,30 +70,19 @@ def _generate_with_gemini(
     client = _genai_client(api_key)
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
 
-    def _request(include_thinking: bool):
-        config_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_output_tokens": max_output_tokens,
-        }
-        if system_prompt:
-            config_kwargs["system_instruction"] = system_prompt
-        if include_thinking:
-            config_kwargs["thinking_config"] = genai.types.ThinkingConfig(
-                thinking_level=thinking_level
-            )
-        if response_mime_type:
-            config_kwargs["response_mime_type"] = response_mime_type
-        wait_for_gemini_rate_limit(max_requests_per_minute=requests_per_minute)
-        return client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=genai.types.GenerateContentConfig(**config_kwargs),
-        )
-
-    response = run_with_optional_thinking(
-        model_name=model,
-        request_label="VC Gemini generation",
-        run_request=_request,
+    config_kwargs: dict[str, Any] = {
+        "temperature": temperature,
+        "max_output_tokens": max_output_tokens,
+    }
+    if system_prompt:
+        config_kwargs["system_instruction"] = system_prompt
+    if response_mime_type:
+        config_kwargs["response_mime_type"] = response_mime_type
+    wait_for_gemini_rate_limit(max_requests_per_minute=requests_per_minute)
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=genai.types.GenerateContentConfig(**config_kwargs),
     )
     return (response.text or "").strip()
 

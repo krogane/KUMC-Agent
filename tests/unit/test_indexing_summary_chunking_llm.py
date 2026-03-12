@@ -22,7 +22,6 @@ class _StubLLM:
         self.response_text = response_text
         self.last_temperature = 0.0
         self.last_max_output_tokens = 0
-        self.last_thinking_level = ""
         self.calls = 0
 
     def generate(
@@ -32,12 +31,10 @@ class _StubLLM:
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         self.calls += 1
         self.last_temperature = temperature
         self.last_max_output_tokens = max_output_tokens
-        self.last_thinking_level = thinking_level
         return self.response_text
 
 
@@ -56,7 +53,6 @@ class _ParallelStubLLM(_StubLLM):
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         with self._lock:
             self._in_flight += 1
@@ -68,7 +64,6 @@ class _ParallelStubLLM(_StubLLM):
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
-                thinking_level=thinking_level,
             )
         finally:
             with self._lock:
@@ -113,7 +108,6 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
             self.assertEqual(llm.calls, 1)
             self.assertEqual(llm.last_temperature, 0.15)
             self.assertEqual(llm.last_max_output_tokens, 64)
-            self.assertEqual(llm.last_thinking_level, "minimal")
 
     def test_summary_falls_back_to_truncation_when_provider_is_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

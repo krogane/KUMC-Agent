@@ -18,7 +18,7 @@ class HatenaBlogLoader:
         downloaded = download_hatenablog_articles(
             blog_url=self._blog_url,
             output_dir=output_dir,
-            skip_existing=False,
+            skip_existing=True,
             update_existing=True,
             sync_deleted=True,
         )

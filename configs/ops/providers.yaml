@@ -1,7 +1,7 @@
 providers:
   llm:
     provider: "gemini"
-    gemini_model: "gemini-3.1-flash-lite-preview"
+    gemini_model: "gemini-3-flash-preview"
     llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
     temperature: 0.0
     max_output_tokens: 1024

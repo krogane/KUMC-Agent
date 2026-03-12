@@ -66,7 +66,6 @@ class GenerationComponent:
         include_capabilities_info: bool = False,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
         answer_prompt_name: str = "answer_rag",
         append_sources_to_response: bool = True,
         extra_mode_instruction: str | None = None,
@@ -145,7 +144,6 @@ class GenerationComponent:
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
-                thinking_level=thinking_level,
             )
             last_raw = raw
             answer_text, source_selections, is_json, has_answer = self._parse_answer_payload(
@@ -201,7 +199,6 @@ class GenerationComponent:
         include_capabilities_info: bool = False,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
         answer_prompt_name: str = "answer_no_rag",
         extra_mode_instruction: str | None = None,
         json_max_retries: int = 2,
@@ -260,7 +257,6 @@ class GenerationComponent:
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
-                thinking_level=thinking_level,
             )
             last_raw = raw
             answer_text, _, is_json, has_answer = self._parse_answer_payload(
@@ -294,7 +290,6 @@ class GenerationComponent:
         provider: str = "gemini",
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
         refusal_prompt_name: str = "answer_refusal",
         extra_mode_instruction: str | None = None,
     ) -> Answer:
@@ -344,7 +339,6 @@ class GenerationComponent:
             user_prompt=user_prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            thinking_level=thinking_level,
         )
         parsed_answer, _, is_json, has_answer = self._parse_answer_payload(
             raw,

@@ -343,7 +343,7 @@ def main() -> None:
                 lambda: context.build_index.execute(
                     BuildIndexRequest(
                         refresh_sources=True,
-                        full_rebuild=True,
+                        full_rebuild=False,
                         allow_cancel=True,
                         cancel_event=indexing_cancel_event,
                     )

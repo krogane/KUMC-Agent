@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import sys
 import tempfile
 import types
@@ -14,7 +15,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from kumc_agent.domain.models.answer import Answer
-from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest, EvaluateRagasUsecase
+from kumc_agent.usecases.eval.ragas import (
+    EvaluateRagasRequest,
+    EvaluateRagasUsecase,
+    _as_legacy_embeddings,
+)
 
 
 class _FakeChatUsecase:
@@ -251,6 +256,122 @@ class EvaluateRagasUsecaseTests(unittest.TestCase):
         self.assertEqual(
             fake_chat.queries,
             ["KUMCは何のサークル？0", "KUMCは何のサークル？1"],
+        )
+
+    def test_build_ragas_llm_skips_when_provider_keyword_is_unsupported(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = EvaluateRagasUsecase(
+            chat_usecase=fake_chat,
+            gemini_api_key="dummy-key",
+            ragas_gemini_model="gemini-2.0-flash",
+        )
+
+        called = {"count": 0}
+
+        google_module = types.ModuleType("google")
+        genai_module = types.ModuleType("google.genai")
+
+        class _Client:
+            def __init__(self, api_key: str) -> None:
+                self.api_key = api_key
+
+        genai_module.Client = _Client  # type: ignore[attr-defined]
+        google_module.genai = genai_module  # type: ignore[attr-defined]
+
+        llms_module = types.ModuleType("ragas.llms")
+
+        def _llm_factory(model, client):  # type: ignore[no-untyped-def]
+            _ = model
+            _ = client
+            called["count"] += 1
+            return object()
+
+        llms_module.llm_factory = _llm_factory  # type: ignore[attr-defined]
+
+        with patch.dict(
+            sys.modules,
+            {
+                "google": google_module,
+                "google.genai": genai_module,
+                "ragas.llms": llms_module,
+            },
+            clear=False,
+        ):
+            llm = usecase._build_ragas_llm()
+
+        self.assertIsNone(llm)
+        self.assertEqual(called["count"], 0)
+
+    def test_build_ragas_llm_passes_google_provider_with_genai_client(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = EvaluateRagasUsecase(
+            chat_usecase=fake_chat,
+            gemini_api_key="dummy-key",
+            ragas_gemini_model="gemini-2.0-flash",
+        )
+
+        captured: dict[str, object] = {}
+
+        google_module = types.ModuleType("google")
+        genai_module = types.ModuleType("google.genai")
+
+        class _Client:
+            def __init__(self, api_key: str) -> None:
+                self.api_key = api_key
+
+        genai_module.Client = _Client  # type: ignore[attr-defined]
+        google_module.genai = genai_module  # type: ignore[attr-defined]
+
+        llms_module = types.ModuleType("ragas.llms")
+
+        def _llm_factory(model, provider, client):  # type: ignore[no-untyped-def]
+            captured["model"] = model
+            captured["provider"] = provider
+            captured["client"] = client
+            return {"ok": True}
+
+        llms_module.llm_factory = _llm_factory  # type: ignore[attr-defined]
+
+        with patch.dict(
+            sys.modules,
+            {
+                "google": google_module,
+                "google.genai": genai_module,
+                "ragas.llms": llms_module,
+            },
+            clear=False,
+        ):
+            llm = usecase._build_ragas_llm()
+
+        self.assertEqual(llm, {"ok": True})
+        self.assertEqual(captured["model"], "gemini-2.0-flash")
+        self.assertEqual(captured["provider"], "google")
+        self.assertIsNotNone(captured.get("client"))
+
+    def test_as_legacy_embeddings_wraps_modern_interface(self) -> None:
+        class _ModernEmbeddings:
+            def embed_text(self, text: str):  # type: ignore[no-untyped-def]
+                _ = text
+                return [0.1, 0.2]
+
+            def embed_texts(self, texts):  # type: ignore[no-untyped-def]
+                return [[float(i)] for i, _ in enumerate(texts)]
+
+            async def aembed_text(self, text: str):  # type: ignore[no-untyped-def]
+                _ = text
+                return [0.3, 0.4]
+
+            async def aembed_texts(self, texts):  # type: ignore[no-untyped-def]
+                return [[float(i) + 10.0] for i, _ in enumerate(texts)]
+
+        wrapped = _as_legacy_embeddings(_ModernEmbeddings())
+
+        self.assertEqual(wrapped.embed_query("q"), [0.1, 0.2])
+        self.assertEqual(wrapped.embed_documents(["a", "b"]), [[0.0], [1.0]])
+        self.assertEqual(asyncio.run(wrapped.aembed_query("q")), [0.3, 0.4])
+        self.assertEqual(
+            asyncio.run(wrapped.aembed_documents(["a", "b"])),
+            [[10.0], [11.0]],
         )
 
 

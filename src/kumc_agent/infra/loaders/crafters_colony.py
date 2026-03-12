@@ -31,7 +31,7 @@ class CraftersColonyLoader:
             output_dir=output_dir,
             max_pages=self._max_pages,
             max_articles=self._max_articles,
-            skip_existing=False,
+            skip_existing=True,
             update_existing=True,
             sync_deleted=True,
         )

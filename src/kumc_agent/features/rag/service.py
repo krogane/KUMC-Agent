@@ -119,7 +119,6 @@ class RagService:
                 provider=refusal_generation.provider,
                 temperature=refusal_generation.temperature,
                 max_output_tokens=refusal_generation.max_output_tokens,
-                thinking_level=refusal_generation.thinking_level,
                 refusal_prompt_name=refusal_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
             )
@@ -143,7 +142,6 @@ class RagService:
                 include_capabilities_info=decision.include_capabilities_info,
                 temperature=no_rag_generation.temperature,
                 max_output_tokens=no_rag_generation.max_output_tokens,
-                thinking_level=no_rag_generation.thinking_level,
                 answer_prompt_name=no_rag_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
                 json_max_retries=self._config.answer_json_max_retries,
@@ -194,7 +192,6 @@ class RagService:
                 include_capabilities_info=decision.include_capabilities_info,
                 temperature=no_rag_generation.temperature,
                 max_output_tokens=no_rag_generation.max_output_tokens,
-                thinking_level=no_rag_generation.thinking_level,
                 answer_prompt_name=no_rag_generation.prompt_name,
                 extra_mode_instruction=extra_mode_instruction,
                 json_max_retries=self._config.answer_json_max_retries,
@@ -219,7 +216,6 @@ class RagService:
             include_capabilities_info=decision.include_capabilities_info,
             temperature=rag_generation.temperature,
             max_output_tokens=rag_generation.max_output_tokens,
-            thinking_level=rag_generation.thinking_level,
             answer_prompt_name=rag_generation.prompt_name,
             append_sources_to_response=append_sources_to_response,
             extra_mode_instruction=extra_mode_instruction,
@@ -273,6 +269,7 @@ class RagService:
             query,
             dense_top_k=self._config.dense_top_k,
             sparse_top_k=self._config.sparse_top_k,
+            sparse_initial_sparse_top_k=self._config.sparse_initial_sparse_top_k,
             recency_mode=recency_mode,
             recency_weight_soft=self._config.recency_weight_soft,
             recency_weight_hard=self._config.recency_weight_hard,
@@ -292,6 +289,7 @@ class RagService:
                     transformed_query,
                     dense_top_k=self._config.dense_top_k,
                     sparse_top_k=self._config.sparse_top_k,
+                    sparse_initial_sparse_top_k=self._config.sparse_initial_sparse_top_k,
                     recency_mode=recency_mode,
                     recency_weight_soft=self._config.recency_weight_soft,
                     recency_weight_hard=self._config.recency_weight_hard,
@@ -862,6 +860,8 @@ class RagService:
         query: str,
         excluded_source_types: set[str],
     ) -> list[_MaterialCatalogEntry]:
+        max_names = max(1, int(self._config.material_search_max_names))
+        excluded = self._normalize_source_type_filters(excluded_source_types)
         normalized_names: list[str] = []
         seen_names: set[str] = set()
         for raw in material_names:
@@ -870,12 +870,16 @@ class RagService:
                 continue
             seen_names.add(normalized)
             normalized_names.append(normalized)
-            if len(normalized_names) >= 3:
+            if len(normalized_names) >= max_names:
                 break
         if not normalized_names:
             return []
 
-        entries = self._material_catalog_entries()
+        entries = [
+            entry
+            for entry in self._material_catalog_entries()
+            if str(entry.source_type or "").strip().lower() not in excluded
+        ]
         if not entries:
             return []
 
@@ -897,7 +901,7 @@ class RagService:
                 if name in aliases(entry):
                     strict_matches.append(entry)
         if strict_matches:
-            return self._dedupe_material_entries(strict_matches, limit=3)
+            return self._dedupe_material_entries(strict_matches, limit=max_names)
 
         partial_matches: list[_MaterialCatalogEntry] = []
         for name in normalized_names:
@@ -916,7 +920,7 @@ class RagService:
         )
         if selected is not None:
             return [selected]
-        return deduped_partial_matches[:3]
+        return deduped_partial_matches[:max_names]
 
     def _dedupe_material_entries(
         self,
@@ -977,13 +981,13 @@ class RagService:
         excluded_source_types: set[str],
         recency_mode: str,
     ) -> list[Chunk]:
-        _ = recency_mode
         chunks = self._retrieve_filtered_candidates(
             query=query,
             dense_top_k=self._config.dense_top_k,
             sparse_top_k=self._config.sparse_top_k,
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
+            recency_mode=recency_mode,
         )
         if chunks:
             return chunks
@@ -993,6 +997,7 @@ class RagService:
             sparse_top_k=0,
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
+            recency_mode=recency_mode,
         )
 
     def _retrieve_filtered_candidates(
@@ -1003,10 +1008,12 @@ class RagService:
         sparse_top_k: int,
         material_keys: set[tuple[str, str]] | None,
         excluded_source_types: set[str] | None,
+        recency_mode: str = "off",
     ) -> list[Chunk]:
         results: list[Chunk] = []
         seen: set[tuple[object, ...]] = set()
         target = max(1, dense_top_k)
+        effective_recency_mode = self._resolve_recency_mode(recency_mode)
         for mult in (1, 2, 4, 8):
             dense_k = max(0, int(dense_top_k) * mult)
             sparse_k = max(0, int(sparse_top_k) * mult)
@@ -1014,7 +1021,7 @@ class RagService:
                 query,
                 dense_top_k=dense_k,
                 sparse_top_k=sparse_k,
-                recency_mode="off",
+                recency_mode=effective_recency_mode,
                 recency_weight_soft=self._config.recency_weight_soft,
                 recency_weight_hard=self._config.recency_weight_hard,
                 recency_half_life_days=self._config.recency_half_life_days,

@@ -15,7 +15,7 @@ class XPostsLoader:
         stats = convert_x_tweets_js_to_jsonl(
             raw_x_dir=output_dir,
             output_path=output_dir / "posts.jsonl",
-            skip_existing=False,
+            skip_existing=True,
             update_existing=True,
             sync_deleted=True,
         )

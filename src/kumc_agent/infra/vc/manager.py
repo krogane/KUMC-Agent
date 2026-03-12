@@ -111,7 +111,6 @@ class _LLMConfig:
     llama_ctx_size: int
     temperature: float
     max_output_tokens: int
-    thinking_level: str
 
 
 @dataclass
@@ -281,7 +280,6 @@ class VoiceMeetingManager:
             llama_ctx_size=self._config.vc_summary_llama_ctx_size,
             temperature=self._config.vc_summary_temperature,
             max_output_tokens=self._config.vc_summary_max_output_tokens,
-            thinking_level=self._config.vc_summary_thinking_level,
         )
         self._minutes_edit_llm_cfg = _LLMConfig(
             provider=(self._config.vc_minutes_edit_llm_provider or "").lower(),
@@ -294,7 +292,6 @@ class VoiceMeetingManager:
             llama_ctx_size=self._config.vc_minutes_edit_llama_ctx_size,
             temperature=self._config.vc_minutes_edit_temperature,
             max_output_tokens=self._config.vc_minutes_edit_max_output_tokens,
-            thinking_level=self._config.vc_minutes_edit_thinking_level,
         )
         self._final_llm_cfg = _LLMConfig(
             provider=(self._config.vc_final_summary_llm_provider or "").lower(),
@@ -307,7 +304,6 @@ class VoiceMeetingManager:
             llama_ctx_size=self._config.vc_final_summary_llama_ctx_size,
             temperature=self._config.vc_final_summary_temperature,
             max_output_tokens=self._config.vc_final_summary_max_output_tokens,
-            thinking_level=self._config.vc_final_summary_thinking_level,
         )
         self._minutes_client = GoogleDocsMinutesClient(
             drive_folder_id=self._config.drive_folder_id,
@@ -1606,7 +1602,6 @@ class VoiceMeetingManager:
             llama_ctx_size=cfg.llama_ctx_size,
             temperature=cfg.temperature,
             max_output_tokens=cfg.max_output_tokens,
-            thinking_level=cfg.thinking_level,
             llama_threads=self._config.llama_threads,
             llama_gpu_layers=self._config.llama_gpu_layers,
             response_mime_type=response_mime_type,

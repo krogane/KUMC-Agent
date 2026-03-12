@@ -10,6 +10,7 @@ langchain-huggingface
 langchain-text-splitters
 sentence-transformers
 torch
+torchvision
 llama-cpp-python
 python-dotenv
 faiss-cpu
@@ -17,10 +18,14 @@ ragas
 datasets
 numpy
 transformers
+einops
 PyMuPDF
 Pillow
+paddleocr
+paddlepaddle
 sudachipy
 sudachidict_core
 rank-bm25
 jsonref
 PyYAML
+pytest

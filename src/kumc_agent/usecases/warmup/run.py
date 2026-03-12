@@ -50,6 +50,12 @@ class WarmupResult:
         return sum(1 for step in self.steps if step.status == "failed")
 
 
+@dataclass(frozen=True)
+class _RoutingWarmupTask:
+    provider: str
+    llama_model_path: str
+
+
 class WarmupUsecase:
     def __init__(
         self,
@@ -104,7 +110,6 @@ class WarmupUsecase:
             llm=self._rag_llm,
             temperature=self._config.rag.generation.rag.temperature,
             max_output_tokens=self._config.rag.generation.rag.max_output_tokens,
-            thinking_level=self._config.rag.generation.rag.thinking_level,
         )
         self._execute_generation_step(
             steps=steps,
@@ -114,7 +119,6 @@ class WarmupUsecase:
             llm=self._no_rag_llm,
             temperature=self._config.rag.generation.no_rag.temperature,
             max_output_tokens=self._config.rag.generation.no_rag.max_output_tokens,
-            thinking_level=self._config.rag.generation.no_rag.thinking_level,
         )
         self._execute_generation_step(
             steps=steps,
@@ -124,7 +128,6 @@ class WarmupUsecase:
             llm=self._refusal_llm,
             temperature=self._config.rag.generation.refusal.temperature,
             max_output_tokens=self._config.rag.generation.refusal.max_output_tokens,
-            thinking_level=self._config.rag.generation.refusal.thinking_level,
         )
 
         result = WarmupResult(trigger=trigger, steps=tuple(steps))
@@ -147,7 +150,6 @@ class WarmupUsecase:
         llm: LLMPort,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> None:
         if not self._is_local_llm_provider(provider):
             steps.append(
@@ -176,7 +178,6 @@ class WarmupUsecase:
                 llm=llm,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
-                thinking_level=thinking_level,
             ),
         )
 
@@ -205,9 +206,12 @@ class WarmupUsecase:
     def _is_local_routing_enabled(self) -> bool:
         if not self._config.rag.routing.enabled:
             return False
-        if not self._is_local_llm_provider(self._config.rag.routing.provider):
-            return False
-        return bool(str(self._config.rag.routing.llama_model_path or "").strip())
+        for task in self._routing_tasks():
+            if not self._is_local_llm_provider(task.provider):
+                continue
+            if str(task.llama_model_path or "").strip():
+                return True
+        return False
 
     def _embedding_skip_detail(self) -> str:
         provider = str(self._config.providers.embeddings.provider or "").strip()
@@ -231,12 +235,55 @@ class WarmupUsecase:
     def _routing_skip_detail(self) -> str:
         if not self._config.rag.routing.enabled:
             return "routing is disabled"
-        provider = str(self._config.rag.routing.provider or "").strip()
-        if not self._is_local_llm_provider(provider):
-            return f"provider={provider!r} is not local"
-        if not str(self._config.rag.routing.llama_model_path or "").strip():
-            return "routing llama_model_path is not set"
+        local_tasks = [
+            task for task in self._routing_tasks() if self._is_local_llm_provider(task.provider)
+        ]
+        if not local_tasks:
+            return "all routing tasks use non-local providers"
+        if not any(str(task.llama_model_path or "").strip() for task in local_tasks):
+            return "routing llama_model_path is not set for local tasks"
         return ""
+
+    def _routing_tasks(self) -> tuple[_RoutingWarmupTask, ...]:
+        routing_config = self._config.rag.routing
+        tasks = getattr(routing_config, "tasks", None)
+        if tasks is None:
+            return (
+                _RoutingWarmupTask(
+                    provider=str(getattr(routing_config, "provider", "")),
+                    llama_model_path=str(getattr(routing_config, "llama_model_path", "")),
+                ),
+            )
+
+        task_names = (
+            "target_model",
+            "use_additional_memory",
+            "include_capabilities_info",
+            "idea_generation",
+            "needs_additional_query",
+            "additional_queries",
+            "material_names",
+            "recency_mode",
+        )
+        resolved: list[_RoutingWarmupTask] = []
+        for name in task_names:
+            task = getattr(tasks, name, None)
+            if task is None:
+                continue
+            resolved.append(
+                _RoutingWarmupTask(
+                    provider=str(getattr(task, "provider", "")),
+                    llama_model_path=str(getattr(task, "llama_model_path", "")),
+                )
+            )
+        if resolved:
+            return tuple(resolved)
+        return (
+            _RoutingWarmupTask(
+                provider=str(getattr(routing_config, "provider", "")),
+                llama_model_path=str(getattr(routing_config, "llama_model_path", "")),
+            ),
+        )
 
     def _execute_step(
         self,
@@ -295,14 +342,12 @@ class WarmupUsecase:
         llm: LLMPort,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> None:
         llm.generate(
             system_prompt="You are a warmup assistant.",
             user_prompt="hello",
             temperature=float(max(0.0, temperature)),
             max_output_tokens=self._warmup_max_tokens(max_output_tokens),
-            thinking_level=str(thinking_level or "minimal"),
         )
 
     @staticmethod

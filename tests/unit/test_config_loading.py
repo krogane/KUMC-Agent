@@ -126,6 +126,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     max_articles: 0
                   gemini_api_key: ""
                   gemini_requests_per_minute: 60
+                  gemini_embedding_requests_per_minute: 9
                   gemini_summary_requests_per_minute: 8
                   gemini_ragas_requests_per_minute: 10
                 """
@@ -291,6 +292,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_GEMINI_REQUESTS_PER_MINUTE": "12",
+                    "KUMC_GEMINI_EMBEDDING_REQUESTS_PER_MINUTE": "6",
                     "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE": "7",
                     "KUMC_GEMINI_RAGAS_REQUESTS_PER_MINUTE": "5",
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
@@ -331,6 +333,7 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertFalse(config.features.retrieval.sparse_remove_symbols)
             self.assertEqual(config.integrations.discord.bot_token, "token")
             self.assertEqual(config.integrations.gemini_requests_per_minute, 12)
+            self.assertEqual(config.integrations.gemini_embedding_requests_per_minute, 6)
             self.assertEqual(config.integrations.gemini_summary_requests_per_minute, 7)
             self.assertEqual(config.integrations.gemini_ragas_requests_per_minute, 5)
             self.assertEqual(config.integrations.drive.batch_size, 11)

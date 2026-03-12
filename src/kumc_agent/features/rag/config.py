@@ -8,7 +8,6 @@ class RagGenerationSettings:
     provider: str
     temperature: float
     max_output_tokens: int
-    thinking_level: str
     prompt_name: str
 
 
@@ -47,6 +46,7 @@ class RagConfig:
     top_k: int
     dense_top_k: int
     sparse_top_k: int
+    sparse_initial_sparse_top_k: int
     rerank_pool_size: int
     mmr_lambda: float
     recency_weight_soft: float
@@ -58,6 +58,7 @@ class RagConfig:
     no_rag_generation: RagGenerationSettings
     refusal_generation: RagGenerationSettings
     idea_generation: RagIdeaGenerationSettings
+    material_search_max_names: int = 3
     parent_doc_enabled: bool = True
     parent_chunk_cap: int = 2
     answer_json_max_retries: int = 2

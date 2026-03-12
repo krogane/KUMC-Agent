@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -223,6 +224,11 @@ class EvaluateRagasUsecase:
                 context_recall,
                 faithfulness,
             )
+            try:
+                from ragas.metrics.base import MetricWithEmbeddings, MetricWithLLM
+            except Exception:
+                MetricWithEmbeddings = None  # type: ignore[assignment]
+                MetricWithLLM = None  # type: ignore[assignment]
         except ImportError:
             logger.warning(
                 "ragas or datasets is not available. Skipping ragas metrics in current eval."
@@ -251,16 +257,64 @@ class EvaluateRagasUsecase:
                 self._eval_context_recall_enabled,
             ),
         ]
-        metrics = [metric for _, metric, enabled in metric_options if enabled]
-        metric_names = [name for name, _, enabled in metric_options if enabled]
-        if not metrics:
+        metric_pairs = [
+            (name, metric) for name, metric, enabled in metric_options if enabled
+        ]
+        if not metric_pairs:
             raise ValueError("At least one RAGAS metric must be enabled.")
+        llm = self._build_ragas_llm()
+        if llm is None and MetricWithLLM is not None:
+            llm_metric_names = [
+                name
+                for name, metric in metric_pairs
+                if isinstance(metric, MetricWithLLM)
+            ]
+            if llm_metric_names:
+                logger.warning(
+                    "Skipping LLM-based RAGAS metrics because custom evaluator LLM "
+                    "could not be initialized: %s",
+                    ", ".join(llm_metric_names),
+                )
+            metric_pairs = [
+                (name, metric)
+                for name, metric in metric_pairs
+                if not isinstance(metric, MetricWithLLM)
+            ]
+
+        embeddings = self._build_ragas_embeddings()
+        if embeddings is None and MetricWithEmbeddings is not None:
+            embedding_metric_names = [
+                name
+                for name, metric in metric_pairs
+                if isinstance(metric, MetricWithEmbeddings)
+            ]
+            if embedding_metric_names:
+                logger.warning(
+                    "Skipping embedding-based RAGAS metrics because embeddings "
+                    "client could not be initialized: %s",
+                    ", ".join(embedding_metric_names),
+                )
+            metric_pairs = [
+                (name, metric)
+                for name, metric in metric_pairs
+                if not isinstance(metric, MetricWithEmbeddings)
+            ]
+
+        if not metric_pairs:
+            logger.warning(
+                "No runnable RAGAS metrics remain after dependency/client checks."
+            )
+            return {}
+
+        metric_names = [name for name, _ in metric_pairs]
+        metrics = [metric for _, metric in metric_pairs]
         logger.info("Enabled RAGAS metrics (current): %s", ", ".join(metric_names))
 
         eval_kwargs: dict[str, object] = {"metrics": metrics}
-        llm = self._build_ragas_llm()
         if llm is not None:
             eval_kwargs["llm"] = llm
+        if embeddings is not None:
+            eval_kwargs["embeddings"] = embeddings
 
         batches = _split_batches(records, batch_size=ragas_batch_size)
         if len(batches) > 1:
@@ -337,25 +391,72 @@ class EvaluateRagasUsecase:
             logger.info("ragas.llms is not available. Running ragas without custom LLM.")
             return None
 
-        client = _RateLimitedGeminiClient(
-            genai.Client(api_key=self._gemini_api_key),
-            max_requests_per_minute=self._ragas_gemini_requests_per_minute,
-        )
+        if not _callable_accepts_keyword_argument(llm_factory, "provider"):
+            logger.warning(
+                "Installed ragas.llms.llm_factory does not support 'provider'. "
+                "Skipping custom Gemini LLM to avoid incompatible client API."
+            )
+            return None
+
+        if not _callable_accepts_keyword_argument(llm_factory, "client"):
+            logger.warning(
+                "Installed ragas.llms.llm_factory does not support 'client'. "
+                "Skipping custom Gemini LLM because this ragas version requires"
+                " provider-specific client wiring."
+            )
+            return None
+
         try:
-            return llm_factory(self._ragas_gemini_model, provider="google", client=client)
+            client = genai.Client(api_key=self._gemini_api_key)
+        except Exception:
+            logger.exception("Failed to initialize Gemini client for RAGAS LLM.")
+            return None
+
+        llm_kwargs: dict[str, object] = {"provider": "google", "client": client}
+
+        try:
+            return llm_factory(self._ragas_gemini_model, **llm_kwargs)
         except TypeError:
             try:
                 return llm_factory(self._ragas_gemini_model, client=client)
             except Exception:
-                logger.exception(
-                    "Failed to build custom RAGAS LLM with rate-limited Gemini client."
-                )
+                logger.exception("Failed to build custom RAGAS LLM with Gemini provider.")
                 return None
         except Exception:
-            logger.exception(
-                "Failed to build custom RAGAS LLM with rate-limited Gemini client."
+            logger.exception("Failed to build custom RAGAS LLM with Gemini provider.")
+            return None
+
+    def _build_ragas_embeddings(self):
+        if not self._gemini_api_key:
+            return None
+        try:
+            from google import genai
+        except ImportError:
+            logger.info(
+                "google-genai is not available. Running ragas without custom embeddings."
             )
             return None
+
+        try:
+            from ragas.embeddings.google_provider import GoogleEmbeddings
+        except ImportError:
+            logger.info(
+                "ragas.embeddings is not available. Running ragas without custom embeddings."
+            )
+            return None
+
+        try:
+            client = genai.Client(api_key=self._gemini_api_key)
+        except Exception:
+            logger.exception("Failed to initialize Gemini client for RAGAS embeddings.")
+            return None
+
+        try:
+            embeddings = GoogleEmbeddings(client=client)
+        except Exception:
+            logger.exception("Failed to build RAGAS embeddings with Gemini client.")
+            return None
+        return _as_legacy_embeddings(embeddings)
 
     @staticmethod
     def _extract_summary_metrics(result: object) -> dict[str, float]:
@@ -438,37 +539,72 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-class _RateLimitedGeminiClient:
-    def __init__(self, client: object, *, max_requests_per_minute: int) -> None:
-        self._client = client
-        models = getattr(client, "models", None)
-        if models is None:
-            self.models = None
-        else:
-            self.models = _RateLimitedGeminiModelsProxy(
-                models,
-                max_requests_per_minute=max_requests_per_minute,
-            )
+def _callable_accepts_keyword_argument(func: object, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        # If the signature cannot be inspected, prefer optimistic behavior.
+        return True
+    if keyword in signature.parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _as_legacy_embeddings(embeddings: object) -> object:
+    if callable(getattr(embeddings, "embed_query", None)) and callable(
+        getattr(embeddings, "embed_documents", None)
+    ):
+        return embeddings
+    return _LegacyEmbeddingsAdapter(embeddings)
+
+
+class _LegacyEmbeddingsAdapter:
+    def __init__(self, embeddings: object) -> None:
+        self._embeddings = embeddings
 
     def __getattr__(self, item: str):
-        return getattr(self._client, item)
+        return getattr(self._embeddings, item)
 
+    def set_run_config(self, run_config: object) -> None:
+        setter = getattr(self._embeddings, "set_run_config", None)
+        if callable(setter):
+            setter(run_config)
 
-class _RateLimitedGeminiModelsProxy:
-    def __init__(self, models: object, *, max_requests_per_minute: int) -> None:
-        self._models = models
-        self._max_requests_per_minute = max(0, int(max_requests_per_minute))
+    def embed_query(self, text: str) -> list[float]:
+        embed_query = getattr(self._embeddings, "embed_query", None)
+        if callable(embed_query):
+            return list(embed_query(text))
+        embed_text = getattr(self._embeddings, "embed_text", None)
+        if callable(embed_text):
+            return list(embed_text(text))
+        raise AttributeError("Underlying embeddings object has no query embedding method.")
 
-    def __getattr__(self, item: str):
-        target = getattr(self._models, item)
-        if not callable(target):
-            return target
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        embed_documents = getattr(self._embeddings, "embed_documents", None)
+        if callable(embed_documents):
+            return [list(v) for v in embed_documents(texts)]
+        embed_texts = getattr(self._embeddings, "embed_texts", None)
+        if callable(embed_texts):
+            return [list(v) for v in embed_texts(texts)]
+        return [self.embed_query(text) for text in texts]
 
-        def _wrapped(*args, **kwargs):
-            wait_for_gemini_rate_limit(
-                max_requests_per_minute=self._max_requests_per_minute,
-                limiter_name=ragas_rate_limiter_name(),
-            )
-            return target(*args, **kwargs)
+    async def aembed_query(self, text: str) -> list[float]:
+        aembed_query = getattr(self._embeddings, "aembed_query", None)
+        if callable(aembed_query):
+            return list(await aembed_query(text))
+        aembed_text = getattr(self._embeddings, "aembed_text", None)
+        if callable(aembed_text):
+            return list(await aembed_text(text))
+        return self.embed_query(text)
 
-        return _wrapped
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        aembed_documents = getattr(self._embeddings, "aembed_documents", None)
+        if callable(aembed_documents):
+            return [list(v) for v in await aembed_documents(texts)]
+        aembed_texts = getattr(self._embeddings, "aembed_texts", None)
+        if callable(aembed_texts):
+            return [list(v) for v in await aembed_texts(texts)]
+        return self.embed_documents(texts)

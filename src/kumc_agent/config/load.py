@@ -37,6 +37,8 @@ from kumc_agent.config.schema import (
     RagHistorySection,
     RagPromptTextSection,
     RagRoutingSection,
+    RagRoutingTaskSection,
+    RagRoutingTasksSection,
     RagSection,
     RerankerSection,
     RetrievalSection,
@@ -432,6 +434,60 @@ def _to_runtime_config(
             )
         ),
     )
+    routing_provider = str(
+        rag_routing.get(
+            "provider",
+            providers["function_call"].get("provider", "gemini"),
+        )
+    )
+    routing_gemini_model = str(
+        rag_routing.get(
+            "gemini_model",
+            providers["function_call"].get("gemini_model", ""),
+        )
+    )
+    routing_llama_model_path = str(
+        rag_routing.get(
+            "llama_model_path",
+            providers["function_call"].get("llama_model_path", ""),
+        )
+    )
+    routing_prompt_name = str(rag_routing.get("prompt_name", "routing")).strip() or "routing"
+    routing_tasks_raw = rag_routing.get("tasks", {})
+    if not isinstance(routing_tasks_raw, dict):
+        routing_tasks_raw = {}
+
+    def _build_routing_task(task_name: str) -> RagRoutingTaskSection:
+        task_raw = routing_tasks_raw.get(task_name, {})
+        if not isinstance(task_raw, dict):
+            task_raw = {}
+        provider_value = str(task_raw.get("provider", routing_provider)).strip()
+        gemini_model_value = str(
+            task_raw.get("gemini_model", routing_gemini_model)
+        ).strip()
+        llama_model_path_value = str(
+            task_raw.get("llama_model_path", routing_llama_model_path)
+        ).strip()
+        prompt_name_value = str(
+            task_raw.get("prompt_name", routing_prompt_name)
+        ).strip()
+        return RagRoutingTaskSection(
+            provider=provider_value or routing_provider,
+            gemini_model=gemini_model_value or routing_gemini_model,
+            llama_model_path=llama_model_path_value or routing_llama_model_path,
+            prompt_name=prompt_name_value or routing_prompt_name,
+        )
+
+    routing_tasks = RagRoutingTasksSection(
+        target_model=_build_routing_task("target_model"),
+        use_additional_memory=_build_routing_task("use_additional_memory"),
+        include_capabilities_info=_build_routing_task("include_capabilities_info"),
+        idea_generation=_build_routing_task("idea_generation"),
+        needs_additional_query=_build_routing_task("needs_additional_query"),
+        additional_queries=_build_routing_task("additional_queries"),
+        material_names=_build_routing_task("material_names"),
+        recency_mode=_build_routing_task("recency_mode"),
+    )
 
     runtime = RuntimeConfig(
         base_dir=base_dir,
@@ -512,6 +568,12 @@ def _to_runtime_config(
                 top_k=int(features["retrieval"]["top_k"]),
                 dense_top_k=int(features["retrieval"]["dense_top_k"]),
                 sparse_top_k=int(features["retrieval"]["sparse_top_k"]),
+                sparse_initial_sparse_top_k=int(
+                    features["retrieval"].get(
+                        "sparse_initial_sparse_top_k",
+                        features["retrieval"]["sparse_top_k"],
+                    )
+                ),
                 rerank_pool_size=int(features["retrieval"]["rerank_pool_size"]),
                 mmr_lambda=float(features["retrieval"]["mmr_lambda"]),
                 recency_weight_soft=float(
@@ -551,24 +613,10 @@ def _to_runtime_config(
                         providers["function_call"].get("enabled", True),
                     )
                 ),
-                provider=str(
-                    rag_routing.get(
-                        "provider",
-                        providers["function_call"].get("provider", "gemini"),
-                    )
-                ),
-                gemini_model=str(
-                    rag_routing.get(
-                        "gemini_model",
-                        providers["function_call"].get("gemini_model", ""),
-                    )
-                ),
-                llama_model_path=str(
-                    rag_routing.get(
-                        "llama_model_path",
-                        providers["function_call"].get("llama_model_path", ""),
-                    )
-                ),
+                provider=routing_provider,
+                gemini_model=routing_gemini_model,
+                llama_model_path=routing_llama_model_path,
+                prompt_name=routing_prompt_name,
                 temperature=float(rag_routing.get("temperature", 0.0)),
                 max_new_tokens=int(rag_routing.get("max_new_tokens", 64)),
                 max_retries=int(rag_routing.get("max_retries", 2)),
@@ -576,6 +624,7 @@ def _to_runtime_config(
                 material_search_max_names=int(
                     rag_routing.get("material_search_max_names", 3)
                 ),
+                tasks=routing_tasks,
             ),
             history=RagHistorySection(
                 enabled=bool(rag_history.get("enabled", False)),
@@ -762,6 +811,101 @@ def _to_runtime_config(
                         providers["llm"]["thinking_level"],
                     )
                 ),
+                proposition_llm_provider=str(
+                    indexing_chunking.get(
+                        "proposition_llm_provider",
+                        providers["llm"]["provider"],
+                    )
+                ),
+                proposition_gemini_model=str(
+                    indexing_chunking.get(
+                        "proposition_gemini_model",
+                        providers["llm"]["gemini_model"],
+                    )
+                ),
+                proposition_llama_model_path=str(
+                    indexing_chunking.get(
+                        "proposition_llama_model_path",
+                        providers["llm"]["llama_model_path"],
+                    )
+                ),
+                proposition_temperature=float(
+                    indexing_chunking.get(
+                        "proposition_temperature",
+                        providers["llm"]["temperature"],
+                    )
+                ),
+                proposition_max_output_tokens=int(
+                    indexing_chunking.get(
+                        "proposition_max_output_tokens",
+                        providers["llm"]["max_output_tokens"],
+                    )
+                ),
+                proposition_thinking_level=str(
+                    indexing_chunking.get(
+                        "proposition_thinking_level",
+                        providers["llm"]["thinking_level"],
+                    )
+                ),
+                proposition_max_retries=max(
+                    1,
+                    int(indexing_chunking.get("proposition_max_retries", 2)),
+                ),
+                raptor_llm_provider=str(
+                    indexing_chunking.get(
+                        "raptor_llm_provider",
+                        providers["llm"]["provider"],
+                    )
+                ),
+                raptor_gemini_model=str(
+                    indexing_chunking.get(
+                        "raptor_gemini_model",
+                        providers["llm"]["gemini_model"],
+                    )
+                ),
+                raptor_llama_model_path=str(
+                    indexing_chunking.get(
+                        "raptor_llama_model_path",
+                        providers["llm"]["llama_model_path"],
+                    )
+                ),
+                raptor_temperature=float(
+                    indexing_chunking.get(
+                        "raptor_temperature",
+                        providers["llm"]["temperature"],
+                    )
+                ),
+                raptor_max_output_tokens=int(
+                    indexing_chunking.get(
+                        "raptor_max_output_tokens",
+                        providers["llm"]["max_output_tokens"],
+                    )
+                ),
+                raptor_thinking_level=str(
+                    indexing_chunking.get(
+                        "raptor_thinking_level",
+                        providers["llm"]["thinking_level"],
+                    )
+                ),
+                raptor_max_retries=max(
+                    1,
+                    int(indexing_chunking.get("raptor_max_retries", 2)),
+                ),
+                raptor_cluster_max_tokens=max(
+                    32,
+                    int(indexing_chunking.get("raptor_cluster_max_tokens", 1024)),
+                ),
+                raptor_stop_chunk_count=max(
+                    1,
+                    int(indexing_chunking.get("raptor_stop_chunk_count", 20)),
+                ),
+                raptor_k_max=max(
+                    2,
+                    int(indexing_chunking.get("raptor_k_max", 8)),
+                ),
+                raptor_k_selection=str(
+                    indexing_chunking.get("raptor_k_selection", "elbow")
+                ),
             ),
             stages=IndexingStagesSection(
                 second_recursive_enabled=bool(
@@ -907,7 +1051,7 @@ def _to_runtime_config(
                 pdf_ocr_model_path=str(
                     integrations.get("drive", {}).get(
                         "pdf_ocr_model_path",
-                        "model/ocr/tencent/HunyuanOCR",
+                        "model/ocr/PaddlePaddle/PP-OCRv5_mobile",
                     )
                 ),
             ),
@@ -926,6 +1070,15 @@ def _to_runtime_config(
             gemini_requests_per_minute=max(
                 0,
                 int(integrations.get("gemini_requests_per_minute", 60)),
+            ),
+            gemini_embedding_requests_per_minute=max(
+                0,
+                int(
+                    integrations.get(
+                        "gemini_embedding_requests_per_minute",
+                        integrations.get("gemini_requests_per_minute", 60),
+                    )
+                ),
             ),
             gemini_summary_requests_per_minute=max(
                 0,

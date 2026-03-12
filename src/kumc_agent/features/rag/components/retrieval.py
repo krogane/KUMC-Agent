@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -11,7 +12,7 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
-from kumc_agent.utils.hashing import merge_unique
+from kumc_agent.utils.hashing import merge_unique, stable_hash
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ _RECENCY_KEYS = (
     "source_date",
     "created_at",
 )
+_SECOND_REC_SPARSE_STAGE = "second_recursive_sparse"
+_KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
+_KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
 
 
 @dataclass(frozen=True)
@@ -44,10 +48,16 @@ class RetrievalComponent:
         embedder: EmbedderPort,
         dense_index: FaissLikeIndex,
         sparse_index: SudachiBM25Retriever,
+        sparse_sudachi_mode: str = "B",
+        sparse_use_normalized_form: bool = True,
+        sparse_remove_symbols: bool = True,
     ) -> None:
         self._embedder = embedder
         self._dense_index = dense_index
         self._sparse_index = sparse_index
+        self._sparse_sudachi_mode = sparse_sudachi_mode
+        self._sparse_use_normalized_form = bool(sparse_use_normalized_form)
+        self._sparse_remove_symbols = bool(sparse_remove_symbols)
 
     @property
     def index_dir(self):
@@ -59,6 +69,7 @@ class RetrievalComponent:
         *,
         dense_top_k: int,
         sparse_top_k: int,
+        sparse_initial_sparse_top_k: int | None = None,
         recency_mode: str = "off",
         recency_weight_soft: float = 0.20,
         recency_weight_hard: float = 0.45,
@@ -70,10 +81,21 @@ class RetrievalComponent:
             query_vector=query_vector,
             top_k=max(0, dense_top_k),
         )
-        sparse_hits = self._sparse_index.search_with_scores(
-            query,
+        sparse_hits = self._search_sparse_mixed_sources(
+            query=query,
             top_k=max(0, sparse_top_k),
+            sparse_top_k=max(
+                0,
+                sparse_top_k
+                if sparse_initial_sparse_top_k is None
+                else sparse_initial_sparse_top_k,
+            ),
         )
+        if not sparse_hits:
+            sparse_hits = self._sparse_index.search_with_scores(
+                query,
+                top_k=max(0, sparse_top_k),
+            )
         scored = self._merge_scores(dense_hits=dense_hits, sparse_hits=sparse_hits)
         _ = (
             recency_mode,
@@ -98,6 +120,223 @@ class RetrievalComponent:
             chunks=chunks,
             mmr_lambda=mmr_lambda,
         )
+
+    def _search_sparse_mixed_sources(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        sparse_top_k: int,
+    ) -> list[tuple[Chunk, float]]:
+        total_k = max(0, top_k)
+        if total_k <= 0:
+            return []
+        sparse_k = min(max(0, sparse_top_k), total_k)
+        second_rec_k = total_k - sparse_k
+
+        tokens = self._query_tokens(query)
+        if not tokens:
+            return []
+
+        sparse_hits = self._search_keyword_index(
+            tokens=tokens,
+            top_k=total_k,
+            corpus_name=_KEYWORD_CORPUS_SPARSE_SECOND_REC,
+            restore_sparse_stage=True,
+        )
+        second_rec_hits = self._search_keyword_index(
+            tokens=tokens,
+            top_k=total_k,
+            corpus_name=_KEYWORD_CORPUS_SECOND_REC_SPARSE,
+            restore_sparse_stage=False,
+        )
+
+        selected_sparse = sparse_hits[:sparse_k]
+        selected_second_rec = second_rec_hits[:second_rec_k]
+        merged = self._merge_sparse_hits([selected_sparse, selected_second_rec])
+        if len(merged) < total_k:
+            merged = self._merge_sparse_hits(
+                [merged, sparse_hits[sparse_k:], second_rec_hits[second_rec_k:]]
+            )
+        return merged[:total_k]
+
+    def _search_keyword_index(
+        self,
+        *,
+        tokens: Sequence[str],
+        top_k: int,
+        corpus_name: str,
+        restore_sparse_stage: bool,
+    ) -> list[tuple[Chunk, float]]:
+        if top_k <= 0 or not tokens:
+            return []
+        try:
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                load_keyword_index,
+            )
+        except Exception:
+            logger.exception("Keyword index module import failed.")
+            return []
+
+        keyword_index = load_keyword_index(
+            index_dir=self.index_dir,
+            corpus_name=corpus_name,
+        )
+        if keyword_index is None or not keyword_index.docs:
+            return []
+        scores = keyword_index.get_scores(tokens)
+        if scores is None or len(scores) == 0:
+            return []
+
+        ranked = sorted(range(len(keyword_index.docs)), key=lambda i: scores[i], reverse=True)
+        hits: list[tuple[Chunk, float]] = []
+        seen_ids: set[str] = set()
+        second_rec_map = self._second_rec_chunk_map() if restore_sparse_stage else {}
+        for idx in ranked:
+            score = float(scores[idx])
+            if score <= 0.0:
+                break
+            chunk = self._keyword_doc_to_chunk(keyword_index.docs[idx])
+            if restore_sparse_stage:
+                chunk = self._restore_sparse_hit_chunk(
+                    chunk,
+                    second_rec_map=second_rec_map,
+                )
+            if chunk.id in seen_ids:
+                continue
+            seen_ids.add(chunk.id)
+            hits.append((chunk, score))
+            if len(hits) >= top_k:
+                break
+        return hits
+
+    def _query_tokens(self, query: str) -> list[str]:
+        try:
+            from kumc_agent.infra.indexing.sparse_normalizer import (
+                SparseNormalizer,
+                SparseNormalizerConfig,
+            )
+        except Exception:
+            return self._sparse_index._tokenize(query)  # noqa: SLF001
+        try:
+            normalizer = SparseNormalizer(
+                config=SparseNormalizerConfig(
+                    sudachi_mode=self._sparse_sudachi_mode,
+                    use_normalized_form=self._sparse_use_normalized_form,
+                    remove_symbols=self._sparse_remove_symbols,
+                    remove_stopwords=False,
+                )
+            )
+            return normalizer.normalize_tokens(query)
+        except Exception:
+            logger.exception("Sparse query normalization failed.")
+            return self._sparse_index._tokenize(query)  # noqa: SLF001
+
+    def _keyword_doc_to_chunk(self, doc) -> Chunk:
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        text = str(getattr(doc, "page_content", "") or "").strip()
+        if not text:
+            text = "(empty)"
+        chunk_uid = str(metadata.get("chunk_uid") or "").strip()
+        if not chunk_uid:
+            chunk_uid = stable_hash(
+                f"{metadata.get('source_type')}|{metadata.get('source_file_name')}|"
+                f"{metadata.get('chunk_stage')}|{metadata.get('chunk_id')}|{text[:256]}"
+            )
+        source_type = str(metadata.get("source_type") or "").strip()
+        source_name = str(
+            metadata.get("drive_file_id")
+            or metadata.get("source_file_name")
+            or metadata.get("path")
+            or ""
+        ).strip()
+        document_id = stable_hash(f"{source_type}:{source_name}")
+        index = self._normalize_chunk_id(metadata.get("chunk_id")) or 0
+        return Chunk(
+            id=chunk_uid,
+            document_id=document_id,
+            text=text,
+            index=index,
+            metadata=metadata,
+        )
+
+    def _restore_sparse_hit_chunk(
+        self,
+        chunk: Chunk,
+        *,
+        second_rec_map: dict[tuple[object, ...], Chunk],
+    ) -> Chunk:
+        metadata = chunk.metadata or {}
+        if str(metadata.get("chunk_stage") or "") != _SECOND_REC_SPARSE_STAGE:
+            return chunk
+        chunk_id = self._normalize_chunk_id(metadata.get("chunk_id"))
+        if chunk_id is None:
+            return chunk
+        key = self._chunk_lookup_key(metadata, chunk_id=chunk_id)
+        if key is None:
+            return chunk
+        resolved = second_rec_map.get(key)
+        return resolved if resolved is not None else chunk
+
+    def _second_rec_chunk_map(self) -> dict[tuple[object, ...], Chunk]:
+        try:
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                load_keyword_index,
+            )
+        except Exception:
+            return {}
+        keyword_index = load_keyword_index(
+            index_dir=self.index_dir,
+            corpus_name=_KEYWORD_CORPUS_SECOND_REC_SPARSE,
+        )
+        if keyword_index is None:
+            return {}
+        mapping: dict[tuple[object, ...], Chunk] = {}
+        for doc in keyword_index.docs:
+            chunk = self._keyword_doc_to_chunk(doc)
+            chunk_id = self._normalize_chunk_id(chunk.metadata.get("chunk_id"))
+            if chunk_id is None:
+                continue
+            key = self._chunk_lookup_key(chunk.metadata, chunk_id=chunk_id)
+            if key is None:
+                continue
+            mapping[key] = chunk
+        return mapping
+
+    @staticmethod
+    def _chunk_lookup_key(
+        metadata: dict[str, object],
+        *,
+        chunk_id: int,
+    ) -> tuple[object, ...] | None:
+        source = metadata.get("drive_file_id") or metadata.get("source_file_name")
+        if not source:
+            return None
+        source_type = metadata.get("source_type") or ""
+        return (source_type, source, chunk_id)
+
+    @staticmethod
+    def _normalize_chunk_id(value: object) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _merge_sparse_hits(groups: list[list[tuple[Chunk, float]]]) -> list[tuple[Chunk, float]]:
+        merged: list[tuple[Chunk, float]] = []
+        seen: set[str] = set()
+        for group in groups:
+            for chunk, score in group:
+                if chunk.id in seen:
+                    continue
+                seen.add(chunk.id)
+                merged.append((chunk, score))
+        return merged
 
     @staticmethod
     def _merge_scores(*, dense_hits, sparse_hits) -> list[_ScoredChunk]:

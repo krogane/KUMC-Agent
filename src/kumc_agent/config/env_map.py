@@ -74,6 +74,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_int,
     ),
     EnvBinding(
+        "KUMC_GEMINI_EMBEDDING_REQUESTS_PER_MINUTE",
+        "integrations.gemini_embedding_requests_per_minute",
+        _to_int,
+    ),
+    EnvBinding(
         "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE",
         "integrations.gemini_summary_requests_per_minute",
         _to_int,
@@ -440,6 +445,96 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_int,
     ),
     EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_LLM_PROVIDER",
+        "indexing.chunking.proposition_llm_provider",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_GEMINI_MODEL",
+        "indexing.chunking.proposition_gemini_model",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_LLAMA_MODEL_PATH",
+        "indexing.chunking.proposition_llama_model_path",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_TEMPERATURE",
+        "indexing.chunking.proposition_temperature",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_MAX_OUTPUT_TOKENS",
+        "indexing.chunking.proposition_max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_THINKING_LEVEL",
+        "indexing.chunking.proposition_thinking_level",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_PROPOSITION_MAX_RETRIES",
+        "indexing.chunking.proposition_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_LLM_PROVIDER",
+        "indexing.chunking.raptor_llm_provider",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_GEMINI_MODEL",
+        "indexing.chunking.raptor_gemini_model",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_LLAMA_MODEL_PATH",
+        "indexing.chunking.raptor_llama_model_path",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_TEMPERATURE",
+        "indexing.chunking.raptor_temperature",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_MAX_OUTPUT_TOKENS",
+        "indexing.chunking.raptor_max_output_tokens",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_THINKING_LEVEL",
+        "indexing.chunking.raptor_thinking_level",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_MAX_RETRIES",
+        "indexing.chunking.raptor_max_retries",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_CLUSTER_MAX_TOKENS",
+        "indexing.chunking.raptor_cluster_max_tokens",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_STOP_CHUNK_COUNT",
+        "indexing.chunking.raptor_stop_chunk_count",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_K_MAX",
+        "indexing.chunking.raptor_k_max",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_INDEXING_RAPTOR_K_SELECTION",
+        "indexing.chunking.raptor_k_selection",
+        str,
+    ),
+    EnvBinding(
         "KUMC_INDEXING_SECOND_RECURSIVE_ENABLED",
         "indexing.stages.second_recursive_enabled",
         _to_bool,
@@ -555,6 +650,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_RETRIEVAL_TOP_K", "features.retrieval.top_k", _to_int),
     EnvBinding("KUMC_RETRIEVAL_DENSE_TOP_K", "features.retrieval.dense_top_k", _to_int),
     EnvBinding("KUMC_RETRIEVAL_SPARSE_TOP_K", "features.retrieval.sparse_top_k", _to_int),
+    EnvBinding(
+        "KUMC_RETRIEVAL_SPARSE_INITIAL_SPARSE_TOP_K",
+        "features.retrieval.sparse_initial_sparse_top_k",
+        _to_int,
+    ),
     EnvBinding(
         "KUMC_RETRIEVAL_RERANK_POOL_SIZE",
         "features.retrieval.rerank_pool_size",

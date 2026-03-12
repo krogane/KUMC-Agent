@@ -27,7 +27,6 @@ class _RecordingLLM:
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
@@ -86,7 +85,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertIn("# サークルの基本情報\nKUMCはMinecraftサークルです。", llm.last_user_prompt)
 
@@ -104,7 +102,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertNotIn("# サークルの基本情報", llm.last_user_prompt)
 
@@ -152,7 +149,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertIn("CHAT\nU> 質問\nA> 回答\nSRC: docs/guide.md", llm.last_user_prompt)
 
@@ -170,7 +166,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertEqual(answer.text, "フェンス回答")
 
@@ -188,7 +183,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertEqual(answer.text, "埋め込み回答")
 
@@ -206,7 +200,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
         )
         self.assertEqual(answer.text, '{"answer":"壊れたJSON",}')
 
@@ -233,7 +226,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
             append_sources_to_response=False,
         )
         self.assertEqual(answer.text, "参照あり")
@@ -268,7 +260,6 @@ class GenerationComponentTests(unittest.TestCase):
             include_capabilities_info=False,
             temperature=0.0,
             max_output_tokens=128,
-            thinking_level="minimal",
             append_sources_to_response=False,
         )
         self.assertIn(

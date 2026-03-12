@@ -4,6 +4,7 @@ from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import logging
+import os
 import re
 import threading
 from dataclasses import dataclass
@@ -61,6 +62,50 @@ class IndexingService:
         self._summary_dir = self._chunks_root / "summary_chunk"
         self._prop_dir = self._chunks_root / "prop_chunk"
         self._raptor_dir = self._chunks_root / "raptor_chunk"
+        self._raw_docs_dir = self._raw_dir / "docs"
+        self._raw_sheets_dir = self._raw_dir / "sheets"
+        self._raw_messages_dir = self._raw_dir / "messages"
+        self._raw_x_dir = self._raw_dir / "x"
+        self._raw_vc_dir = self._raw_dir / "vc"
+        self._raw_hatenablog_dir = self._raw_dir / "hatenablog"
+        self._raw_crafters_colony_dir = self._raw_dir / "crafters_colony"
+
+        self._first_rec_docs_dir = self._first_rec_dir / "docs"
+        self._first_rec_sheets_dir = self._first_rec_dir / "sheets"
+        self._first_rec_messages_dir = self._first_rec_dir / "messages"
+        self._first_rec_x_dir = self._first_rec_dir / "x"
+        self._first_rec_hatenablog_dir = self._first_rec_dir / "hatenablog"
+        self._first_rec_crafters_colony_dir = self._first_rec_dir / "crafters_colony"
+
+        self._second_rec_docs_dir = self._second_rec_dir / "docs"
+        self._second_rec_sheets_dir = self._second_rec_dir / "sheets"
+        self._second_rec_messages_dir = self._second_rec_dir / "messages"
+        self._second_rec_x_dir = self._second_rec_dir / "x"
+        self._second_rec_vc_dir = self._second_rec_dir / "vc"
+        self._second_rec_hatenablog_dir = self._second_rec_dir / "hatenablog"
+        self._second_rec_crafters_colony_dir = self._second_rec_dir / "crafters_colony"
+
+        self._sparse_second_rec_docs_dir = self._sparse_second_rec_dir / "docs"
+        self._sparse_second_rec_sheets_dir = self._sparse_second_rec_dir / "sheets"
+        self._sparse_second_rec_messages_dir = self._sparse_second_rec_dir / "messages"
+        self._sparse_second_rec_x_dir = self._sparse_second_rec_dir / "x"
+        self._sparse_second_rec_vc_dir = self._sparse_second_rec_dir / "vc"
+        self._sparse_second_rec_hatenablog_dir = self._sparse_second_rec_dir / "hatenablog"
+        self._sparse_second_rec_crafters_colony_dir = (
+            self._sparse_second_rec_dir / "crafters_colony"
+        )
+
+        self._summary_docs_dir = self._summary_dir / "docs"
+        self._summary_sheets_dir = self._summary_dir / "sheets"
+        self._summary_messages_dir = self._summary_dir / "messages"
+        self._summary_x_dir = self._summary_dir / "x"
+        self._summary_hatenablog_dir = self._summary_dir / "hatenablog"
+        self._summary_crafters_colony_dir = self._summary_dir / "crafters_colony"
+
+        self._prop_docs_dir = self._prop_dir / "docs"
+        self._prop_sheets_dir = self._prop_dir / "sheets"
+        self._prop_hatenablog_dir = self._prop_dir / "hatenablog"
+        self._prop_crafters_colony_dir = self._prop_dir / "crafters_colony"
 
     def build(
         self,
@@ -71,93 +116,39 @@ class IndexingService:
         allow_cancel: bool = False,
         cancel_event: threading.Event | None = None,
     ) -> IndexBuildResult:
-        selected = {value.strip() for value in (stage_selection or ()) if value.strip()}
-        refresh = self._runtime.indexing.refresh
-        chunking = self._runtime.indexing.chunking
-        stages = self._runtime.indexing.stages
+        selected = {
+            value.strip()
+            for value in (stage_selection or ())
+            if value and value.strip()
+        }
 
         self._apply_clear_flags(full_rebuild=full_rebuild)
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+        self._ensure_raw_source_dirs()
 
         documents = self._parse_documents_from_raw()
         self._storage.save_documents(documents)
 
-        first_chunks = self._load_or_build_first_chunks(
-            documents=documents,
-            chunk_size=chunking.first_recursive_chunk_size,
-            chunk_overlap=chunking.first_recursive_chunk_overlap,
-            should_update=refresh.update_first_recursive_chunk_data,
-            force=full_rebuild,
+        legacy_cfg = self._build_legacy_app_config()
+        self._ensure_legacy_prompt_env_defaults()
+        self._run_legacy_chunk_pipeline(
+            legacy_cfg=legacy_cfg,
             selected=selected,
             allow_cancel=allow_cancel,
             cancel_event=cancel_event,
         )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
 
-        second_chunks = self._load_or_build_second_chunks(
-            first_chunks=first_chunks,
-            chunk_size=chunking.second_recursive_chunk_size,
-            chunk_overlap=chunking.second_recursive_chunk_overlap,
-            enabled=stages.second_recursive_enabled,
-            should_update=refresh.update_second_recursive_chunk_data,
-            force=full_rebuild,
-            selected=selected,
-            allow_cancel=allow_cancel,
-            cancel_event=cancel_event,
-        )
-        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
-
-        sparse_second_chunks = self._load_or_build_sparse_second_chunks(
-            second_chunks=second_chunks,
-            enabled=stages.sparse_second_recursive_enabled,
-            should_update=refresh.update_sparse_second_recursive_chunk_data,
-            force=full_rebuild,
-            selected=selected,
-        )
-        summary_chunks = self._load_or_build_summary_chunks(
-            first_chunks=first_chunks,
-            enabled=stages.summary_enabled,
-            target_characters=chunking.summary_characters,
-            should_update=refresh.update_summary_chunk_data,
-            force=full_rebuild,
-            selected=selected,
-        )
-        proposition_chunks = self._load_or_build_proposition_chunks(
-            second_chunks=second_chunks,
-            enabled=stages.proposition_enabled,
-            should_update=refresh.update_proposition_chunk_data,
-            force=full_rebuild,
-            selected=selected,
-        )
-        raptor_chunks = self._load_or_build_raptor_chunks(
-            source_chunks=(summary_chunks or second_chunks or first_chunks),
-            enabled=stages.raptor_enabled,
-            should_update=refresh.update_raptor_chunk_data,
-            force=full_rebuild,
-            selected=selected,
-        )
-        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
-
-        index_chunks = self._compose_index_chunks(
-            first_chunks=first_chunks,
-            second_chunks=second_chunks,
-            proposition_chunks=proposition_chunks,
-            raptor_chunks=raptor_chunks,
-            second_enabled=stages.second_recursive_enabled,
-            proposition_enabled=stages.proposition_enabled,
-            raptor_enabled=stages.raptor_enabled,
-        )
+        index_chunks = self._load_index_chunks_from_legacy_dirs(legacy_cfg=legacy_cfg)
         self._storage.save_chunks(index_chunks)
 
-        embeddings = self._embedder.embed_documents([chunk.text for chunk in index_chunks])
+        dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
+        embeddings = self._embedder.embed_documents(dense_texts)
         self._faiss_index.build(chunks=index_chunks, embeddings=embeddings)
         self._bm25_index.build(index_chunks)
 
-        self._build_keyword_indexes_payload(
-            sparse_chunks=sparse_second_chunks,
-            second_chunks=second_chunks,
-        )
-        self._build_material_catalog(documents=documents)
+        self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
+        self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
 
         return IndexBuildResult(
             loaded_sources=loaded_sources,
@@ -199,6 +190,801 @@ class IndexingService:
             self._clear_dir_contents(self._prop_dir)
         if clear_all or refresh.clear_raptor_chunk_data:
             self._clear_dir_contents(self._raptor_dir)
+
+    def _ensure_raw_source_dirs(self) -> None:
+        for path in (
+            self._raw_docs_dir,
+            self._raw_sheets_dir,
+            self._raw_messages_dir,
+            self._raw_x_dir,
+            self._raw_vc_dir,
+            self._raw_hatenablog_dir,
+            self._raw_crafters_colony_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+    def _build_legacy_app_config(self):
+        from kumc_agent.infra.indexing.config import AppConfig as LegacyAppConfig
+
+        chunking = self._runtime.indexing.chunking
+        stages = self._runtime.indexing.stages
+        refresh = self._runtime.indexing.refresh
+        providers_llm = self._runtime.providers.llm
+        retrieval = self._runtime.features.retrieval
+        integrations = self._runtime.integrations
+
+        def _model_label(path_value: str) -> str:
+            cleaned = str(path_value or "").strip()
+            if not cleaned:
+                return ""
+            return Path(cleaned).name
+
+        return LegacyAppConfig(
+            base_dir=self._runtime.base_dir,
+            raw_data_dir=self._raw_dir,
+            first_rec_chunk_dir=self._first_rec_dir,
+            second_rec_chunk_dir=self._second_rec_dir,
+            sparse_second_rec_chunk_dir=self._sparse_second_rec_dir,
+            summery_chunk_dir=self._summary_dir,
+            prop_chunk_dir=self._prop_dir,
+            raptor_chunk_dir=self._raptor_dir,
+            index_dir=self._runtime.app.index_dir,
+            discord_bot_token=self._runtime.integrations.discord.bot_token,
+            discord_guild_allow_list=tuple(self._runtime.security.discord_guild_allow_list),
+            gemini_api_key=integrations.gemini_api_key,
+            gemini_requests_per_minute=integrations.gemini_requests_per_minute,
+            gemini_summary_requests_per_minute=(
+                integrations.gemini_summary_requests_per_minute
+            ),
+            drive_folder_id=integrations.drive.folder_id,
+            google_application_credentials=(
+                integrations.drive.google_application_credentials
+            ),
+            drive_max_files=integrations.drive.max_files,
+            crafters_colony_author_url=integrations.crafters_colony.author_url,
+            crafters_colony_max_pages=integrations.crafters_colony.max_pages,
+            crafters_colony_max_articles=integrations.crafters_colony.max_articles,
+            pdf_ocr_model_path=integrations.drive.pdf_ocr_model_path,
+            embedding_model=self._runtime.providers.embeddings.model,
+            raptor_embedding_model=self._runtime.providers.embeddings.model,
+            first_rec_chunk_size=chunking.first_recursive_chunk_size,
+            first_rec_chunk_overlap=chunking.first_recursive_chunk_overlap,
+            second_rec_enabled=stages.second_recursive_enabled,
+            second_rec_chunk_size=chunking.second_recursive_chunk_size,
+            second_rec_chunk_overlap=chunking.second_recursive_chunk_overlap,
+            summery_enabled=stages.summary_enabled,
+            summery_characters=chunking.summary_characters,
+            summery_provider=chunking.summary_llm_provider,
+            summery_gemini_model=chunking.summary_gemini_model,
+            summery_llama_model=_model_label(chunking.summary_llama_model_path),
+            summery_llama_model_path=chunking.summary_llama_model_path,
+            summery_llama_ctx_size=4096,
+            summery_temperature=chunking.summary_temperature,
+            summery_max_output_tokens=chunking.summary_max_output_tokens,
+            summery_max_retries=2,
+            summery_batch_size=chunking.summary_batch_size,
+            llm_provider=providers_llm.provider,
+            genai_model=providers_llm.gemini_model,
+            llama_model_path=providers_llm.llama_model_path,
+            llama_ctx_size=4096,
+            llama_gpu_layers=providers_llm.gpu_layers,
+            llama_threads=providers_llm.threads,
+            temperature=providers_llm.temperature,
+            max_output_tokens=providers_llm.max_output_tokens,
+            prop_enabled=stages.proposition_enabled,
+            prop_provider=chunking.proposition_llm_provider,
+            prop_gemini_model=chunking.proposition_gemini_model,
+            prop_llama_model=_model_label(chunking.proposition_llama_model_path),
+            prop_llama_model_path=chunking.proposition_llama_model_path,
+            prop_llama_ctx_size=4096,
+            prop_temperature=chunking.proposition_temperature,
+            prop_max_output_tokens=chunking.proposition_max_output_tokens,
+            prop_max_retries=chunking.proposition_max_retries,
+            raptor_enabled=stages.raptor_enabled,
+            raptor_cluster_max_tokens=chunking.raptor_cluster_max_tokens,
+            raptor_summery_max_tokens=chunking.raptor_max_output_tokens,
+            raptor_stop_chunk_count=chunking.raptor_stop_chunk_count,
+            raptor_k_max=chunking.raptor_k_max,
+            raptor_k_selection=chunking.raptor_k_selection,
+            raptor_summery_provider=chunking.raptor_llm_provider,
+            raptor_summery_gemini_model=chunking.raptor_gemini_model,
+            raptor_summery_llama_model=_model_label(chunking.raptor_llama_model_path),
+            raptor_summery_llama_model_path=chunking.raptor_llama_model_path,
+            raptor_summery_llama_ctx_size=4096,
+            raptor_summery_temperature=chunking.raptor_temperature,
+            raptor_summery_max_retries=chunking.raptor_max_retries,
+            clear_raw_data=refresh.clear_raw_data,
+            clear_first_rec_chunk_data=refresh.clear_first_recursive_chunk_data,
+            clear_second_rec_chunk_data=refresh.clear_second_recursive_chunk_data,
+            clear_summery_chunk_data=refresh.clear_summary_chunk_data,
+            clear_prop_chunk_data=refresh.clear_proposition_chunk_data,
+            clear_raptor_chunk_data=refresh.clear_raptor_chunk_data,
+            update_raw_data=refresh.update_raw_data,
+            update_first_rec_chunk_data=refresh.update_first_recursive_chunk_data,
+            update_second_rec_chunk_data=refresh.update_second_recursive_chunk_data,
+            update_sparse_second_rec_chunk_data=(
+                refresh.update_sparse_second_recursive_chunk_data
+            ),
+            update_summery_chunk_data=refresh.update_summary_chunk_data,
+            update_prop_chunk_data=refresh.update_proposition_chunk_data,
+            update_raptor_chunk_data=refresh.update_raptor_chunk_data,
+            sudachi_mode=retrieval.sudachi_mode,
+            sparse_bm25_k1=retrieval.sparse_bm25_k1,
+            sparse_bm25_b=retrieval.sparse_bm25_b,
+            sparse_use_normalized_form=retrieval.sparse_use_normalized_form,
+            sparse_remove_symbols=retrieval.sparse_remove_symbols,
+        )
+
+    def _ensure_legacy_prompt_env_defaults(self) -> None:
+        defaults = {
+            "PROMPT_LLM_CHUNK_SYSTEM_PROMPT": (
+                "You are a careful Japanese document chunking assistant."
+            ),
+            "PROMPT_PROPOSITION_CHUNK_TEMPLATE": (
+                "次の本文を命題単位で分解し、JSON配列のみを出力してください。"
+                "\\n- 1要素1命題"
+                "\\n- 重複と空要素は禁止"
+                "\\n\\n本文:\\n{text}"
+            ),
+            "PROMPT_SUMMERY_CHUNK_MESSAGES_TEMPLATE": (
+                "次の会話ログを{target_characters}文字以内で要約してください。"
+                "\\n重要な人物名・日時・数値は残してください。"
+                "\\n\\n本文:\\n{text}"
+            ),
+            "PROMPT_SUMMERY_CHUNK_SHEETS_TEMPLATE": (
+                "次の表データ由来本文を{target_characters}文字以内で要約してください。"
+                "\\n元ファイル: {drive_path_display}"
+                "\\n\\n本文:\\n{text}"
+            ),
+            "PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE": (
+                "次の本文を{target_characters}文字以内で要約してください。"
+                "\\n元ファイル: {drive_path_display}"
+                "\\n\\n本文:\\n{text}"
+            ),
+            "PROMPT_RAPTOR_SUMMARY_SYSTEM_PROMPT": (
+                "You summarize clustered Japanese chunks faithfully."
+            ),
+            "PROMPT_RAPTOR_SUMMARY_TEMPLATE": (
+                "次の複数チャンクを統合し、重要情報を維持して要約してください。"
+                "\\n目安トークン数: {target_tokens}"
+                "\\n\\n本文:\\n{text}"
+            ),
+        }
+        for key, value in defaults.items():
+            if not os.getenv(key):
+                os.environ[key] = value
+        try:
+            from kumc_agent.infra.indexing import config as legacy_config
+
+            legacy_config.get_required_prompt_env.cache_clear()
+        except Exception:
+            logger.exception("Failed to clear legacy prompt env cache.")
+
+    @staticmethod
+    def _should_run_stage(*, stage_name: str, selected: set[str]) -> bool:
+        if not selected:
+            return True
+        return stage_name in selected
+
+    def _run_legacy_chunk_pipeline(
+        self,
+        *,
+        legacy_cfg,
+        selected: set[str],
+        allow_cancel: bool,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        from kumc_agent.infra.indexing.chunking import (
+            message_chunk_jsonl_dir,
+            proposition_chunk_jsonl_dir,
+            recursive_chunk_dir,
+            recursive_chunk_jsonl_dir,
+            sparse_chunk_jsonl_dir,
+            summery_chunk_jsonl_dir,
+        )
+        from kumc_agent.infra.indexing.constants import (
+            DOCS_SEPARATORS,
+            MESSAGE_SEPARATORS,
+            SHEETS_SEPARATORS,
+        )
+        from kumc_agent.infra.indexing.raptor import raptor_chunk_global
+
+        refresh = self._runtime.indexing.refresh
+        stages = self._runtime.indexing.stages
+        chunking = self._runtime.indexing.chunking
+
+        if self._should_run_stage(stage_name="first_recursive", selected=selected):
+            if self._raw_messages_dir.exists():
+                message_chunk_jsonl_dir(
+                    raw_messages_dir=self._raw_messages_dir,
+                    chunk_dir=self._first_rec_messages_dir,
+                    chunk_size=chunking.first_recursive_chunk_size,
+                    chunk_overlap=chunking.first_recursive_chunk_overlap,
+                    stage="first_recursive",
+                    skip_existing=not refresh.clear_first_recursive_chunk_data,
+                    update_existing=refresh.update_first_recursive_chunk_data,
+                    sync_deleted=refresh.update_first_recursive_chunk_data,
+                )
+            if self._raw_x_dir.exists():
+                message_chunk_jsonl_dir(
+                    raw_messages_dir=self._raw_x_dir,
+                    chunk_dir=self._first_rec_x_dir,
+                    chunk_size=chunking.first_recursive_chunk_size,
+                    chunk_overlap=chunking.first_recursive_chunk_overlap,
+                    stage="first_recursive",
+                    skip_existing=not refresh.clear_first_recursive_chunk_data,
+                    update_existing=refresh.update_first_recursive_chunk_data,
+                    sync_deleted=refresh.update_first_recursive_chunk_data,
+                )
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_docs_dir,
+                chunk_dir=self._first_rec_docs_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                source_type="docs",
+                stage="first_recursive",
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_sheets_dir,
+                chunk_dir=self._first_rec_sheets_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=SHEETS_SEPARATORS,
+                source_type="sheets",
+                stage="first_recursive",
+                file_extensions=(".csv",),
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_hatenablog_dir,
+                chunk_dir=self._first_rec_hatenablog_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                source_type="hatenablog",
+                stage="first_recursive",
+                file_extensions=(".md",),
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_crafters_colony_dir,
+                chunk_dir=self._first_rec_crafters_colony_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                source_type="crafters_colony",
+                stage="first_recursive",
+                file_extensions=(".md",),
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if (
+            stages.second_recursive_enabled
+            and self._should_run_stage(stage_name="second_recursive", selected=selected)
+        ):
+            if self._first_rec_docs_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_docs_dir,
+                    output_chunk_dir=self._second_rec_docs_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=DOCS_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._first_rec_sheets_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_sheets_dir,
+                    output_chunk_dir=self._second_rec_sheets_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=SHEETS_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._first_rec_messages_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_messages_dir,
+                    output_chunk_dir=self._second_rec_messages_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=MESSAGE_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._first_rec_x_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_x_dir,
+                    output_chunk_dir=self._second_rec_x_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=MESSAGE_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._first_rec_hatenablog_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_hatenablog_dir,
+                    output_chunk_dir=self._second_rec_hatenablog_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=DOCS_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._first_rec_crafters_colony_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_crafters_colony_dir,
+                    output_chunk_dir=self._second_rec_crafters_colony_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=DOCS_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+            if self._raw_vc_dir.exists():
+                recursive_chunk_dir(
+                    raw_data_dir=self._raw_vc_dir,
+                    chunk_dir=self._second_rec_vc_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=MESSAGE_SEPARATORS,
+                    source_type="vc_transcript",
+                    stage="second_recursive",
+                    file_extensions=(".txt",),
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if (
+            stages.sparse_second_recursive_enabled
+            and self._should_run_stage(
+                stage_name="sparse_second_recursive",
+                selected=selected,
+            )
+        ):
+            if stages.second_recursive_enabled:
+                for input_dir, output_dir in (
+                    (self._second_rec_docs_dir, self._sparse_second_rec_docs_dir),
+                    (self._second_rec_sheets_dir, self._sparse_second_rec_sheets_dir),
+                    (self._second_rec_messages_dir, self._sparse_second_rec_messages_dir),
+                    (self._second_rec_x_dir, self._sparse_second_rec_x_dir),
+                    (self._second_rec_hatenablog_dir, self._sparse_second_rec_hatenablog_dir),
+                    (
+                        self._second_rec_crafters_colony_dir,
+                        self._sparse_second_rec_crafters_colony_dir,
+                    ),
+                ):
+                    if not input_dir.exists():
+                        continue
+                    sparse_chunk_jsonl_dir(
+                        input_chunk_dir=input_dir,
+                        output_chunk_dir=output_dir,
+                        config=legacy_cfg,
+                        skip_existing=not refresh.clear_second_recursive_chunk_data,
+                        update_existing=(
+                            refresh.update_sparse_second_recursive_chunk_data
+                        ),
+                        sync_deleted=(
+                            refresh.update_sparse_second_recursive_chunk_data
+                        ),
+                    )
+            if self._second_rec_vc_dir.exists():
+                sparse_chunk_jsonl_dir(
+                    input_chunk_dir=self._second_rec_vc_dir,
+                    output_chunk_dir=self._sparse_second_rec_vc_dir,
+                    config=legacy_cfg,
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_sparse_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_sparse_second_recursive_chunk_data,
+                )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if stages.summary_enabled and self._should_run_stage(
+            stage_name="summary",
+            selected=selected,
+        ):
+            for input_dir, output_dir, second_dir in (
+                (
+                    self._first_rec_docs_dir,
+                    self._summary_docs_dir,
+                    self._second_rec_docs_dir if stages.second_recursive_enabled else None,
+                ),
+                (
+                    self._first_rec_sheets_dir,
+                    self._summary_sheets_dir,
+                    self._second_rec_sheets_dir if stages.second_recursive_enabled else None,
+                ),
+                (
+                    self._first_rec_messages_dir,
+                    self._summary_messages_dir,
+                    self._second_rec_messages_dir if stages.second_recursive_enabled else None,
+                ),
+                (
+                    self._first_rec_x_dir,
+                    self._summary_x_dir,
+                    self._second_rec_x_dir if stages.second_recursive_enabled else None,
+                ),
+                (
+                    self._first_rec_hatenablog_dir,
+                    self._summary_hatenablog_dir,
+                    self._second_rec_hatenablog_dir
+                    if stages.second_recursive_enabled
+                    else None,
+                ),
+                (
+                    self._first_rec_crafters_colony_dir,
+                    self._summary_crafters_colony_dir,
+                    self._second_rec_crafters_colony_dir
+                    if stages.second_recursive_enabled
+                    else None,
+                ),
+            ):
+                if not input_dir.exists():
+                    continue
+                summery_chunk_jsonl_dir(
+                    input_chunk_dir=input_dir,
+                    output_chunk_dir=output_dir,
+                    second_chunk_dir=second_dir,
+                    config=legacy_cfg,
+                    skip_existing=not refresh.clear_summary_chunk_data,
+                    update_existing=refresh.update_summary_chunk_data,
+                    sync_deleted=refresh.update_summary_chunk_data,
+                )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if stages.proposition_enabled and self._should_run_stage(
+            stage_name="proposition",
+            selected=selected,
+        ):
+            if not stages.second_recursive_enabled:
+                logger.warning(
+                    "Proposition chunking is enabled but SECOND_REC is disabled. Skipping."
+                )
+            else:
+                for input_dir, output_dir in (
+                    (self._second_rec_docs_dir, self._prop_docs_dir),
+                    (self._second_rec_sheets_dir, self._prop_sheets_dir),
+                    (self._second_rec_hatenablog_dir, self._prop_hatenablog_dir),
+                    (
+                        self._second_rec_crafters_colony_dir,
+                        self._prop_crafters_colony_dir,
+                    ),
+                ):
+                    if not input_dir.exists():
+                        continue
+                    proposition_chunk_jsonl_dir(
+                        input_chunk_dir=input_dir,
+                        output_chunk_dir=output_dir,
+                        config=legacy_cfg,
+                        skip_existing=not refresh.clear_proposition_chunk_data,
+                        update_existing=refresh.update_proposition_chunk_data,
+                        sync_deleted=refresh.update_proposition_chunk_data,
+                    )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if stages.raptor_enabled and self._should_run_stage(
+            stage_name="raptor",
+            selected=selected,
+        ):
+            if stages.summary_enabled:
+                raptor_input_dirs = [
+                    self._summary_docs_dir,
+                    self._summary_sheets_dir,
+                    self._summary_hatenablog_dir,
+                    self._summary_crafters_colony_dir,
+                ]
+            elif stages.second_recursive_enabled:
+                raptor_input_dirs = [
+                    self._second_rec_docs_dir,
+                    self._second_rec_sheets_dir,
+                    self._second_rec_hatenablog_dir,
+                    self._second_rec_crafters_colony_dir,
+                ]
+            else:
+                raptor_input_dirs = [
+                    self._first_rec_docs_dir,
+                    self._first_rec_sheets_dir,
+                    self._first_rec_hatenablog_dir,
+                    self._first_rec_crafters_colony_dir,
+                ]
+            raptor_chunk_global(
+                input_chunk_dirs=raptor_input_dirs,
+                output_chunk_dir=self._raptor_dir,
+                config=legacy_cfg,
+                skip_existing=not refresh.clear_raptor_chunk_data,
+                update_existing=refresh.update_raptor_chunk_data,
+                sync_deleted=refresh.update_raptor_chunk_data,
+            )
+
+    def _load_index_chunks_from_legacy_dirs(self, *, legacy_cfg) -> list[Chunk]:
+        base_dirs: list[Path] = []
+        if legacy_cfg.second_rec_enabled:
+            base_dirs.extend(
+                [
+                    self._second_rec_docs_dir,
+                    self._second_rec_sheets_dir,
+                    self._second_rec_hatenablog_dir,
+                    self._second_rec_crafters_colony_dir,
+                ]
+            )
+            if self._second_rec_messages_dir.exists():
+                base_dirs.append(self._second_rec_messages_dir)
+            if self._second_rec_x_dir.exists():
+                base_dirs.append(self._second_rec_x_dir)
+        else:
+            base_dirs.extend(
+                [
+                    self._first_rec_docs_dir,
+                    self._first_rec_sheets_dir,
+                    self._first_rec_hatenablog_dir,
+                    self._first_rec_crafters_colony_dir,
+                ]
+            )
+            if self._first_rec_messages_dir.exists():
+                base_dirs.append(self._first_rec_messages_dir)
+            if self._first_rec_x_dir.exists():
+                base_dirs.append(self._first_rec_x_dir)
+
+        chunks: list[Chunk] = []
+        chunks.extend(self._load_legacy_chunks_from_dirs(base_dirs))
+        if self._second_rec_vc_dir.exists():
+            chunks.extend(self._load_legacy_chunks_from_dirs([self._second_rec_vc_dir]))
+        if legacy_cfg.prop_enabled and legacy_cfg.second_rec_enabled:
+            chunks.extend(
+                self._load_legacy_chunks_from_dirs(
+                    [
+                        self._prop_docs_dir,
+                        self._prop_sheets_dir,
+                        self._prop_hatenablog_dir,
+                        self._prop_crafters_colony_dir,
+                    ]
+                )
+            )
+        if legacy_cfg.raptor_enabled:
+            chunks.extend(self._load_legacy_chunks_from_dirs([self._raptor_dir]))
+        return chunks
+
+    def _load_legacy_chunks_from_dirs(self, chunk_dirs: list[Path]) -> list[Chunk]:
+        from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
+
+        existing = [path for path in chunk_dirs if path.exists()]
+        if not existing:
+            return []
+        legacy_chunks = load_chunks_from_dirs(existing)
+        out: list[Chunk] = []
+        for idx, legacy_chunk in enumerate(legacy_chunks):
+            converted = self._legacy_chunk_to_domain_chunk(
+                legacy_chunk=legacy_chunk,
+                fallback_index=idx,
+            )
+            if converted is not None:
+                out.append(converted)
+        return out
+
+    @staticmethod
+    def _to_int(value: object, *, fallback: int) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return fallback
+        return fallback
+
+    def _legacy_chunk_uid(
+        self,
+        *,
+        metadata: dict[str, object],
+        text: str,
+        fallback_index: int,
+    ) -> str:
+        source_type = str(metadata.get("source_type") or "").strip()
+        source_name = str(
+            metadata.get("drive_file_id")
+            or metadata.get("source_file_name")
+            or metadata.get("path")
+            or ""
+        ).strip()
+        stage = str(metadata.get("chunk_stage") or "").strip()
+        chunk_id = self._to_int(metadata.get("chunk_id"), fallback=fallback_index)
+        raptor_level = str(metadata.get("raptor_level") or "")
+        raptor_cluster = str(metadata.get("raptor_cluster_id") or "")
+        return stable_hash(
+            f"{source_type}|{source_name}|{stage}|{chunk_id}|{raptor_level}|"
+            f"{raptor_cluster}|{text[:256]}"
+        )
+
+    def _legacy_chunk_to_domain_chunk(
+        self,
+        *,
+        legacy_chunk,
+        fallback_index: int,
+    ) -> Chunk | None:
+        text = str(getattr(legacy_chunk, "text", "") or "").strip()
+        if not text:
+            return None
+        metadata = dict(getattr(legacy_chunk, "metadata", {}) or {})
+        index = self._to_int(metadata.get("chunk_id"), fallback=fallback_index)
+        source_type = str(metadata.get("source_type") or "").strip()
+        source_name = str(
+            metadata.get("drive_file_id")
+            or metadata.get("source_file_name")
+            or metadata.get("path")
+            or ""
+        ).strip()
+        if not source_name:
+            source_name = f"legacy:{source_type}:{index}"
+        document_id = stable_hash(f"{source_type}:{source_name}")
+        chunk_uid = self._legacy_chunk_uid(
+            metadata=metadata,
+            text=text,
+            fallback_index=index,
+        )
+        metadata["chunk_uid"] = chunk_uid
+        metadata.setdefault("chunk_id", index)
+        return Chunk(
+            id=chunk_uid,
+            document_id=document_id,
+            text=text,
+            index=index,
+            metadata=metadata,
+        )
+
+    def _chunk_embedding_text_for_dense(self, chunk: Chunk) -> str:
+        from kumc_agent.infra.indexing.chunks import (
+            Chunk as LegacyChunk,
+            chunk_embedding_text,
+        )
+
+        try:
+            return chunk_embedding_text(
+                LegacyChunk(text=chunk.text, metadata=dict(chunk.metadata))
+            )
+        except Exception:
+            logger.exception("Failed to build legacy embedding text. Falling back to chunk text.")
+            return chunk.text
+
+    def _build_keyword_inverted_indexes(self, *, legacy_cfg) -> None:
+        try:
+            from langchain_core.documents import Document as LangDocument
+            from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                KEYWORD_CORPUS_SECOND_REC_SPARSE,
+                KEYWORD_CORPUS_SPARSE,
+                KEYWORD_CORPUS_SPARSE_SECOND_REC,
+                build_and_save_keyword_index,
+                tokenize_sparse_doc,
+            )
+            from kumc_agent.infra.indexing.sparse_sources import (
+                second_rec_chunk_dirs,
+                sparse_chunk_dirs,
+                sparse_second_rec_chunk_dirs,
+            )
+            from kumc_agent.infra.indexing.sparse_normalizer import (
+                SparseNormalizer,
+                SparseNormalizerConfig,
+            )
+        except Exception:
+            logger.exception(
+                "Legacy keyword inverted index dependencies are unavailable. "
+                "Falling back to lightweight keyword payload."
+            )
+            self._build_keyword_indexes_payload(
+                sparse_chunks=self._load_legacy_chunks_from_dirs(
+                    [
+                        self._sparse_second_rec_docs_dir,
+                        self._sparse_second_rec_sheets_dir,
+                        self._sparse_second_rec_messages_dir,
+                        self._sparse_second_rec_x_dir,
+                        self._sparse_second_rec_vc_dir,
+                        self._sparse_second_rec_hatenablog_dir,
+                        self._sparse_second_rec_crafters_colony_dir,
+                    ]
+                ),
+                second_chunks=self._load_legacy_chunks_from_dirs(
+                    [
+                        self._second_rec_docs_dir,
+                        self._second_rec_sheets_dir,
+                        self._second_rec_messages_dir,
+                        self._second_rec_x_dir,
+                        self._second_rec_vc_dir,
+                        self._second_rec_hatenablog_dir,
+                        self._second_rec_crafters_colony_dir,
+                    ]
+                ),
+            )
+            return
+
+        normalizer = SparseNormalizer(
+            config=SparseNormalizerConfig(
+                sudachi_mode=legacy_cfg.sudachi_mode,
+                use_normalized_form=legacy_cfg.sparse_use_normalized_form,
+                remove_symbols=legacy_cfg.sparse_remove_symbols,
+                remove_stopwords=False,
+            )
+        )
+
+        def _tokenize(doc: LangDocument) -> list[str]:
+            return tokenize_sparse_doc(
+                doc,
+                sparse_stage="second_recursive_sparse",
+                sudachi_tokenize=normalizer.normalize_tokens,
+            )
+
+        def _docs_for_dirs(chunk_dirs: list[Path]) -> list[LangDocument]:
+            existing = [value for value in chunk_dirs if value.exists()]
+            if not existing:
+                return []
+            chunks = load_chunks_from_dirs(existing)
+            docs: list[LangDocument] = []
+            for idx, chunk in enumerate(chunks):
+                text = str(chunk.text or "").strip()
+                if not text:
+                    continue
+                metadata = dict(chunk.metadata or {})
+                metadata["chunk_uid"] = self._legacy_chunk_uid(
+                    metadata=metadata,
+                    text=text,
+                    fallback_index=idx,
+                )
+                docs.append(LangDocument(page_content=text, metadata=metadata))
+            return docs
+
+        corpus_to_dirs = (
+            (KEYWORD_CORPUS_SPARSE, sparse_chunk_dirs(legacy_cfg)),
+            (KEYWORD_CORPUS_SPARSE_SECOND_REC, sparse_second_rec_chunk_dirs(legacy_cfg)),
+            (KEYWORD_CORPUS_SECOND_REC_SPARSE, second_rec_chunk_dirs(legacy_cfg)),
+        )
+        for corpus_name, chunk_dirs in corpus_to_dirs:
+            docs = _docs_for_dirs(chunk_dirs)
+            build_and_save_keyword_index(
+                index_dir=legacy_cfg.index_dir,
+                corpus_name=corpus_name,
+                docs=docs,
+                tokenize_doc=_tokenize,
+                k1=legacy_cfg.sparse_bm25_k1,
+                b=legacy_cfg.sparse_bm25_b,
+            )
+
+    def _build_material_catalog_legacy(self, *, legacy_cfg) -> None:
+        try:
+            from kumc_agent.infra.indexing.material_catalog import (
+                build_and_save_material_catalog,
+            )
+
+            build_and_save_material_catalog(legacy_cfg)
+        except Exception:
+            logger.exception(
+                "Legacy material catalog build failed. Falling back to basic catalog."
+            )
+            self._build_material_catalog(documents=self._parse_documents_from_raw())
 
     def _load_or_build_first_chunks(
         self,
@@ -456,7 +1242,6 @@ class IndexingService:
                 max_output_tokens=(
                     self._runtime.indexing.chunking.summary_max_output_tokens
                 ),
-                thinking_level=self._runtime.indexing.chunking.summary_thinking_level,
             )
         except Exception:
             logger.exception(
@@ -653,34 +1438,51 @@ class IndexingService:
         if not self._raw_dir.exists():
             return []
 
+        source_specs: tuple[tuple[Path, set[str], str], ...] = (
+            (self._raw_docs_dir, {".md"}, "docs"),
+            (self._raw_sheets_dir, {".csv"}, "sheets"),
+            (self._raw_messages_dir, {".jsonl"}, "messages"),
+            (self._raw_x_dir, {".jsonl"}, "x_posts"),
+            (self._raw_vc_dir, {".txt"}, "vc_transcript"),
+            (self._raw_hatenablog_dir, {".md"}, "hatenablog"),
+            (self._raw_crafters_colony_dir, {".md"}, "crafters_colony"),
+        )
+
         documents: list[Document] = []
-        for path in sorted(self._raw_dir.rglob("*")):
-            if not path.is_file():
+        for root_dir, extensions, default_source_type in source_specs:
+            if not root_dir.exists():
                 continue
-            if path.suffix.lower() in {".meta.json", ".mtime.json"}:
-                continue
-            text, extracted_meta, updated_at = self._read_raw_document(path)
-            if not text.strip():
-                continue
-            source_type = path.parent.name
-            source_name = str(path.relative_to(self._raw_dir))
-            doc_id = stable_hash(f"{source_type}:{source_name}")
-            metadata = {"path": source_name, **extracted_meta}
-            if "source_date" not in metadata:
-                inferred_source_date = self._derive_source_date(metadata)
-                if inferred_source_date:
-                    metadata["source_date"] = inferred_source_date
-            documents.append(
-                Document(
-                    id=doc_id,
-                    text=text,
-                    source_type=source_type,
-                    source_name=source_name,
-                    source_uri="",
-                    updated_at=updated_at,
-                    metadata=metadata,
+            for path in sorted(root_dir.rglob("*"), key=lambda value: str(value)):
+                if not path.is_file():
+                    continue
+                if path.name.endswith((".meta.json", ".mtime.json", ".state.json")):
+                    continue
+                if path.suffix.lower() not in extensions:
+                    continue
+                text, extracted_meta, updated_at = self._read_raw_document(path)
+                if not text.strip():
+                    continue
+                source_name = str(path.relative_to(self._raw_dir)).replace("\\", "/")
+                source_type = str(extracted_meta.get("source_type") or "").strip().lower()
+                if not source_type:
+                    source_type = default_source_type
+                doc_id = stable_hash(f"{source_type}:{source_name}")
+                metadata = {"path": source_name, **extracted_meta}
+                if "source_date" not in metadata:
+                    inferred_source_date = self._derive_source_date(metadata)
+                    if inferred_source_date:
+                        metadata["source_date"] = inferred_source_date
+                documents.append(
+                    Document(
+                        id=doc_id,
+                        text=text,
+                        source_type=source_type,
+                        source_name=source_name,
+                        source_uri="",
+                        updated_at=updated_at,
+                        metadata=metadata,
+                    )
                 )
-            )
         return documents
 
     @staticmethod

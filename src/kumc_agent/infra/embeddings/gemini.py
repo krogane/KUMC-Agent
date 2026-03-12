@@ -22,11 +22,13 @@ class GeminiEmbedder(EmbedderPort):
         model_name: str,
         dimensions: int = 256,
         requests_per_minute: int = 60,
+        limiter_name: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._model_name = model_name
         self._dimensions = max(1, dimensions)
         self._requests_per_minute = max(0, int(requests_per_minute))
+        self._limiter_name = (limiter_name or "").strip()
         self._client = _gemini_embedding_client(api_key)
 
     def embed_query(self, text: str) -> np.ndarray:
@@ -35,7 +37,8 @@ class GeminiEmbedder(EmbedderPort):
             return hashed_vector(query, dimensions=self._dimensions)
         try:
             wait_for_gemini_rate_limit(
-                max_requests_per_minute=self._requests_per_minute
+                max_requests_per_minute=self._requests_per_minute,
+                limiter_name=self._limiter_name,
             )
             response = self._client.models.embed_content(
                 model=self._model_name,
@@ -67,7 +70,8 @@ class GeminiEmbedder(EmbedderPort):
             for i in range(0, len(normalized), self._BATCH_SIZE):
                 batch = normalized[i : i + self._BATCH_SIZE]
                 wait_for_gemini_rate_limit(
-                    max_requests_per_minute=self._requests_per_minute
+                    max_requests_per_minute=self._requests_per_minute,
+                    limiter_name=self._limiter_name,
                 )
                 response = self._client.models.embed_content(
                     model=self._model_name,

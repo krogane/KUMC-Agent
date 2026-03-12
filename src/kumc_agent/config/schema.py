@@ -91,6 +91,7 @@ class RetrievalSection:
     top_k: int
     dense_top_k: int
     sparse_top_k: int
+    sparse_initial_sparse_top_k: int
     rerank_pool_size: int
     mmr_lambda: float
     recency_weight_soft: float
@@ -129,16 +130,38 @@ class FeatureSection:
 
 
 @dataclass(frozen=True)
+class RagRoutingTaskSection:
+    provider: str
+    gemini_model: str
+    llama_model_path: str
+    prompt_name: str
+
+
+@dataclass(frozen=True)
+class RagRoutingTasksSection:
+    target_model: RagRoutingTaskSection
+    use_additional_memory: RagRoutingTaskSection
+    include_capabilities_info: RagRoutingTaskSection
+    idea_generation: RagRoutingTaskSection
+    needs_additional_query: RagRoutingTaskSection
+    additional_queries: RagRoutingTaskSection
+    material_names: RagRoutingTaskSection
+    recency_mode: RagRoutingTaskSection
+
+
+@dataclass(frozen=True)
 class RagRoutingSection:
     enabled: bool
     provider: str
     gemini_model: str
     llama_model_path: str
+    prompt_name: str
     temperature: float
     max_new_tokens: int
     max_retries: int
     log_enabled: bool
     material_search_max_names: int
+    tasks: RagRoutingTasksSection
 
 
 @dataclass(frozen=True)
@@ -225,6 +248,24 @@ class IndexingChunkingSection:
     summary_temperature: float
     summary_max_output_tokens: int
     summary_thinking_level: str
+    proposition_llm_provider: str
+    proposition_gemini_model: str
+    proposition_llama_model_path: str
+    proposition_temperature: float
+    proposition_max_output_tokens: int
+    proposition_thinking_level: str
+    proposition_max_retries: int
+    raptor_llm_provider: str
+    raptor_gemini_model: str
+    raptor_llama_model_path: str
+    raptor_temperature: float
+    raptor_max_output_tokens: int
+    raptor_thinking_level: str
+    raptor_max_retries: int
+    raptor_cluster_max_tokens: int
+    raptor_stop_chunk_count: int
+    raptor_k_max: int
+    raptor_k_selection: str
 
 
 @dataclass(frozen=True)
@@ -311,6 +352,7 @@ class IntegrationSection:
     crafters_colony: IntegrationCraftersColonySection
     gemini_api_key: str
     gemini_requests_per_minute: int
+    gemini_embedding_requests_per_minute: int
     gemini_summary_requests_per_minute: int
     gemini_ragas_requests_per_minute: int
 

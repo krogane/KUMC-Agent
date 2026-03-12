@@ -62,7 +62,7 @@ class GoogleDriveLoader:
             drive_download_retry_backoff_multiplier=(
                 self._download_retry_backoff_multiplier
             ),
-            skip_existing=False,
+            skip_existing=True,
             update_existing=True,
             sync_deleted=True,
         )

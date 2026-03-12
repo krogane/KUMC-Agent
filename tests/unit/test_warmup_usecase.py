@@ -63,13 +63,11 @@ class _DummyLLM:
         user_prompt: str,
         temperature: float,
         max_output_tokens: int,
-        thinking_level: str,
     ) -> str:
         _ = system_prompt
         _ = user_prompt
         _ = temperature
         _ = max_output_tokens
-        _ = thinking_level
         self.calls += 1
         if self.should_fail:
             raise RuntimeError("warmup failure")

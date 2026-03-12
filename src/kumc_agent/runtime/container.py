@@ -8,7 +8,10 @@ from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.infra.embeddings.gemini import GeminiEmbedder
 from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.llm.gemini import GeminiLLM
-from kumc_agent.infra.llm.gemini_rate_limit import index_summary_rate_limiter_name
+from kumc_agent.infra.llm.gemini_rate_limit import (
+    embedding_rate_limiter_name,
+    index_summary_rate_limiter_name,
+)
 from kumc_agent.infra.llm.llama_cpp import LlamaCppLLM
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
@@ -28,7 +31,7 @@ from kumc_agent.features.rag.config import (
 )
 from kumc_agent.features.rag.components.generation import GenerationComponent
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
-from kumc_agent.features.rag.components.routing import QueryRouter
+from kumc_agent.features.rag.components.routing import QueryRouter, RoutingTaskConfig
 from kumc_agent.features.rag.service import RagService
 from kumc_agent.features.summarization.config import SummarizationConfig
 from kumc_agent.features.summarization.service import SummarizationService
@@ -64,26 +67,69 @@ def _build_llm_for_route(
     )
 
 
+def _build_indexing_stage_llm(
+    *,
+    provider: str,
+    gemini_model: str,
+    llama_model_path: str,
+    gemini_api_key: str,
+    gemini_requests_per_minute: int,
+    limiter_name: str = "",
+) -> LLMPort | None:
+    normalized = (provider or "").strip().lower()
+    if normalized in {"", "none", "off", "disabled", "false", "0"}:
+        return None
+    if normalized in {"llama", "llama_cpp"}:
+        if not llama_model_path:
+            return None
+        return LlamaCppLLM(model_path=llama_model_path)
+    if normalized == "gemini":
+        if not gemini_api_key:
+            return None
+        kwargs: dict[str, object] = {
+            "api_key": gemini_api_key,
+            "model": gemini_model,
+            "requests_per_minute": gemini_requests_per_minute,
+        }
+        if limiter_name:
+            kwargs["limiter_name"] = limiter_name
+        return GeminiLLM(**kwargs)
+    raise ValueError(
+        "Unsupported indexing stage llm provider. Use 'none', 'gemini', or 'llama'."
+    )
+
+
 def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
     chunking = config.indexing.chunking
-    provider = (chunking.summary_llm_provider or "").strip().lower()
-    if provider in {"", "none", "off", "disabled", "false", "0"}:
-        return None
-    if provider in {"llama", "llama_cpp"}:
-        if not chunking.summary_llama_model_path:
-            return None
-        return LlamaCppLLM(model_path=chunking.summary_llama_model_path)
-    if provider == "gemini":
-        if not config.integrations.gemini_api_key:
-            return None
-        return GeminiLLM(
-            api_key=config.integrations.gemini_api_key,
-            model=chunking.summary_gemini_model,
-            requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
-            limiter_name=index_summary_rate_limiter_name(),
-        )
-    raise ValueError(
-        "Unsupported indexing.chunking.summary_llm_provider. Use 'none', 'gemini', or 'llama'."
+    return _build_indexing_stage_llm(
+        provider=chunking.summary_llm_provider,
+        gemini_model=chunking.summary_gemini_model,
+        llama_model_path=chunking.summary_llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
+        limiter_name=index_summary_rate_limiter_name(),
+    )
+
+
+def _build_proposition_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
+    chunking = config.indexing.chunking
+    return _build_indexing_stage_llm(
+        provider=chunking.proposition_llm_provider,
+        gemini_model=chunking.proposition_gemini_model,
+        llama_model_path=chunking.proposition_llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
+    )
+
+
+def _build_raptor_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
+    chunking = config.indexing.chunking
+    return _build_indexing_stage_llm(
+        provider=chunking.raptor_llm_provider,
+        gemini_model=chunking.raptor_gemini_model,
+        llama_model_path=chunking.raptor_llama_model_path,
+        gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
 
 
@@ -96,7 +142,8 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             api_key=config.integrations.gemini_api_key,
             model_name=config.providers.embeddings.model,
             dimensions=config.providers.embeddings.dimensions,
-            requests_per_minute=config.integrations.gemini_requests_per_minute,
+            requests_per_minute=config.integrations.gemini_embedding_requests_per_minute,
+            limiter_name=embedding_rate_limiter_name(),
         )
     else:
         embedder = LocalEmbedder(
@@ -145,6 +192,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         embedder=embedder,
         dense_index=dense_index,
         sparse_index=sparse_index,
+        sparse_sudachi_mode=config.features.retrieval.sudachi_mode,
+        sparse_use_normalized_form=config.features.retrieval.sparse_use_normalized_form,
+        sparse_remove_symbols=config.features.retrieval.sparse_remove_symbols,
     )
 
     reranker = (
@@ -191,17 +241,85 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         provider=config.rag.routing.provider,
         gemini_model=config.rag.routing.gemini_model,
         llama_model_path=config.rag.routing.llama_model_path,
+        prompt_name=config.rag.routing.prompt_name,
         temperature=config.rag.routing.temperature,
         max_new_tokens=config.rag.routing.max_new_tokens,
         max_retries=config.rag.routing.max_retries,
         log_enabled=config.rag.routing.log_enabled,
         material_search_max_names=config.rag.routing.material_search_max_names,
-        llm_thinking_level=config.providers.llm.thinking_level,
         llm_threads=config.providers.llm.threads,
         llm_gpu_layers=config.providers.llm.gpu_layers,
         llm_ctx_size=4096,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
+        task_configs={
+            "target_model": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.target_model.provider,
+                gemini_model=config.rag.routing.tasks.target_model.gemini_model,
+                llama_model_path=config.rag.routing.tasks.target_model.llama_model_path,
+                prompt_name=config.rag.routing.tasks.target_model.prompt_name,
+            ),
+            "use_additional_memory": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.use_additional_memory.provider,
+                gemini_model=config.rag.routing.tasks.use_additional_memory.gemini_model,
+                llama_model_path=(
+                    config.rag.routing.tasks.use_additional_memory.llama_model_path
+                ),
+                prompt_name=config.rag.routing.tasks.use_additional_memory.prompt_name,
+            ),
+            "include_capabilities_info": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.include_capabilities_info.provider,
+                gemini_model=(
+                    config.rag.routing.tasks.include_capabilities_info.gemini_model
+                ),
+                llama_model_path=(
+                    config.rag.routing.tasks.include_capabilities_info.llama_model_path
+                ),
+                prompt_name=(
+                    config.rag.routing.tasks.include_capabilities_info.prompt_name
+                ),
+            ),
+            "idea_generation": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.idea_generation.provider,
+                gemini_model=config.rag.routing.tasks.idea_generation.gemini_model,
+                llama_model_path=(
+                    config.rag.routing.tasks.idea_generation.llama_model_path
+                ),
+                prompt_name=config.rag.routing.tasks.idea_generation.prompt_name,
+            ),
+            "needs_additional_query": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.needs_additional_query.provider,
+                gemini_model=(
+                    config.rag.routing.tasks.needs_additional_query.gemini_model
+                ),
+                llama_model_path=(
+                    config.rag.routing.tasks.needs_additional_query.llama_model_path
+                ),
+                prompt_name=(
+                    config.rag.routing.tasks.needs_additional_query.prompt_name
+                ),
+            ),
+            "additional_queries": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.additional_queries.provider,
+                gemini_model=config.rag.routing.tasks.additional_queries.gemini_model,
+                llama_model_path=(
+                    config.rag.routing.tasks.additional_queries.llama_model_path
+                ),
+                prompt_name=config.rag.routing.tasks.additional_queries.prompt_name,
+            ),
+            "material_names": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.material_names.provider,
+                gemini_model=config.rag.routing.tasks.material_names.gemini_model,
+                llama_model_path=config.rag.routing.tasks.material_names.llama_model_path,
+                prompt_name=config.rag.routing.tasks.material_names.prompt_name,
+            ),
+            "recency_mode": RoutingTaskConfig(
+                provider=config.rag.routing.tasks.recency_mode.provider,
+                gemini_model=config.rag.routing.tasks.recency_mode.gemini_model,
+                llama_model_path=config.rag.routing.tasks.recency_mode.llama_model_path,
+                prompt_name=config.rag.routing.tasks.recency_mode.prompt_name,
+            ),
+        },
     )
 
     rag_service = RagService(
@@ -209,6 +327,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             top_k=config.features.retrieval.top_k,
             dense_top_k=config.features.retrieval.dense_top_k,
             sparse_top_k=config.features.retrieval.sparse_top_k,
+            sparse_initial_sparse_top_k=(
+                config.features.retrieval.sparse_initial_sparse_top_k
+            ),
             rerank_pool_size=config.features.retrieval.rerank_pool_size,
             mmr_lambda=config.features.retrieval.mmr_lambda,
             recency_weight_soft=config.features.retrieval.recency_weight_soft,
@@ -220,27 +341,25 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 provider=config.rag.generation.rag.provider,
                 temperature=config.rag.generation.rag.temperature,
                 max_output_tokens=config.rag.generation.rag.max_output_tokens,
-                thinking_level=config.rag.generation.rag.thinking_level,
                 prompt_name=config.rag.generation.rag.prompt_name,
             ),
             no_rag_generation=RagGenerationSettings(
                 provider=config.rag.generation.no_rag.provider,
                 temperature=config.rag.generation.no_rag.temperature,
                 max_output_tokens=config.rag.generation.no_rag.max_output_tokens,
-                thinking_level=config.rag.generation.no_rag.thinking_level,
                 prompt_name=config.rag.generation.no_rag.prompt_name,
             ),
             refusal_generation=RagGenerationSettings(
                 provider=config.rag.generation.refusal.provider,
                 temperature=config.rag.generation.refusal.temperature,
                 max_output_tokens=config.rag.generation.refusal.max_output_tokens,
-                thinking_level=config.rag.generation.refusal.thinking_level,
                 prompt_name=config.rag.generation.refusal.prompt_name,
             ),
             idea_generation=RagIdeaGenerationSettings(
                 prompt_name=config.rag.generation.idea_generation.prompt_name,
                 temperature=config.rag.generation.idea_generation.temperature,
             ),
+            material_search_max_names=config.rag.routing.material_search_max_names,
             parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
             parent_chunk_cap=config.features.retrieval.parent_chunk_cap,
             answer_json_max_retries=config.rag.answer_json_max_retries,
@@ -266,57 +385,37 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         summary_llm=summary_chunk_llm,
     )
 
-    drive_loader = (
-        GoogleDriveLoader(
-            folder_id=config.integrations.drive.folder_id,
-            credentials_path=config.integrations.drive.google_application_credentials,
-            raw_dir=config.app.raw_dir,
-            max_files=config.integrations.drive.max_files,
-            batch_size=config.integrations.drive.batch_size,
-            download_max_retries=config.integrations.drive.download_max_retries,
-            download_retry_initial_delay_seconds=(
-                config.integrations.drive.download_retry_initial_delay_seconds
-            ),
-            download_retry_max_delay_seconds=(
-                config.integrations.drive.download_retry_max_delay_seconds
-            ),
-            download_retry_backoff_multiplier=(
-                config.integrations.drive.download_retry_backoff_multiplier
-            ),
-            pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
-        )
-        if config.features.sources.drive
-        else None
+    drive_loader = GoogleDriveLoader(
+        folder_id=config.integrations.drive.folder_id,
+        credentials_path=config.integrations.drive.google_application_credentials,
+        raw_dir=config.app.raw_dir,
+        max_files=config.integrations.drive.max_files,
+        batch_size=config.integrations.drive.batch_size,
+        download_max_retries=config.integrations.drive.download_max_retries,
+        download_retry_initial_delay_seconds=(
+            config.integrations.drive.download_retry_initial_delay_seconds
+        ),
+        download_retry_max_delay_seconds=(
+            config.integrations.drive.download_retry_max_delay_seconds
+        ),
+        download_retry_backoff_multiplier=(
+            config.integrations.drive.download_retry_backoff_multiplier
+        ),
+        pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
     )
-    discord_loader = (
-        DiscordLoader(
-            bot_token=config.integrations.discord.bot_token,
-            raw_dir=config.app.raw_dir,
-            allow_guild_ids=config.security.discord_guild_allow_list,
-        )
-        if config.features.sources.discord
-        else None
+    discord_loader = DiscordLoader(
+        bot_token=config.integrations.discord.bot_token,
+        raw_dir=config.app.raw_dir,
+        allow_guild_ids=config.security.discord_guild_allow_list,
     )
-    hatena_loader = (
-        HatenaBlogLoader(raw_dir=config.app.raw_dir)
-        if config.features.sources.hatenablog
-        else None
+    hatena_loader = HatenaBlogLoader(raw_dir=config.app.raw_dir)
+    crafters_loader = CraftersColonyLoader(
+        raw_dir=config.app.raw_dir,
+        author_url=config.integrations.crafters_colony.author_url,
+        max_pages=config.integrations.crafters_colony.max_pages,
+        max_articles=config.integrations.crafters_colony.max_articles,
     )
-    crafters_loader = (
-        CraftersColonyLoader(
-            raw_dir=config.app.raw_dir,
-            author_url=config.integrations.crafters_colony.author_url,
-            max_pages=config.integrations.crafters_colony.max_pages,
-            max_articles=config.integrations.crafters_colony.max_articles,
-        )
-        if config.features.sources.crafters_colony
-        else None
-    )
-    x_loader = (
-        XPostsLoader(raw_dir=config.app.raw_dir)
-        if config.features.sources.x
-        else None
-    )
+    x_loader = XPostsLoader(raw_dir=config.app.raw_dir)
 
     build_index_usecase = BuildIndexUsecase(
         indexing_service=indexing_service,

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
 import io
+import inspect
 import json
 import logging
+import os
 import re
+import sys
+import tempfile
 import time
+import types
 import zipfile
 from csv import writer
 from dataclasses import dataclass
@@ -39,6 +45,11 @@ _SUPPORTED_DRIVE_MIMES = {
     DRIVE_PDF_MIME,
     *_OFFICE_MIMES,
 }
+_PP_OCR_V5_MOBILE_PREFIX = "PP-OCRv5_mobile"
+_PP_OCR_V5_TEXTLINE_CLS_NAMES = (
+    "PP-LCNet_x0_25_textline_ori",
+    "PP-LCNet_x1_0_textline_ori",
+)
 
 
 @dataclass(frozen=True)
@@ -212,6 +223,57 @@ def _drive_error_status_code(exc: Exception) -> int | None:
     response = getattr(exc, "resp", None)
     status = getattr(response, "status", None)
     return status if isinstance(status, int) else None
+
+
+def _drive_error_payload(exc: Exception) -> dict[str, Any] | None:
+    raw_content = getattr(exc, "content", None)
+    if raw_content is None:
+        return None
+    if isinstance(raw_content, (bytes, bytearray)):
+        content = raw_content.decode("utf-8", errors="replace")
+    else:
+        content = str(raw_content)
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _drive_error_reasons(exc: Exception) -> set[str]:
+    payload = _drive_error_payload(exc)
+    if payload is None:
+        return set()
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return set()
+
+    reasons: set[str] = set()
+    errors = error.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            if not isinstance(item, dict):
+                continue
+            reason = item.get("reason")
+            if isinstance(reason, str) and reason:
+                reasons.add(reason)
+    reason = error.get("reason")
+    if isinstance(reason, str) and reason:
+        reasons.add(reason)
+    return reasons
+
+
+def _is_export_size_limit_exceeded(exc: Exception) -> bool:
+    if _drive_error_status_code(exc) != 403:
+        return False
+    reasons = _drive_error_reasons(exc)
+    if "exportSizeLimitExceeded" in reasons:
+        return True
+    message = str(exc).lower()
+    return (
+        "exportsizelimitexceeded" in message
+        or "too large to be exported" in message
+    )
 
 
 def _is_retryable_drive_exception(
@@ -461,12 +523,411 @@ def _extract_pptx_text(pptx_bytes: bytes) -> str:
         return "\n\n".join(sections).strip() + "\n" if sections else ""
 
 
+def _format_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _move_inputs_to_device(inputs: Any, device: str) -> Any:
+    if hasattr(inputs, "to"):
+        return inputs.to(device)
+    if isinstance(inputs, dict):
+        moved_inputs: dict[str, Any] = {}
+        for key, value in inputs.items():
+            moved_inputs[key] = value.to(device) if hasattr(value, "to") else value
+        return moved_inputs
+    return inputs
+
+
+def _looks_like_pp_ocr_v5_mobile_path(model_path: str) -> bool:
+    return _PP_OCR_V5_MOBILE_PREFIX.lower() in str(model_path or "").lower()
+
+
+def _is_paddle_inference_dir(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "inference.pdiparams").exists()
+        and (path / "inference.yml").exists()
+    )
+
+
+def _ensure_paddle_cache_home() -> None:
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    if os.environ.get("PADDLE_PDX_CACHE_HOME"):
+        return
+    cache_dir = Path(tempfile.gettempdir()) / "kumc-agent-paddlex"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["PADDLE_PDX_CACHE_HOME"] = str(cache_dir)
+    os.environ.setdefault("PADDLE_HOME", str(cache_dir / "paddle"))
+
+
+def _ensure_paddlex_langchain_compat() -> None:
+    try:
+        if importlib.util.find_spec("langchain.docstore.document") is not None:
+            return
+    except ModuleNotFoundError:
+        pass
+    try:
+        import langchain
+        from langchain_core.documents import Document
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+    except ImportError:
+        return
+
+    docstore_module = types.ModuleType("langchain.docstore")
+    document_module = types.ModuleType("langchain.docstore.document")
+    text_splitter_module = types.ModuleType("langchain.text_splitter")
+
+    document_module.Document = Document
+    text_splitter_module.RecursiveCharacterTextSplitter = RecursiveCharacterTextSplitter
+    docstore_module.document = document_module
+
+    setattr(langchain, "docstore", docstore_module)
+    setattr(langchain, "text_splitter", text_splitter_module)
+    sys.modules["langchain.docstore"] = docstore_module
+    sys.modules["langchain.docstore.document"] = document_module
+    sys.modules["langchain.text_splitter"] = text_splitter_module
+
+
+def _resolve_pp_ocr_v5_mobile_dirs(
+    model_path: str,
+) -> tuple[Path, Path, Path | None] | None:
+    raw = Path(model_path).expanduser()
+    det_suffix = f"{_PP_OCR_V5_MOBILE_PREFIX}_det"
+    rec_suffix = f"{_PP_OCR_V5_MOBILE_PREFIX}_rec"
+
+    candidate_pairs: list[tuple[Path, Path]] = []
+    if raw.name == _PP_OCR_V5_MOBILE_PREFIX:
+        candidate_pairs.extend(
+            [
+                (raw.with_name(det_suffix), raw.with_name(rec_suffix)),
+                (raw / det_suffix, raw / rec_suffix),
+            ]
+        )
+    if raw.name.endswith("_det"):
+        candidate_pairs.append((raw, raw.with_name(raw.name[:-4] + "_rec")))
+    if raw.name.endswith("_rec"):
+        candidate_pairs.append((raw.with_name(raw.name[:-4] + "_det"), raw))
+    if raw.is_dir():
+        candidate_pairs.extend(
+            [
+                (raw / det_suffix, raw / rec_suffix),
+                (raw.parent / det_suffix, raw.parent / rec_suffix),
+            ]
+        )
+    candidate_pairs.append((Path(f"{model_path}_det"), Path(f"{model_path}_rec")))
+
+    seen_pairs: set[tuple[str, str]] = set()
+    for det_dir, rec_dir in candidate_pairs:
+        key = (str(det_dir), str(rec_dir))
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        if not (_is_paddle_inference_dir(det_dir) and _is_paddle_inference_dir(rec_dir)):
+            continue
+
+        cls_dir: Path | None = None
+        parent_candidates = [det_dir.parent, rec_dir.parent, raw, raw.parent]
+        checked: set[str] = set()
+        for parent in parent_candidates:
+            parent_key = str(parent)
+            if parent_key in checked:
+                continue
+            checked.add(parent_key)
+            for cls_name in _PP_OCR_V5_TEXTLINE_CLS_NAMES:
+                maybe_cls_dir = parent / cls_name
+                if _is_paddle_inference_dir(maybe_cls_dir):
+                    cls_dir = maybe_cls_dir
+                    break
+            if cls_dir is not None:
+                break
+
+        return det_dir, rec_dir, cls_dir
+
+    return None
+
+
+class _PaddlePdfOcrRunner:
+    def __init__(self, *, ocr: Any, use_cls: bool) -> None:
+        self._ocr = ocr
+        self._use_cls = use_cls
+
+    def __call__(self, image: Any, max_new_tokens: int = 2048) -> list[dict[str, str]]:
+        del max_new_tokens
+        try:
+            import numpy as np
+        except ImportError as e:
+            raise RuntimeError("numpy is required for PaddleOCR inference.") from e
+
+        image_array = np.array(image)
+        predict = getattr(self._ocr, "predict", None)
+        if callable(predict):
+            result = predict(image_array)
+        elif hasattr(self._ocr, "ocr"):
+            result = self._ocr.ocr(image_array, cls=self._use_cls)
+        else:
+            raise RuntimeError(
+                "PaddleOCR runner does not expose `predict` or `ocr` methods."
+            )
+
+        return [{"generated_text": _extract_generated_text(result).strip()}]
+
+
+class _DirectPdfOcrRunner:
+    def __init__(self, *, model: Any, processor: Any, device: str) -> None:
+        self._model = model
+        self._processor = processor
+        self._device = device
+        image_processor = getattr(processor, "image_processor", None)
+        self._min_pixels = getattr(image_processor, "min_pixels", None)
+        self._max_pixels = 1280 * 28 * 28
+
+    def __call__(self, image: Any, max_new_tokens: int = 2048) -> list[dict[str, str]]:
+        try:
+            import torch
+        except ImportError as e:
+            raise RuntimeError("torch is required for direct OCR model inference.") from e
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": "OCR:"},
+                ],
+            }
+        ]
+
+        apply_chat_template = getattr(self._processor, "apply_chat_template", None)
+        if callable(apply_chat_template):
+            kwargs: dict[str, Any] = {
+                "add_generation_prompt": True,
+                "tokenize": True,
+                "return_dict": True,
+                "return_tensors": "pt",
+            }
+            if isinstance(self._min_pixels, int) and self._min_pixels > 0:
+                kwargs["images_kwargs"] = {
+                    "size": {
+                        "shortest_edge": self._min_pixels,
+                        "longest_edge": self._max_pixels,
+                    }
+                }
+            inputs = apply_chat_template(messages, **kwargs)
+        else:
+            inputs = self._processor(
+                text=["OCR:"],
+                images=[image],
+                return_tensors="pt",
+            )
+
+        inputs = _move_inputs_to_device(inputs, self._device)
+
+        with torch.inference_mode():
+            outputs = self._model.generate(**inputs, max_new_tokens=max_new_tokens)
+
+        generated_ids = getattr(outputs, "sequences", outputs)
+        input_ids = None
+        if isinstance(inputs, dict):
+            input_ids = inputs.get("input_ids")
+        else:
+            input_ids = getattr(inputs, "input_ids", None)
+        if (
+            input_ids is not None
+            and hasattr(generated_ids, "ndim")
+            and generated_ids.ndim >= 2
+            and generated_ids.shape[-1] > input_ids.shape[-1]
+        ):
+            generated_ids = generated_ids[:, input_ids.shape[-1] :]
+
+        if hasattr(self._processor, "batch_decode"):
+            decoded = self._processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            text = decoded[0] if decoded else ""
+        elif hasattr(self._processor, "decode"):
+            first_item = generated_ids[0] if hasattr(generated_ids, "__getitem__") else generated_ids
+            text = self._processor.decode(first_item, skip_special_tokens=True)
+        else:
+            text = ""
+        return [{"generated_text": text}]
+
+
+def _load_pdf_ocr_paddle_runner(model_path: str) -> Any:
+    resolved_dirs = _resolve_pp_ocr_v5_mobile_dirs(model_path)
+    if resolved_dirs is None:
+        raise RuntimeError(
+            "PP-OCRv5_mobile requires local det/rec model directories. "
+            "Expected either '<path>_det + <path>_rec' or "
+            "'<dir>/PP-OCRv5_mobile_det + <dir>/PP-OCRv5_mobile_rec'."
+        )
+
+    det_dir, rec_dir, cls_dir = resolved_dirs
+    _ensure_paddle_cache_home()
+    _ensure_paddlex_langchain_compat()
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError as e:
+        raise RuntimeError(
+            "paddleocr is required for PP-OCRv5_mobile inference. "
+            "Install paddleocr (and paddlepaddle for your environment)."
+        ) from e
+
+    signature = inspect.signature(PaddleOCR.__init__)
+    parameters = signature.parameters
+    accepts_var_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in parameters.values()
+    )
+
+    def _accepts(name: str) -> bool:
+        return accepts_var_kwargs or name in parameters
+
+    use_modern_args = (
+        accepts_var_kwargs
+        or "text_detection_model_dir" in parameters
+        or "text_recognition_model_dir" in parameters
+    )
+
+    kwargs: dict[str, Any] = {}
+    if use_modern_args:
+        if _accepts("text_detection_model_dir"):
+            kwargs["text_detection_model_dir"] = str(det_dir)
+        if _accepts("text_detection_model_name"):
+            kwargs["text_detection_model_name"] = det_dir.name
+        if _accepts("text_recognition_model_dir"):
+            kwargs["text_recognition_model_dir"] = str(rec_dir)
+        if _accepts("text_recognition_model_name"):
+            kwargs["text_recognition_model_name"] = rec_dir.name
+        if cls_dir is not None and _accepts("textline_orientation_model_dir"):
+            kwargs["textline_orientation_model_dir"] = str(cls_dir)
+        if cls_dir is not None and _accepts("textline_orientation_model_name"):
+            kwargs["textline_orientation_model_name"] = cls_dir.name
+    else:
+        if _accepts("det_model_dir"):
+            kwargs["det_model_dir"] = str(det_dir)
+        if _accepts("rec_model_dir"):
+            kwargs["rec_model_dir"] = str(rec_dir)
+        if cls_dir is not None and _accepts("cls_model_dir"):
+            kwargs["cls_model_dir"] = str(cls_dir)
+
+    if _accepts("use_doc_orientation_classify"):
+        kwargs["use_doc_orientation_classify"] = False
+    if _accepts("use_doc_unwarping"):
+        kwargs["use_doc_unwarping"] = False
+    if _accepts("show_log"):
+        kwargs["show_log"] = False
+    if _accepts("use_gpu"):
+        kwargs["use_gpu"] = False
+    if _accepts("device"):
+        kwargs["device"] = "cpu"
+
+    use_cls = cls_dir is not None
+    if use_modern_args:
+        if _accepts("use_textline_orientation"):
+            kwargs["use_textline_orientation"] = use_cls
+    else:
+        if _accepts("use_angle_cls"):
+            kwargs["use_angle_cls"] = use_cls
+
+    load_kwargs = dict(kwargs)
+    while True:
+        try:
+            return _PaddlePdfOcrRunner(ocr=PaddleOCR(**load_kwargs), use_cls=use_cls)
+        except Exception as exc:
+            unknown_arg_match = re.search(r"Unknown argument:\s*([a-zA-Z0-9_]+)", str(exc))
+            if unknown_arg_match is None:
+                raise
+            unknown_arg = unknown_arg_match.group(1)
+            if unknown_arg not in load_kwargs:
+                raise
+            load_kwargs.pop(unknown_arg, None)
+
+
+def _load_pdf_ocr_direct_runner(model_path: str) -> Any:
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor
+    except ImportError as e:
+        raise RuntimeError(
+            "transformers and torch are required for direct OCR model inference."
+        ) from e
+
+    model_classes: list[Any] = []
+    try:
+        from transformers import AutoModelForImageTextToText
+
+        model_classes.append(AutoModelForImageTextToText)
+    except Exception:
+        pass
+    model_classes.append(AutoModelForCausalLM)
+
+    processor = AutoProcessor.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_errors: list[str] = []
+    for model_class in model_classes:
+        load_kwargs_base = {
+            "trust_remote_code": True,
+            "local_files_only": True,
+        }
+        attempts: list[dict[str, Any]] = [load_kwargs_base]
+        if device == "cpu":
+            attempts = [
+                {**load_kwargs_base, "torch_dtype": torch.float32},
+                load_kwargs_base,
+            ]
+        for load_kwargs in attempts:
+            try:
+                model = model_class.from_pretrained(model_path, **load_kwargs)
+                model = model.to(device)
+                model.eval()
+                return _DirectPdfOcrRunner(
+                    model=model,
+                    processor=processor,
+                    device=device,
+                )
+            except Exception as exc:
+                model_errors.append(
+                    f"{model_class.__name__}({load_kwargs}): {_format_exception(exc)}"
+                )
+
+    joined_errors = "\n".join(model_errors)
+    dependency_hint = (
+        "\nHint: install missing optional dependency `einops` "
+        "if it is reported in the errors."
+        if "einops" in joined_errors
+        else ""
+    )
+    raise RuntimeError(
+        "Failed to load OCR model via direct transformers APIs.\n"
+        f"{joined_errors}{dependency_hint}"
+    )
+
+
 @lru_cache(maxsize=2)
 def _load_pdf_ocr_pipeline(model_path: str) -> Any:
     if not model_path:
         raise RuntimeError(
             "PDF_OCR_MODEL is empty. Set PDF_OCR_MODEL to a local OCR model path."
         )
+    errors: list[str] = []
+    if _looks_like_pp_ocr_v5_mobile_path(model_path):
+        try:
+            return _load_pdf_ocr_paddle_runner(model_path)
+        except Exception as exc:
+            errors.append(f"paddle_load: {_format_exception(exc)}")
+            raise RuntimeError(
+                f"Failed to load OCR model from {model_path}. "
+                "PP-OCRv5_mobile requires PaddleOCR-compatible local model files.\n"
+                + "\n".join(errors)
+            ) from exc
+
     try:
         from transformers import pipeline as hf_pipeline
     except ImportError as e:
@@ -474,7 +935,6 @@ def _load_pdf_ocr_pipeline(model_path: str) -> Any:
             "transformers is required for OCR on image-based PDFs."
         ) from e
 
-    last_error: Exception | None = None
     for task in ("image-text-to-text", "image-to-text"):
         try:
             return hf_pipeline(
@@ -484,27 +944,57 @@ def _load_pdf_ocr_pipeline(model_path: str) -> Any:
                 local_files_only=True,
             )
         except Exception as exc:
-            last_error = exc
+            errors.append(f"pipeline[{task}]: {_format_exception(exc)}")
 
-    raise RuntimeError(
-        f"Failed to load OCR model from {model_path}. "
-        "Check PDF_OCR_MODEL and local model files."
-    ) from last_error
+    try:
+        return _load_pdf_ocr_direct_runner(model_path)
+    except Exception as exc:
+        errors.append(f"direct_load: {_format_exception(exc)}")
+        raise RuntimeError(
+            f"Failed to load OCR model from {model_path}. "
+            "Check PDF_OCR_MODEL, local model files, and OCR dependencies.\n"
+            + "\n".join(errors)
+        ) from exc
 
 
 def _extract_generated_text(payload: Any) -> str:
     if isinstance(payload, str):
         return payload
     if isinstance(payload, dict):
-        for key in ("generated_text", "text", "answer"):
+        for key in ("generated_text", "text", "answer", "rec_text"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value
+        rec_texts = payload.get("rec_texts")
+        if isinstance(rec_texts, list):
+            values = [
+                str(item).strip()
+                for item in rec_texts
+                if isinstance(item, str) and str(item).strip()
+            ]
+            if values:
+                return "\n".join(values)
+        nested_result = payload.get("res")
+        if nested_result is not None:
+            nested_text = _extract_generated_text(nested_result).strip()
+            if nested_text:
+                return nested_text
         return ""
-    if isinstance(payload, list):
+    if isinstance(payload, (list, tuple)):
+        if (
+            len(payload) == 2
+            and isinstance(payload[1], (list, tuple))
+            and payload[1]
+            and isinstance(payload[1][0], str)
+            and payload[1][0].strip()
+        ):
+            return payload[1][0]
         parts = [_extract_generated_text(item).strip() for item in payload]
         non_empty = [part for part in parts if part]
         return "\n".join(non_empty)
+    result_attr = getattr(payload, "res", None)
+    if result_attr is not None:
+        return _extract_generated_text(result_attr).strip()
     return ""
 
 
@@ -805,13 +1295,32 @@ def download_drive_markdown(
                         text = content.decode("utf-8", errors="replace")
                         text = _strip_drive_image_placeholders(text)
                     elif drive_file.mime_type == DRIVE_SLIDE_MIME:
-                        content = _download_export_bytes(
-                            drive_service,
-                            file_id=drive_file.file_id,
-                            mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            **download_retry_options,
-                        )
-                        text = _extract_pptx_text(content)
+                        try:
+                            content = _download_export_bytes(
+                                drive_service,
+                                file_id=drive_file.file_id,
+                                mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                **download_retry_options,
+                            )
+                            text = _extract_pptx_text(content)
+                        except Exception as exc:
+                            if not _is_export_size_limit_exceeded(exc):
+                                raise
+                            logger.warning(
+                                (
+                                    "Slides export exceeds Drive size limit; "
+                                    "falling back to text/plain export: %s (%s)"
+                                ),
+                                drive_file.path,
+                                drive_file.file_id,
+                            )
+                            content = _download_export_bytes(
+                                drive_service,
+                                file_id=drive_file.file_id,
+                                mime_type="text/plain",
+                                **download_retry_options,
+                            )
+                            text = content.decode("utf-8", errors="replace")
                     elif drive_file.mime_type in DRIVE_WORD_MIMES:
                         if drive_file.mime_type == "application/msword":
                             logger.warning(
