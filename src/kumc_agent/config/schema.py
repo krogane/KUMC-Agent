@@ -99,6 +99,7 @@ class RetrievalSection:
     recency_half_life_days: float
     parent_doc_enabled: bool
     parent_chunk_cap: int
+    material_full_text_char_limit: int
     sudachi_mode: str
     sparse_bm25_k1: float
     sparse_bm25_b: float
@@ -314,7 +315,14 @@ class OpsSection:
     warmup_interval_minutes: int
     index_update_estimate_min_minutes: int
     index_update_estimate_max_minutes: int
+    ragas_answer_generation_batch_size: int
     ragas_batch_size: int
+    ragas_max_workers: int
+    ragas_timeout_seconds: float
+    ragas_max_retries: int
+    ragas_answer_cache_enabled: bool
+    ragas_answer_cache_path: Path
+    ragas_disable_history_for_eval: bool
     ragas_metrics: OpsRagasMetricsSection
     answer_record_log_enabled: bool
     answer_record_log_path: Path
@@ -355,6 +363,7 @@ class IntegrationSection:
     gemini_embedding_requests_per_minute: int
     gemini_summary_requests_per_minute: int
     gemini_ragas_requests_per_minute: int
+    gemini_ragas_embedding_requests_per_minute: int
 
 
 @dataclass(frozen=True)

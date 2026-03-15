@@ -133,6 +133,7 @@ PYTHONPATH=src python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
 PYTHONPATH=src python -m kumc_agent.cli index build
 PYTHONPATH=src python -m kumc_agent.cli index update
 PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl --ragas-batch-size 10
+PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl --ragas-batch-size 200 --ragas-max-workers 4 --answer-cache-path data/eval/cache/ragas_answers.jsonl
 ```
 
 ### HTTP (stub)

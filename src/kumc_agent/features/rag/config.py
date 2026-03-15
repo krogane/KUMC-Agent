@@ -66,4 +66,5 @@ class RagConfig:
     history_max_turns: int = 5
     prompt_default_turns: int = 3
     prompt_additional_turns: int = 10
+    material_full_text_char_limit: int = 3000
     fast_model_notice: str = "※負荷軽減のために軽量モードを使用しました。"

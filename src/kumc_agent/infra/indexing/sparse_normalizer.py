@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
-from functools import lru_cache
+import threading
 from typing import FrozenSet
 
 from sudachipy import dictionary, tokenizer as sudachi_tokenizer
@@ -34,9 +34,15 @@ def _sudachi_mode(value: str) -> sudachi_tokenizer.Tokenizer.SplitMode:
     return sudachi_tokenizer.Tokenizer.SplitMode.B
 
 
-@lru_cache(maxsize=1)
+_SUDACHI_TOKENIZER_LOCAL = threading.local()
+
+
 def _sudachi_tokenizer() -> sudachi_tokenizer.Tokenizer:
-    return dictionary.Dictionary().create()
+    tokenizer = getattr(_SUDACHI_TOKENIZER_LOCAL, "tokenizer", None)
+    if tokenizer is None:
+        tokenizer = dictionary.Dictionary().create()
+        _SUDACHI_TOKENIZER_LOCAL.tokenizer = tokenizer
+    return tokenizer
 
 
 @dataclass(frozen=True)

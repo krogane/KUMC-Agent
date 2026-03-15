@@ -88,6 +88,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "integrations.gemini_ragas_requests_per_minute",
         _to_int,
     ),
+    EnvBinding(
+        "KUMC_GEMINI_RAGAS_EMBEDDING_REQUESTS_PER_MINUTE",
+        "integrations.gemini_ragas_embedding_requests_per_minute",
+        _to_int,
+    ),
     EnvBinding("KUMC_DRIVE_FOLDER_ID", "integrations.drive.folder_id", str),
     EnvBinding(
         "KUMC_GOOGLE_APPLICATION_CREDENTIALS",
@@ -179,6 +184,33 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_int,
     ),
     EnvBinding("KUMC_RAGAS_BATCH_SIZE", "ops.ragas_batch_size", _to_int),
+    EnvBinding(
+        "KUMC_RAGAS_ANSWER_GENERATION_BATCH_SIZE",
+        "ops.ragas_answer_generation_batch_size",
+        _to_int,
+    ),
+    EnvBinding("KUMC_RAGAS_MAX_WORKERS", "ops.ragas_max_workers", _to_int),
+    EnvBinding(
+        "KUMC_RAGAS_TIMEOUT_SECONDS",
+        "ops.ragas_timeout_seconds",
+        _to_float,
+    ),
+    EnvBinding("KUMC_RAGAS_MAX_RETRIES", "ops.ragas_max_retries", _to_int),
+    EnvBinding(
+        "KUMC_RAGAS_ANSWER_CACHE_ENABLED",
+        "ops.ragas_answer_cache_enabled",
+        _to_bool,
+    ),
+    EnvBinding(
+        "KUMC_RAGAS_ANSWER_CACHE_PATH",
+        "ops.ragas_answer_cache_path",
+        str,
+    ),
+    EnvBinding(
+        "KUMC_RAGAS_DISABLE_HISTORY_FOR_EVAL",
+        "ops.ragas_disable_history_for_eval",
+        _to_bool,
+    ),
     EnvBinding(
         "KUMC_RAGAS_METRIC_ANSWER_RELEVANCY_ENABLED",
         "ops.ragas_metrics.answer_relevancy_enabled",
@@ -675,6 +707,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "KUMC_RETRIEVAL_RECENCY_HALF_LIFE_DAYS",
         "features.retrieval.recency_half_life_days",
         _to_float,
+    ),
+    EnvBinding(
+        "KUMC_RETRIEVAL_MATERIAL_FULL_TEXT_CHAR_LIMIT",
+        "features.retrieval.material_full_text_char_limit",
+        _to_int,
     ),
     EnvBinding("SUDACHI_MODE", "features.retrieval.sudachi_mode", str),
     EnvBinding("SPARSE_BM25_K1", "features.retrieval.sparse_bm25_k1", _to_float),

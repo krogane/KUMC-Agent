@@ -45,6 +45,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ragas_parser.add_argument("--limit", type=int, default=None)
     ragas_parser.add_argument("--result-path", type=Path, default=None)
     ragas_parser.add_argument("--ragas-batch-size", type=int, default=None)
+    ragas_parser.add_argument("--ragas-max-workers", type=int, default=None)
+    ragas_parser.add_argument("--ragas-timeout-seconds", type=float, default=None)
+    ragas_parser.add_argument("--ragas-max-retries", type=int, default=None)
+    ragas_parser.add_argument("--answer-cache-path", type=Path, default=None)
+    ragas_parser.add_argument("--disable-answer-cache", action="store_true")
+    ragas_parser.add_argument("--refresh-answer-cache", action="store_true")
+    ragas_parser.add_argument("--disable-history-for-eval", action="store_true")
 
     subparsers.add_parser("discord", help="Run Discord frontend")
     subparsers.add_parser("http", help="Run HTTP stub frontend")
@@ -134,14 +141,23 @@ def main() -> None:
                 limit=args.limit,
                 result_path=args.result_path,
                 ragas_batch_size=args.ragas_batch_size,
+                ragas_max_workers=args.ragas_max_workers,
+                ragas_timeout_seconds=args.ragas_timeout_seconds,
+                ragas_max_retries=args.ragas_max_retries,
+                answer_cache_path=args.answer_cache_path,
+                answer_cache_enabled=False if args.disable_answer_cache else None,
+                refresh_answer_cache=bool(args.refresh_answer_cache),
+                disable_history_for_eval=True if args.disable_history_for_eval else None,
             )
         )
         logger.info(
-            "Ragas eval completed. total=%d exact_match=%.3f token_overlap=%.3f metrics=%s",
+            "Ragas eval completed. total=%d exact_match=%.3f token_overlap=%.3f "
+            "metrics=%s metadata=%s",
             result.total,
             result.exact_match,
             result.token_overlap,
             result.ragas_metrics,
+            result.ragas_metadata,
         )
         print(
             json.dumps(
@@ -150,6 +166,7 @@ def main() -> None:
                     "exact_match": result.exact_match,
                     "token_overlap": result.token_overlap,
                     "ragas_metrics": result.ragas_metrics,
+                    "ragas_metadata": result.ragas_metadata,
                 },
                 ensure_ascii=False,
             )

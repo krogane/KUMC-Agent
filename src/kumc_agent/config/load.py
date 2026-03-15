@@ -594,6 +594,9 @@ def _to_runtime_config(
                 parent_chunk_cap=int(
                     features["retrieval"].get("parent_chunk_cap", 2)
                 ),
+                material_full_text_char_limit=int(
+                    features["retrieval"].get("material_full_text_char_limit", 3000)
+                ),
                 sudachi_mode=str(features["retrieval"].get("sudachi_mode", "B")),
                 sparse_bm25_k1=float(features["retrieval"].get("sparse_bm25_k1", 1.5)),
                 sparse_bm25_b=float(features["retrieval"].get("sparse_bm25_b", 0.75)),
@@ -969,9 +972,45 @@ def _to_runtime_config(
             index_update_estimate_max_minutes=int(
                 ops.get("index_update_estimate_max_minutes", 60)
             ),
+            ragas_answer_generation_batch_size=max(
+                0,
+                int(
+                    ops.get(
+                        "ragas_answer_generation_batch_size",
+                        ops.get("ragas_batch_size", 10),
+                    )
+                ),
+            ),
             ragas_batch_size=max(
                 0,
                 int(ops.get("ragas_batch_size", 10)),
+            ),
+            ragas_max_workers=max(
+                0,
+                int(ops.get("ragas_max_workers", 16)),
+            ),
+            ragas_timeout_seconds=max(
+                0.0,
+                float(ops.get("ragas_timeout_seconds", 180.0)),
+            ),
+            ragas_max_retries=max(
+                0,
+                int(ops.get("ragas_max_retries", 2)),
+            ),
+            ragas_answer_cache_enabled=bool(
+                ops.get("ragas_answer_cache_enabled", True)
+            ),
+            ragas_answer_cache_path=_resolve_path(
+                base_dir,
+                str(
+                    ops.get(
+                        "ragas_answer_cache_path",
+                        "data/eval/cache/ragas_answers.jsonl",
+                    )
+                ),
+            ),
+            ragas_disable_history_for_eval=bool(
+                ops.get("ragas_disable_history_for_eval", True)
             ),
             ragas_metrics=OpsRagasMetricsSection(
                 answer_relevancy_enabled=bool(
@@ -1095,6 +1134,21 @@ def _to_runtime_config(
                     integrations.get(
                         "gemini_ragas_requests_per_minute",
                         integrations.get("gemini_requests_per_minute", 60),
+                    )
+                ),
+            ),
+            gemini_ragas_embedding_requests_per_minute=max(
+                0,
+                int(
+                    integrations.get(
+                        "gemini_ragas_embedding_requests_per_minute",
+                        integrations.get(
+                            "gemini_ragas_requests_per_minute",
+                            integrations.get(
+                                "gemini_embedding_requests_per_minute",
+                                integrations.get("gemini_requests_per_minute", 60),
+                            ),
+                        ),
                     )
                 ),
             ),

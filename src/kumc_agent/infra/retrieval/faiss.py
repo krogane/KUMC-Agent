@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -33,6 +35,7 @@ class FaissLikeIndex:
         self._cached_vectors_signature: FileSignature | None = None
         self._cached_chunks: list[Chunk] | None = None
         self._cached_chunks_signature: FileSignature | None = None
+        self._faiss_disabled_logged = False
         self._index_dir.mkdir(parents=True, exist_ok=True)
 
     def build(self, *, chunks: list[Chunk], embeddings: np.ndarray) -> None:
@@ -45,23 +48,27 @@ class FaissLikeIndex:
         self._cached_vectors = matrix
         self._cached_vectors_signature = self._file_signature(self._vectors_path)
 
-        try:
-            import faiss
-
-            normalized = matrix.copy()
-            if normalized.shape[0] > 0:
-                faiss.normalize_L2(normalized)
-            index = faiss.IndexFlatIP(int(normalized.shape[1]))
-            index.add(normalized)
-            faiss.write_index(index, str(self._faiss_path))
-            self._cached_index = index
-            self._cached_index_signature = self._file_signature(self._faiss_path)
-        except Exception:
-            logger.exception(
-                "FAISS index build failed. Falling back to NumPy-based dense search."
-            )
+        if self._is_faiss_runtime_disabled():
             self._cached_index = None
             self._cached_index_signature = None
+        else:
+            try:
+                import faiss
+
+                normalized = matrix.copy()
+                if normalized.shape[0] > 0:
+                    faiss.normalize_L2(normalized)
+                index = faiss.IndexFlatIP(int(normalized.shape[1]))
+                index.add(normalized)
+                faiss.write_index(index, str(self._faiss_path))
+                self._cached_index = index
+                self._cached_index_signature = self._file_signature(self._faiss_path)
+            except Exception:
+                logger.exception(
+                    "FAISS index build failed. Falling back to NumPy-based dense search."
+                )
+                self._cached_index = None
+                self._cached_index_signature = None
 
         with self._chunks_path.open("w", encoding="utf-8") as fw:
             for chunk in chunks:
@@ -115,6 +122,8 @@ class FaissLikeIndex:
     ) -> list[SearchResult] | None:
         if top_k <= 0:
             return []
+        if self._is_faiss_runtime_disabled():
+            return None
         if not self._faiss_path.exists():
             return None
         try:
@@ -145,6 +154,8 @@ class FaissLikeIndex:
             return None
 
     def _load_faiss_index(self):
+        if self._is_faiss_runtime_disabled():
+            return None
         try:
             import faiss
         except Exception:
@@ -218,3 +229,17 @@ class FaissLikeIndex:
         except FileNotFoundError:
             return None
         return (int(stat.st_mtime_ns), int(stat.st_size))
+
+    def _is_faiss_runtime_disabled(self) -> bool:
+        disabled_env = str(os.getenv("KUMC_DISABLE_FAISS_RUNTIME", "")).strip().lower()
+        if disabled_env in {"1", "true", "yes", "on"}:
+            return True
+        if sys.platform == "darwin" and "torch" in sys.modules:
+            if not self._faiss_disabled_logged:
+                logger.warning(
+                    "FAISS is disabled on macOS because torch is already loaded. "
+                    "Using NumPy dense search fallback to avoid libomp conflicts."
+                )
+                self._faiss_disabled_logged = True
+            return True
+        return False

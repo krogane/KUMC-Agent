@@ -362,6 +362,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             material_search_max_names=config.rag.routing.material_search_max_names,
             parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
             parent_chunk_cap=config.features.retrieval.parent_chunk_cap,
+            material_full_text_char_limit=(
+                config.features.retrieval.material_full_text_char_limit
+            ),
             answer_json_max_retries=config.rag.answer_json_max_retries,
             history_enabled=config.rag.history.enabled,
             history_max_turns=config.rag.history.max_turns,
@@ -454,7 +457,19 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             gemini_api_key=config.integrations.gemini_api_key,
             ragas_gemini_model=config.providers.llm.gemini_model,
             ragas_gemini_requests_per_minute=config.integrations.gemini_ragas_requests_per_minute,
+            ragas_gemini_embedding_requests_per_minute=(
+                config.integrations.gemini_ragas_embedding_requests_per_minute
+            ),
+            default_answer_generation_batch_size=(
+                config.ops.ragas_answer_generation_batch_size
+            ),
             default_ragas_batch_size=config.ops.ragas_batch_size,
+            default_ragas_max_workers=config.ops.ragas_max_workers,
+            default_ragas_timeout_seconds=config.ops.ragas_timeout_seconds,
+            default_ragas_max_retries=config.ops.ragas_max_retries,
+            default_answer_cache_enabled=config.ops.ragas_answer_cache_enabled,
+            default_answer_cache_path=config.ops.ragas_answer_cache_path,
+            default_disable_history_for_eval=config.ops.ragas_disable_history_for_eval,
             eval_answer_relevancy_enabled=config.ops.ragas_metrics.answer_relevancy_enabled,
             eval_faithfulness_enabled=config.ops.ragas_metrics.faithfulness_enabled,
             eval_context_precision_enabled=config.ops.ragas_metrics.context_precision_enabled,

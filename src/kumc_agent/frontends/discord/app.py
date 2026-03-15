@@ -7,6 +7,7 @@ import logging
 import threading
 from zoneinfo import ZoneInfo
 
+from kumc_agent.domain.models.answer import Answer
 from kumc_agent.frontends.discord.commands import parse_command, parse_interaction_command
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
@@ -17,6 +18,7 @@ from kumc_agent.utils.logging import configure_logging, default_execution_log_pa
 
 logger = logging.getLogger(__name__)
 _JST = ZoneInfo("Asia/Tokyo")
+_ANSWER_PROMPT_LOG_FILENAME = "answer_prompts.jsonl"
 
 
 def main() -> None:
@@ -46,6 +48,7 @@ def main() -> None:
     indexing_cancel_event = threading.Event()
     indexing_started_at: datetime | None = None
     evaluating_task: asyncio.Task[None] | None = None
+    evaluating_cancel_event = threading.Event()
     channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
     channel_cancel_events: dict[int, threading.Event] = {}
     auto_index_task: asyncio.Task[None] | None = None
@@ -184,6 +187,48 @@ def main() -> None:
                     fw.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception:
             logger.exception("Failed to append answer record.")
+
+    def _append_answer_prompt_record(
+        *,
+        message: discord.Message,
+        query: str,
+        routing_result: dict[str, object] | None,
+        answer: Answer,
+    ) -> None:
+        if not context.config.ops.answer_record_log_enabled:
+            return
+        query_text = (query or "").strip()
+        if not query_text:
+            return
+
+        prompt_payload = answer.metadata.get("llm_prompt")
+        if not isinstance(prompt_payload, dict):
+            return
+        system_prompt = str(prompt_payload.get("system_prompt") or "").strip()
+        user_prompt = str(prompt_payload.get("user_prompt") or "").strip()
+        if not system_prompt and not user_prompt:
+            return
+
+        record = {
+            "timestamp": datetime.now(_JST).isoformat(timespec="seconds"),
+            "questioner_user_id": _question_user_id(message),
+            "questioner_username": _question_username(message),
+            "question": query_text,
+            "route": answer.route,
+            "routing_result": routing_result,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+        try:
+            with answer_record_lock:
+                path = context.config.ops.answer_record_log_path.with_name(
+                    _ANSWER_PROMPT_LOG_FILENAME
+                )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as fw:
+                    fw.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.exception("Failed to append answer prompt record.")
 
     def _format_jst(value: datetime) -> str:
         return value.astimezone(_JST).strftime("%Y/%m/%d %H:%M")
@@ -384,6 +429,7 @@ def main() -> None:
         channel: discord.abc.Messageable | None,
     ) -> None:
         nonlocal evaluating_task
+        evaluating_cancel_event.clear()
         await _send_status(channel, "評価を開始します。")
         try:
             eval_file = context.config.app.eval_dir / "ragas.jsonl"
@@ -392,9 +438,13 @@ def main() -> None:
                     EvaluateRagasRequest(
                         eval_file=eval_file,
                         result_path=context.config.app.eval_dir / "result" / "result.json",
+                        cancel_event=evaluating_cancel_event,
                     )
                 )
             )
+            if bool(result.ragas_metadata.get("canceled")):
+                await _send_status(channel, "評価を中止しました。")
+                return
             metric_text = ""
             if result.ragas_metrics:
                 ordered_keys = (
@@ -413,12 +463,17 @@ def main() -> None:
                     parts.append(f"{key}={result.ragas_metrics[key]:.3f}")
                 if parts:
                     metric_text = " metrics=" + ", ".join(parts)
+            detail_text = ""
+            failed_batches = int(result.ragas_metadata.get("failed_batches", 0) or 0)
+            failed_records = int(result.ragas_metadata.get("failed_records", 0) or 0)
+            if failed_batches > 0:
+                detail_text = f" failed_batches={failed_batches}, failed_records={failed_records}"
             await _send_status(
                 channel,
                 (
                     "評価が完了しました。"
                     f" total={result.total}, exact_match={result.exact_match:.3f},"
-                    f" token_overlap={result.token_overlap:.3f}{metric_text}"
+                    f" token_overlap={result.token_overlap:.3f}{metric_text}{detail_text}"
                 ),
             )
         except asyncio.CancelledError:
@@ -428,6 +483,7 @@ def main() -> None:
             await _send_status(channel, f"評価に失敗しました: {exc}")
         finally:
             evaluating_task = None
+            evaluating_cancel_event.clear()
 
     async def _run_chat(
         *,
@@ -473,6 +529,12 @@ def main() -> None:
                 query=query,
                 routing_result=routing_payload,
                 answer=answer.text,
+            )
+            _append_answer_prompt_record(
+                message=message,
+                query=query,
+                routing_result=routing_payload,
+                answer=answer,
             )
         except asyncio.CancelledError:
             return
@@ -673,6 +735,7 @@ def main() -> None:
                 indexing_task.cancel()
                 actions.append("インデックス更新を中止します。")
             if evaluating_task is not None and not evaluating_task.done():
+                evaluating_cancel_event.set()
                 evaluating_task.cancel()
                 actions.append("評価を中止します。")
             if not actions:
@@ -764,6 +827,7 @@ def main() -> None:
                 indexing_task.cancel()
                 actions.append("インデックス更新を中止します。")
             if evaluating_task is not None and not evaluating_task.done():
+                evaluating_cancel_event.set()
                 evaluating_task.cancel()
                 actions.append("評価を中止します。")
             if not actions:

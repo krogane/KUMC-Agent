@@ -1,13 +1,13 @@
 providers:
   llm:
     provider: "gemini"
-    gemini_model: "gemini-3-flash-preview"
+    gemini_model: "gemini-3.1-flash-lite-preview"
     llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
     temperature: 0.0
     max_output_tokens: 1024
     thinking_level: "minimal"
-    threads: 4
-    gpu_layers: 0
+    threads: 8
+    gpu_layers: 12
   embeddings:
     provider: "gemini"
     model: "gemini-embedding-001"

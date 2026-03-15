@@ -89,9 +89,9 @@ rag:
     material_search_max_names: 3
   history:
     enabled: true
-    max_turns: 10
-    prompt_default_turns: 1
-    prompt_additional_turns: 10
+    max_turns: 3
+    prompt_default_turns: 0
+    prompt_additional_turns: 3
     special_channel_history_limit: 30
     special_channel_names: ["kumc-agent"]
     special_channel_custom_instruction: ""
@@ -101,7 +101,7 @@ rag:
       gemini_model: "gemini-3-flash-preview"
       llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
       temperature: 0.0
-      max_output_tokens: 1024
+      max_output_tokens: 8192
       thinking_level: "minimal"
       prompt_name: "answer_rag"
     no_rag:
@@ -109,7 +109,7 @@ rag:
       gemini_model: "gemini-2.5-flash-lite"
       llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
       temperature: 0.0
-      max_output_tokens: 1024
+      max_output_tokens: 4096
       thinking_level: "minimal"
       prompt_name: "answer_no_rag"
     refusal:
@@ -179,10 +179,17 @@ ops:
   warmup_interval_minutes: 60
   index_update_estimate_min_minutes: 30
   index_update_estimate_max_minutes: 60
-  ragas_batch_size: 2000
+  ragas_answer_generation_batch_size: 30
+  ragas_batch_size: 1024
+  ragas_max_workers: 64
+  ragas_timeout_seconds: 180.0
+  ragas_max_retries: 1
+  ragas_answer_cache_enabled: false
+  ragas_answer_cache_path: "data/eval/cache/ragas_answers.jsonl"
+  ragas_disable_history_for_eval: true
   ragas_metrics:
-    answer_relevancy_enabled: true
-    faithfulness_enabled: true
+    answer_relevancy_enabled: false
+    faithfulness_enabled: false
     context_precision_enabled: false
     context_recall_enabled: true
   answer_record_log_enabled: true
@@ -205,7 +212,8 @@ integrations:
     max_pages: 100
     max_articles: 0
   gemini_api_key: ""
-  gemini_requests_per_minute: 30
-  gemini_embedding_requests_per_minute: 20
+  gemini_requests_per_minute: 1000
+  gemini_embedding_requests_per_minute: 100
   gemini_summary_requests_per_minute: 2000
   gemini_ragas_requests_per_minute: 2000
+  gemini_ragas_embedding_requests_per_minute: 200

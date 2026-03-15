@@ -121,6 +121,62 @@ class RetrievalComponent:
             mmr_lambda=mmr_lambda,
         )
 
+    def rank_texts_by_dense(
+        self,
+        *,
+        query: str,
+        texts: Sequence[str],
+        top_k: int = 1,
+    ) -> list[tuple[int, float]]:
+        if not texts:
+            return []
+        limit = max(0, int(top_k))
+        if limit <= 0:
+            return []
+
+        values = [str(text or "").strip() for text in texts]
+        valid_indices = [idx for idx, text in enumerate(values) if text]
+        if not valid_indices:
+            return []
+        valid_texts = [values[idx] for idx in valid_indices]
+
+        try:
+            query_vector = np.asarray(self._embedder.embed_query(query), dtype=np.float32)
+            query_norm = _normalize_vector(query_vector.reshape(-1))
+            if query_norm is None:
+                return []
+
+            doc_vectors = np.asarray(
+                self._embedder.embed_documents(valid_texts),
+                dtype=np.float32,
+            )
+            if doc_vectors.ndim == 1:
+                doc_vectors = doc_vectors.reshape(1, -1)
+            if doc_vectors.ndim != 2 or doc_vectors.shape[0] != len(valid_texts):
+                return []
+            if doc_vectors.shape[1] != query_norm.shape[0]:
+                return []
+
+            doc_norm = _normalize_matrix(doc_vectors)
+            scores = doc_norm @ query_norm
+            if scores.ndim != 1:
+                return []
+
+            ranked = np.argsort(scores)[::-1]
+            results: list[tuple[int, float]] = []
+            for pos in ranked:
+                if len(results) >= limit:
+                    break
+                idx = valid_indices[int(pos)]
+                score = float(scores[int(pos)])
+                if not np.isfinite(score):
+                    continue
+                results.append((idx, score))
+            return results
+        except Exception:
+            logger.exception("Dense text ranking failed.")
+            return []
+
     def _search_sparse_mixed_sources(
         self,
         *,

@@ -7,7 +7,9 @@ from functools import lru_cache
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Sequence
+import unicodedata
 
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.chunk import Chunk
@@ -24,6 +26,13 @@ ChatHistoryEntry = tuple[str, str, Sequence[str]]
 _MATERIAL_SEARCH_EXCLUDED_SOURCE_TYPES = frozenset(
     {"messages", "discord_message", "x_posts"}
 )
+_MATERIAL_NAME_SEPARATORS_RE = re.compile(r"[\s/\\_.\-:：,，、]+")
+_MATERIAL_NAME_NOISE_RE = re.compile(r"[^0-9a-zぁ-んァ-ン一-龠々ー]+")
+_MATERIAL_DATE_RE = re.compile(
+    r"(?P<y>\d{4})\D{0,3}(?P<m>\d{1,2})\D{0,3}(?P<d>\d{1,2})"
+)
+_MATERIAL_VARIANT_FILLERS = ("例会", "定例会", "meeting", "mtg", "ミーティング")
+_MATERIAL_LABEL_PREFIXES = ("議事録",)
 
 
 @dataclass(frozen=True)
@@ -154,6 +163,7 @@ class RagService:
                 history_scope=history_scope,
             )
 
+        self._prepare_reranker_runtime(force_fast_mode=force_fast_mode)
         effective_recency_mode = self._resolve_recency_mode(decision.recency_mode)
         if decision.target_model == "material_search":
             chunks = self._retrieve_material_route_chunks(
@@ -320,6 +330,14 @@ class RagService:
             excluded_source_types=excluded_source_types,
         )
         if not matched_entries:
+            dense_name_contexts = self._material_name_dense_fallback_contexts(
+                material_names=decision.material_names,
+                query=query,
+                excluded_source_types=excluded_source_types,
+                force_fast_mode=force_fast_mode,
+            )
+            if dense_name_contexts:
+                return dense_name_contexts
             return self._retrieve_chunks(
                 query=query,
                 decision=replace(
@@ -344,6 +362,22 @@ class RagService:
             recency_mode=recency_mode,
         )
         if not searched:
+            direct_contexts = self._build_material_context_chunks(
+                query=query,
+                entries=matched_entries,
+                searched_chunks=[],
+                force_fast_mode=force_fast_mode,
+            )
+            if direct_contexts:
+                return direct_contexts
+            dense_name_contexts = self._material_name_dense_fallback_contexts(
+                material_names=decision.material_names,
+                query=query,
+                excluded_source_types=excluded_source_types,
+                force_fast_mode=force_fast_mode,
+            )
+            if dense_name_contexts:
+                return dense_name_contexts
             return self._retrieve_chunks(
                 query=query,
                 decision=replace(
@@ -365,6 +399,14 @@ class RagService:
         )
         if contexts:
             return contexts
+        dense_name_contexts = self._material_name_dense_fallback_contexts(
+            material_names=decision.material_names,
+            query=query,
+            excluded_source_types=excluded_source_types,
+            force_fast_mode=force_fast_mode,
+        )
+        if dense_name_contexts:
+            return dense_name_contexts
         return self._retrieve_chunks(
             query=query,
             decision=replace(
@@ -417,6 +459,17 @@ class RagService:
             selected = selected[: max(0, int(self._config.top_k))]
 
         return self._append_parent_chunks(selected)
+
+    def _prepare_reranker_runtime(self, *, force_fast_mode: bool) -> None:
+        if force_fast_mode or self._reranker is None:
+            return
+        prepare_runtime = getattr(self._reranker, "prepare_runtime", None)
+        if not callable(prepare_runtime):
+            return
+        try:
+            prepare_runtime()
+        except Exception:
+            logger.debug("Failed to preload reranker runtime.", exc_info=True)
 
     def _resolve_recency_mode(self, recency_mode: str) -> str:
         normalized = str(recency_mode or "").strip().lower()
@@ -769,8 +822,49 @@ class RagService:
         return filtered
 
     def _normalize_material_name(self, value: str) -> str:
-        normalized = str(value or "").replace("\\", "/").strip().casefold()
-        return " ".join(normalized.split())
+        variants = self._material_name_variants(value)
+        return variants[0] if variants else ""
+
+    def _material_name_variants(self, value: str) -> tuple[str, ...]:
+        base = self._material_name_base(value)
+        if not base:
+            return tuple()
+
+        candidates: list[str] = [base]
+        for filler in _MATERIAL_VARIANT_FILLERS:
+            if filler in base:
+                candidates.append(base.replace(filler, ""))
+        for label_prefix in _MATERIAL_LABEL_PREFIXES:
+            if base.startswith(label_prefix):
+                candidates.append(base[len(label_prefix) :])
+            if base.endswith(label_prefix):
+                candidates.append(base[: -len(label_prefix)])
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = self._material_name_base(candidate)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return tuple(deduped)
+
+    @staticmethod
+    def _material_name_base(value: str) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        text = text.replace("\\", "/")
+        text = _MATERIAL_DATE_RE.sub(
+            lambda match: (
+                f"{int(match.group('y')):04d}"
+                f"{int(match.group('m')):02d}"
+                f"{int(match.group('d')):02d}"
+            ),
+            text,
+        )
+        text = _MATERIAL_NAME_SEPARATORS_RE.sub(" ", text).strip()
+        text = _MATERIAL_NAME_NOISE_RE.sub("", text)
+        return text
 
     @staticmethod
     def _normalize_material_key(
@@ -862,14 +956,17 @@ class RagService:
     ) -> list[_MaterialCatalogEntry]:
         max_names = max(1, int(self._config.material_search_max_names))
         excluded = self._normalize_source_type_filters(excluded_source_types)
-        normalized_names: list[str] = []
+        normalized_names: list[tuple[str, ...]] = []
         seen_names: set[str] = set()
         for raw in material_names:
-            normalized = self._normalize_material_name(raw)
-            if not normalized or normalized in seen_names:
+            variants = self._material_name_variants(raw)
+            if not variants:
                 continue
-            seen_names.add(normalized)
-            normalized_names.append(normalized)
+            canonical = variants[0]
+            if canonical in seen_names:
+                continue
+            seen_names.add(canonical)
+            normalized_names.append(variants)
             if len(normalized_names) >= max_names:
                 break
         if not normalized_names:
@@ -883,31 +980,39 @@ class RagService:
         if not entries:
             return []
 
-        def aliases(entry: _MaterialCatalogEntry) -> list[str]:
+        def aliases(entry: _MaterialCatalogEntry) -> tuple[str, ...]:
             values = [entry.canonical_name, *entry.aliases]
             deduped: list[str] = []
             seen_aliases: set[str] = set()
             for value in values:
-                normalized = self._normalize_material_name(value)
-                if not normalized or normalized in seen_aliases:
-                    continue
-                seen_aliases.add(normalized)
-                deduped.append(normalized)
-            return deduped
+                for normalized in self._material_name_variants(value):
+                    if normalized in seen_aliases:
+                        continue
+                    seen_aliases.add(normalized)
+                    deduped.append(normalized)
+            return tuple(deduped)
+
+        aliases_by_entry = {entry.material_id: aliases(entry) for entry in entries}
 
         strict_matches: list[_MaterialCatalogEntry] = []
-        for name in normalized_names:
+        for name_variants in normalized_names:
+            name_set = set(name_variants)
             for entry in entries:
-                if name in aliases(entry):
+                alias_values = aliases_by_entry.get(entry.material_id, tuple())
+                if any(alias in name_set for alias in alias_values):
                     strict_matches.append(entry)
         if strict_matches:
             return self._dedupe_material_entries(strict_matches, limit=max_names)
 
         partial_matches: list[_MaterialCatalogEntry] = []
-        for name in normalized_names:
+        for name_variants in normalized_names:
             for entry in entries:
-                alias_values = aliases(entry)
-                if any((name in alias) or (alias in name) for alias in alias_values):
+                alias_values = aliases_by_entry.get(entry.material_id, tuple())
+                if any(
+                    (name in alias) or (alias in name)
+                    for name in name_variants
+                    for alias in alias_values
+                ):
                     partial_matches.append(entry)
         deduped_partial_matches = self._dedupe_material_entries(partial_matches, limit=None)
         if len(deduped_partial_matches) <= 1:
@@ -972,6 +1077,84 @@ class RagService:
             if entry_key == top_key:
                 return entry
         return None
+
+    def _material_name_dense_fallback_contexts(
+        self,
+        *,
+        material_names: Sequence[str],
+        query: str,
+        excluded_source_types: set[str],
+        force_fast_mode: bool,
+    ) -> list[Chunk]:
+        selected = self._select_material_entry_by_dense_name(
+            material_names=material_names,
+            excluded_source_types=excluded_source_types,
+        )
+        if selected is None:
+            return []
+        return self._build_material_context_chunks(
+            query=query,
+            entries=[selected],
+            searched_chunks=[],
+            force_fast_mode=force_fast_mode,
+        )
+
+    def _select_material_entry_by_dense_name(
+        self,
+        *,
+        material_names: Sequence[str],
+        excluded_source_types: set[str],
+    ) -> _MaterialCatalogEntry | None:
+        dense_ranker = getattr(self._retrieval, "rank_texts_by_dense", None)
+        if not callable(dense_ranker):
+            return None
+
+        excluded = self._normalize_source_type_filters(excluded_source_types)
+        entries = [
+            entry
+            for entry in self._material_catalog_entries()
+            if str(entry.source_type or "").strip().lower() not in excluded
+        ]
+        if not entries:
+            return None
+
+        dense_queries: list[str] = []
+        seen_queries: set[str] = set()
+        for value in material_names:
+            for candidate in self._material_name_variants(value):
+                if not candidate or candidate in seen_queries:
+                    continue
+                seen_queries.add(candidate)
+                dense_queries.append(candidate)
+        if not dense_queries:
+            return None
+
+        texts = [self._material_entry_dense_text(entry) for entry in entries]
+        best: tuple[float, _MaterialCatalogEntry] | None = None
+        for dense_query in dense_queries:
+            ranked = dense_ranker(query=dense_query, texts=texts, top_k=1)
+            if not ranked:
+                continue
+            index, score = ranked[0]
+            if index < 0 or index >= len(entries):
+                continue
+            candidate = entries[index]
+            if best is None or score > best[0]:
+                best = (score, candidate)
+        return best[1] if best is not None else None
+
+    @staticmethod
+    def _material_entry_dense_text(entry: _MaterialCatalogEntry) -> str:
+        parts = [entry.canonical_name, entry.source_key, *entry.aliases]
+        values: list[str] = []
+        seen: set[str] = set()
+        for value in parts:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            values.append(text)
+        return "\n".join(values)
 
     def _retrieve_material_limited_chunks(
         self,
@@ -1075,7 +1258,7 @@ class RagService:
             ordered_keys = list(entry_by_key.keys())
 
         contexts: list[Chunk] = []
-        char_limit = 3000
+        char_limit = max(1, int(self._config.material_full_text_char_limit))
         for key in ordered_keys:
             entry = entry_by_key.get(key)
             if entry is None:
@@ -1086,7 +1269,7 @@ class RagService:
                 entry=entry,
             )
             raw_text = self._read_material_raw_text(entry)
-            if raw_text and len(raw_text) <= char_limit:
+            if raw_text and len(raw_text) < char_limit:
                 contexts.append(
                     Chunk(
                         id=f"material:{entry.material_id}:raw",
@@ -1101,6 +1284,15 @@ class RagService:
             fallback = self._first_rec_chunks_for_material_key(key)
             if not fallback:
                 fallback = docs_by_key.get(key) or []
+            dense_contexts = self._select_dense_chunks_with_char_limit(
+                query=query,
+                chunks=fallback,
+                char_limit=char_limit,
+                fallback_metadata=representative_metadata,
+            )
+            if dense_contexts:
+                contexts.extend(dense_contexts)
+                continue
             if force_fast_mode or self._reranker is None or len(fallback) <= 1:
                 contexts.extend(list(fallback[:3]))
             else:
@@ -1112,6 +1304,74 @@ class RagService:
                 contexts.extend(reranked)
 
         return self._merge_unique_chunks(contexts)
+
+    def _select_dense_chunks_with_char_limit(
+        self,
+        *,
+        query: str,
+        chunks: Sequence[Chunk],
+        char_limit: int,
+        fallback_metadata: dict[str, object],
+    ) -> list[Chunk]:
+        limit = max(1, int(char_limit))
+        candidates = [chunk for chunk in chunks if (chunk.text or "").strip()]
+        if not candidates:
+            return []
+
+        ordered = list(candidates)
+        dense_ranker = getattr(self._retrieval, "rank_texts_by_dense", None)
+        if callable(dense_ranker):
+            texts = [chunk.text for chunk in candidates]
+            ranked = dense_ranker(query=query, texts=texts, top_k=len(texts))
+            ranked_chunks: list[Chunk] = []
+            seen_indices: set[int] = set()
+            for index, _score in ranked:
+                if index in seen_indices:
+                    continue
+                if index < 0 or index >= len(candidates):
+                    continue
+                seen_indices.add(index)
+                ranked_chunks.append(candidates[index])
+            if ranked_chunks:
+                ordered = ranked_chunks
+
+        selected: list[Chunk] = []
+        used_chars = 0
+        for chunk in ordered:
+            remaining = limit - used_chars
+            if remaining <= 0:
+                break
+            text = chunk.text or ""
+            if not text.strip():
+                continue
+            if len(text) <= remaining:
+                selected.append(self._with_fallback_metadata(chunk, fallback_metadata))
+                used_chars += len(text)
+                continue
+            truncated = text[:remaining].rstrip()
+            if not truncated:
+                break
+            selected.append(
+                self._with_fallback_metadata(
+                    replace(chunk, text=truncated),
+                    fallback_metadata,
+                )
+            )
+            used_chars += len(truncated)
+            break
+        return selected
+
+    @staticmethod
+    def _with_fallback_metadata(chunk: Chunk, fallback_metadata: dict[str, object]) -> Chunk:
+        if not fallback_metadata:
+            return chunk
+        metadata = dict(chunk.metadata or {})
+        if not metadata:
+            metadata = dict(fallback_metadata)
+        else:
+            for key, value in fallback_metadata.items():
+                metadata.setdefault(key, value)
+        return replace(chunk, metadata=metadata)
 
     def _first_rec_chunks_for_material_key(
         self,

@@ -25,6 +25,7 @@ features:
     recency_half_life_days: 30.0
     parent_doc_enabled: true
     parent_chunk_cap: 2
+    material_full_text_char_limit: 3000
     sudachi_mode: "B"
     sparse_bm25_k1: 1.5
     sparse_bm25_b: 0.75

@@ -8,6 +8,7 @@ import time
 _WINDOW_SECONDS = 60.0
 _DEFAULT_LIMITER_NAME = "default"
 _RAGAS_LIMITER_NAME = "ragas_eval"
+_RAGAS_EMBEDDING_LIMITER_NAME = "ragas_eval_embedding"
 _INDEX_SUMMARY_LIMITER_NAME = "index_summary"
 _EMBEDDING_LIMITER_NAME = "embedding"
 
@@ -68,6 +69,10 @@ def wait_for_gemini_rate_limit(
 
 def ragas_rate_limiter_name() -> str:
     return _RAGAS_LIMITER_NAME
+
+
+def ragas_embedding_rate_limiter_name() -> str:
+    return _RAGAS_EMBEDDING_LIMITER_NAME
 
 
 def index_summary_rate_limiter_name() -> str:

@@ -50,6 +50,7 @@ class GenerationComponentTests(unittest.TestCase):
         *,
         prompt_texts: RagPromptTextSettings | None = None,
         llm_response: str = '{"answer":"ok","sources":[]}',
+        source_max_count: int = 3,
     ) -> tuple[GenerationComponent, _RecordingLLM]:
         llm = _RecordingLLM(response_text=llm_response)
         component = GenerationComponent(
@@ -57,7 +58,7 @@ class GenerationComponentTests(unittest.TestCase):
             no_rag_llm=llm,
             refusal_llm=llm,
             prompts=_DictPromptRepo(prompt_payload),
-            source_max_count=3,
+            source_max_count=source_max_count,
             prompt_texts=prompt_texts,
         )
         return component, llm
@@ -70,7 +71,7 @@ class GenerationComponentTests(unittest.TestCase):
                 "circle_basic_info": "KUMCはMinecraftサークルです。",
             }
         )
-        component.generate_rag_answer(
+        answer = component.generate_rag_answer(
             query="活動内容を教えて",
             chunks=[
                 Chunk(
@@ -87,6 +88,11 @@ class GenerationComponentTests(unittest.TestCase):
             max_output_tokens=128,
         )
         self.assertIn("# サークルの基本情報\nKUMCはMinecraftサークルです。", llm.last_user_prompt)
+        prompt_payload = answer.metadata.get("llm_prompt")
+        self.assertIsInstance(prompt_payload, dict)
+        assert isinstance(prompt_payload, dict)
+        self.assertEqual(prompt_payload.get("system_prompt"), llm.last_system_prompt)
+        self.assertEqual(prompt_payload.get("user_prompt"), llm.last_user_prompt)
 
     def test_no_rag_prompt_does_not_include_circle_basic_info(self) -> None:
         component, llm = self._component(
@@ -186,7 +192,7 @@ class GenerationComponentTests(unittest.TestCase):
         )
         self.assertEqual(answer.text, "埋め込み回答")
 
-    def test_no_rag_returns_raw_text_when_json_is_invalid(self) -> None:
+    def test_no_rag_recovers_answer_from_invalid_json(self) -> None:
         component, _ = self._component(
             {
                 "answer_no_rag": '{"answer":"...", "sources":[1]}',
@@ -201,7 +207,29 @@ class GenerationComponentTests(unittest.TestCase):
             temperature=0.0,
             max_output_tokens=128,
         )
-        self.assertEqual(answer.text, '{"answer":"壊れたJSON",}')
+        self.assertEqual(answer.text, "壊れたJSON")
+        self.assertFalse(bool(answer.metadata.get("answer_payload_is_json")))
+
+    def test_no_rag_recovers_answer_from_truncated_json(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_no_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='{"answer":"次回の例会（2026年3月21日想定）で話し合うべき主な事項をまとめました。\\n\\n1. 新',
+        )
+        answer = component.generate_no_rag(
+            query="質問",
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+        )
+        self.assertEqual(
+            answer.text,
+            "次回の例会（2026年3月21日想定）で話し合うべき主な事項をまとめました。\n\n1. 新",
+        )
+        self.assertFalse(bool(answer.metadata.get("answer_payload_is_json")))
 
     def test_rag_parses_hyphenated_source_selection(self) -> None:
         component, _ = self._component(
@@ -268,6 +296,88 @@ class GenerationComponentTests(unittest.TestCase):
         )
         self.assertIn("2025/01/01\n[1-1] alice: hello", llm.last_user_prompt)
         self.assertNotIn("[1-1] 2025/01/01", llm.last_user_prompt)
+
+    def test_rag_source_disclaimer_is_not_duplicated_when_answer_already_has_it(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response=(
+                '{"answer":"結論です。\\n\\n'
+                '※回答は必ずしも正しいとは限りません。'
+                '重要な情報は確認するようにしてください。",'
+                '"sources":[1]}'
+            ),
+        )
+        answer = component.generate_rag_answer(
+            query="質問",
+            chunks=[
+                Chunk(
+                    id="1",
+                    document_id="doc-1",
+                    text="本文",
+                    index=0,
+                    metadata={"source_type": "docs", "drive_file_id": "file-123"},
+                )
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+        )
+        phrase = "※回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。"
+        self.assertEqual(answer.text.count(phrase), 1)
+        self.assertIn("主な情報源:", answer.text)
+
+    def test_force_all_sources_still_respects_source_max_count(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='{"answer":"参照あり","sources":[]}',
+            source_max_count=2,
+        )
+        answer = component.generate_rag_answer(
+            query="質問",
+            chunks=[
+                Chunk(
+                    id="1",
+                    document_id="doc-1",
+                    text="本文1",
+                    index=0,
+                    metadata={"source_type": "docs", "drive_file_id": "file-1"},
+                ),
+                Chunk(
+                    id="2",
+                    document_id="doc-2",
+                    text="本文2",
+                    index=1,
+                    metadata={"source_type": "docs", "drive_file_id": "file-2"},
+                ),
+                Chunk(
+                    id="3",
+                    document_id="doc-3",
+                    text="本文3",
+                    index=2,
+                    metadata={"source_type": "docs", "drive_file_id": "file-3"},
+                ),
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            force_all_sources=True,
+        )
+        self.assertEqual(len(answer.sources), 2)
+        self.assertEqual(
+            [source.label for source in answer.sources],
+            [
+                "https://docs.google.com/document/d/file-1/",
+                "https://docs.google.com/document/d/file-2/",
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,10 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.source import Source
 from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.domain.ports.prompts import PromptRepositoryPort
-from kumc_agent.domain.policies.source_format import format_sources
+from kumc_agent.domain.policies.source_format import (
+    SOURCE_DISCLAIMER_TEXT,
+    format_sources,
+)
 from kumc_agent.features.rag.config import RagPromptTextSettings
 
 _MASKED_MENTION = "（メンション非表示）"
@@ -21,6 +24,7 @@ _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 _DISCORD_DATE_LINE_RE = re.compile(r"^\d{4}/\d{2}/\d{2}$")
 _DISCORD_SOURCE_SELECTION_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
+_ANSWER_FIELD_START_RE = re.compile(r'"answer"\s*:\s*"')
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,7 @@ class GenerationComponent:
             )
         )
         user_prompt = "\n\n".join(sections)
+        system_prompt = self._system_prompt()
 
         retries = max(0, int(json_max_retries))
         last_raw = ""
@@ -138,9 +143,10 @@ class GenerationComponent:
         source_selections: list[_SourceSelection] = []
         is_json = False
         has_answer = False
+        best_effort_answer = ""
         for attempt in range(retries + 1):
             raw = self._rag_llm.generate(
-                system_prompt=self._system_prompt(),
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -152,9 +158,11 @@ class GenerationComponent:
             )
             if is_json and has_answer:
                 break
+            if has_answer:
+                best_effort_answer = answer_text
             if attempt < retries:
                 continue
-            answer_text = (last_raw or "").strip()
+            answer_text = best_effort_answer or (last_raw or "").strip()
             source_selections = []
 
         answer_text = _mask_discord_mentions(answer_text)
@@ -166,8 +174,13 @@ class GenerationComponent:
             selections=source_selections,
             force_all_sources=force_all_sources,
         )
+        include_disclaimer = SOURCE_DISCLAIMER_TEXT not in answer_text
         final_text = (
-            answer_text + format_sources(selected_sources)
+            answer_text
+            + format_sources(
+                selected_sources,
+                include_disclaimer=include_disclaimer,
+            )
             if append_sources_to_response
             else answer_text
         )
@@ -187,6 +200,10 @@ class GenerationComponent:
                 ],
                 "contexts": [chunk.text for chunk in chunks],
                 "answer_payload_is_json": is_json,
+                "llm_prompt": {
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                },
             },
         )
 
@@ -245,15 +262,17 @@ class GenerationComponent:
             )
         )
         user_prompt = "\n\n".join(sections)
+        system_prompt = self._system_prompt()
 
         retries = max(0, int(json_max_retries))
         last_raw = ""
         answer_text = ""
         is_json = False
         has_answer = False
+        best_effort_answer = ""
         for attempt in range(retries + 1):
             raw = self._no_rag_llm.generate(
-                system_prompt=self._system_prompt(),
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
@@ -265,9 +284,11 @@ class GenerationComponent:
             )
             if is_json and has_answer:
                 break
+            if has_answer:
+                best_effort_answer = answer_text
             if attempt < retries:
                 continue
-            answer_text = (last_raw or "").strip()
+            answer_text = best_effort_answer or (last_raw or "").strip()
 
         answer_text = _mask_discord_mentions(answer_text)
         if not answer_text:
@@ -279,6 +300,10 @@ class GenerationComponent:
             metadata={
                 "raw": last_raw,
                 "answer_payload_is_json": is_json,
+                "llm_prompt": {
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                },
             },
         )
 
@@ -334,8 +359,9 @@ class GenerationComponent:
             )
         )
         user_prompt = "\n\n".join(sections)
+        system_prompt = self._system_prompt()
         raw = self._refusal_llm.generate(
-            system_prompt=self._system_prompt(),
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
@@ -344,7 +370,7 @@ class GenerationComponent:
             raw,
             max_source_index=0,
         )
-        supplemental = parsed_answer if is_json and has_answer else (raw or "").strip()
+        supplemental = parsed_answer if has_answer else (raw or "").strip()
         supplemental = _mask_discord_mentions(supplemental)
         text = fixed_prefix if not supplemental else f"{fixed_prefix}\n\n{supplemental}"
         return Answer(
@@ -355,6 +381,10 @@ class GenerationComponent:
                 "query": query,
                 "raw": raw,
                 "answer_payload_is_json": is_json,
+                "llm_prompt": {
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                },
             },
         )
 
@@ -487,6 +517,11 @@ class GenerationComponent:
 
         payload = GenerationComponent._load_json_payload(raw)
         if payload is None:
+            recovered_answer = GenerationComponent._extract_answer_from_malformed_payload(
+                raw
+            )
+            if recovered_answer is not None:
+                return recovered_answer, [], False, bool(recovered_answer)
             return raw, [], False, False
 
         answer = str(payload.get("answer") or "").strip()
@@ -509,6 +544,60 @@ class GenerationComponent:
 
         has_answer = bool(answer)
         return answer, source_selections, True, has_answer
+
+    @staticmethod
+    def _extract_answer_from_malformed_payload(text: str) -> str | None:
+        cleaned = GenerationComponent._strip_code_fence(text).strip()
+        if not cleaned:
+            return None
+        key_match = _ANSWER_FIELD_START_RE.search(cleaned)
+        if key_match is None:
+            return None
+        value_start = key_match.end()
+        escaped = False
+        chars: list[str] = []
+        closed = False
+        for ch in cleaned[value_start:]:
+            if escaped:
+                chars.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                chars.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                closed = True
+                break
+            chars.append(ch)
+
+        if not chars and not closed:
+            return None
+        decoded = GenerationComponent._decode_json_string_fragment(
+            value="".join(chars),
+            closed=closed,
+        )
+        if decoded is None:
+            return None
+        result = decoded.strip()
+        return result or None
+
+    @staticmethod
+    def _decode_json_string_fragment(*, value: str, closed: bool) -> str | None:
+        candidate = value
+        if not closed and candidate:
+            while candidate.endswith("\\"):
+                candidate = candidate[:-1]
+        try:
+            return str(json.loads(f'"{candidate}"'))
+        except json.JSONDecodeError:
+            normalized = candidate
+            normalized = normalized.replace("\\\\", "\\")
+            normalized = normalized.replace('\\"', '"')
+            normalized = normalized.replace("\\n", "\n")
+            normalized = normalized.replace("\\r", "\r")
+            normalized = normalized.replace("\\t", "\t")
+            return normalized
 
     @staticmethod
     def _parse_source_selection_item(
@@ -606,7 +695,7 @@ class GenerationComponent:
         if not effective_selections:
             return []
 
-        limit = None if force_all_sources else self._source_max_count
+        limit = self._source_max_count
         selected: list[Source] = []
         seen: set[str] = set()
         for selection in effective_selections:

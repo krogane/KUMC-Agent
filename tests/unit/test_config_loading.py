@@ -100,7 +100,14 @@ class ConfigLoadingTests(unittest.TestCase):
                   warmup_interval_minutes: 60
                   index_update_estimate_min_minutes: 30
                   index_update_estimate_max_minutes: 60
+                  ragas_answer_generation_batch_size: 10
                   ragas_batch_size: 10
+                  ragas_max_workers: 4
+                  ragas_timeout_seconds: 180.0
+                  ragas_max_retries: 2
+                  ragas_answer_cache_enabled: true
+                  ragas_answer_cache_path: "data/eval/cache/ragas_answers.jsonl"
+                  ragas_disable_history_for_eval: true
                   ragas_metrics:
                     answer_relevancy_enabled: true
                     faithfulness_enabled: true
@@ -129,6 +136,7 @@ class ConfigLoadingTests(unittest.TestCase):
                   gemini_embedding_requests_per_minute: 9
                   gemini_summary_requests_per_minute: 8
                   gemini_ragas_requests_per_minute: 10
+                  gemini_ragas_embedding_requests_per_minute: 11
                 """
             ).strip()
             + "\n",
@@ -295,6 +303,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GEMINI_EMBEDDING_REQUESTS_PER_MINUTE": "6",
                     "KUMC_GEMINI_SUMMARY_REQUESTS_PER_MINUTE": "7",
                     "KUMC_GEMINI_RAGAS_REQUESTS_PER_MINUTE": "5",
+                    "KUMC_GEMINI_RAGAS_EMBEDDING_REQUESTS_PER_MINUTE": "4",
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
@@ -302,7 +311,14 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_MAX_DELAY_SECONDS": "5",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "1.5",
+                    "KUMC_RAGAS_ANSWER_GENERATION_BATCH_SIZE": "8",
                     "KUMC_RAGAS_BATCH_SIZE": "4",
+                    "KUMC_RAGAS_MAX_WORKERS": "6",
+                    "KUMC_RAGAS_TIMEOUT_SECONDS": "90",
+                    "KUMC_RAGAS_MAX_RETRIES": "1",
+                    "KUMC_RAGAS_ANSWER_CACHE_ENABLED": "0",
+                    "KUMC_RAGAS_ANSWER_CACHE_PATH": "data/eval/cache/custom_ragas_answers.jsonl",
+                    "KUMC_RAGAS_DISABLE_HISTORY_FOR_EVAL": "0",
                     "KUMC_RAGAS_METRIC_ANSWER_RELEVANCY_ENABLED": "0",
                     "KUMC_RAGAS_METRIC_FAITHFULNESS_ENABLED": "1",
                     "KUMC_RAGAS_METRIC_CONTEXT_PRECISION_ENABLED": "0",
@@ -336,6 +352,10 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.integrations.gemini_embedding_requests_per_minute, 6)
             self.assertEqual(config.integrations.gemini_summary_requests_per_minute, 7)
             self.assertEqual(config.integrations.gemini_ragas_requests_per_minute, 5)
+            self.assertEqual(
+                config.integrations.gemini_ragas_embedding_requests_per_minute,
+                4,
+            )
             self.assertEqual(config.integrations.drive.batch_size, 11)
             self.assertEqual(config.integrations.drive.download_max_retries, 4)
             self.assertEqual(
@@ -357,7 +377,17 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.indexing.chunking.summary_temperature, 0.1)
             self.assertEqual(config.indexing.chunking.summary_max_output_tokens, 96)
             self.assertEqual(config.indexing.chunking.summary_thinking_level, "minimal")
+            self.assertEqual(config.ops.ragas_answer_generation_batch_size, 8)
             self.assertEqual(config.ops.ragas_batch_size, 4)
+            self.assertEqual(config.ops.ragas_max_workers, 6)
+            self.assertEqual(config.ops.ragas_timeout_seconds, 90.0)
+            self.assertEqual(config.ops.ragas_max_retries, 1)
+            self.assertFalse(config.ops.ragas_answer_cache_enabled)
+            self.assertEqual(
+                config.ops.ragas_answer_cache_path,
+                base / "data" / "eval" / "cache" / "custom_ragas_answers.jsonl",
+            )
+            self.assertFalse(config.ops.ragas_disable_history_for_eval)
             self.assertFalse(config.ops.ragas_metrics.answer_relevancy_enabled)
             self.assertTrue(config.ops.ragas_metrics.faithfulness_enabled)
             self.assertFalse(config.ops.ragas_metrics.context_precision_enabled)
