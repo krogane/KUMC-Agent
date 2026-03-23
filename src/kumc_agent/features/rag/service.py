@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -275,6 +276,64 @@ class RagService:
         recency_mode: str,
         excluded_source_types: set[str] | None,
     ) -> list[Chunk]:
+        if force_fast_mode or not (
+            decision.needs_additional_query and decision.additional_queries
+        ):
+            return self._retrieve_single_query_chunks(
+                query=query,
+                recency_mode=recency_mode,
+                excluded_source_types=excluded_source_types,
+            )
+
+        query_candidates = [query, *decision.additional_queries]
+        normalized_queries = [str(value or "").strip() for value in query_candidates]
+        normalized_queries = [value for value in normalized_queries if value]
+        if not normalized_queries:
+            return []
+        if len(normalized_queries) == 1:
+            return self._retrieve_single_query_chunks(
+                query=normalized_queries[0],
+                recency_mode=recency_mode,
+                excluded_source_types=excluded_source_types,
+            )
+
+        max_workers = max(1, min(len(normalized_queries), 4))
+        results_by_index: dict[int, list[Chunk]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._retrieve_single_query_chunks,
+                    query=retrieval_query,
+                    recency_mode=recency_mode,
+                    excluded_source_types=excluded_source_types,
+                ): index
+                for index, retrieval_query in enumerate(normalized_queries)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                retrieval_query = normalized_queries[index]
+                try:
+                    results_by_index[index] = future.result()
+                except Exception:
+                    logger.exception(
+                        "Query retrieval failed for transformed query: %s",
+                        retrieval_query,
+                    )
+                    results_by_index[index] = []
+
+        merged: dict[str, Chunk] = {}
+        for index in range(len(normalized_queries)):
+            for chunk in results_by_index.get(index, []):
+                merged[chunk.id] = chunk
+        return list(merged.values())
+
+    def _retrieve_single_query_chunks(
+        self,
+        *,
+        query: str,
+        recency_mode: str,
+        excluded_source_types: set[str] | None,
+    ) -> list[Chunk]:
         chunks = self._retrieval.retrieve(
             query,
             dense_top_k=self._config.dense_top_k,
@@ -286,34 +345,10 @@ class RagService:
             recency_half_life_days=self._config.recency_half_life_days,
             mmr_lambda=self._config.mmr_lambda,
         )
-        chunks = self._filter_chunks_by_source_type(
+        return self._filter_chunks_by_source_type(
             chunks,
             excluded_source_types=excluded_source_types,
         )
-        if force_fast_mode:
-            return chunks
-        if decision.needs_additional_query and decision.additional_queries:
-            merged = {chunk.id: chunk for chunk in chunks}
-            for transformed_query in decision.additional_queries:
-                extra = self._retrieval.retrieve(
-                    transformed_query,
-                    dense_top_k=self._config.dense_top_k,
-                    sparse_top_k=self._config.sparse_top_k,
-                    sparse_initial_sparse_top_k=self._config.sparse_initial_sparse_top_k,
-                    recency_mode=recency_mode,
-                    recency_weight_soft=self._config.recency_weight_soft,
-                    recency_weight_hard=self._config.recency_weight_hard,
-                    recency_half_life_days=self._config.recency_half_life_days,
-                    mmr_lambda=self._config.mmr_lambda,
-                )
-                extra = self._filter_chunks_by_source_type(
-                    extra,
-                    excluded_source_types=excluded_source_types,
-                )
-                for chunk in extra:
-                    merged[chunk.id] = chunk
-            return list(merged.values())
-        return chunks
 
     def _retrieve_material_route_chunks(
         self,

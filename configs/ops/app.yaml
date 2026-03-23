@@ -188,9 +188,9 @@ ops:
   ragas_answer_cache_path: "data/eval/cache/ragas_answers.jsonl"
   ragas_disable_history_for_eval: true
   ragas_metrics:
-    answer_relevancy_enabled: false
-    faithfulness_enabled: false
-    context_precision_enabled: false
+    answer_relevancy_enabled: true
+    faithfulness_enabled: true
+    context_precision_enabled: true
     context_recall_enabled: true
   answer_record_log_enabled: true
   answer_record_log_path: "logs/answer_records.jsonl"

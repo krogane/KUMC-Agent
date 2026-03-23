@@ -155,7 +155,7 @@ class RagPipeline:
         if not query:
             return []
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             dense_future = executor.submit(
                 self._dense_search, query, cancel_event=cancel_event
             )
@@ -1799,7 +1799,7 @@ class RagPipeline:
         if not tokens:
             return []
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             sparse_future = executor.submit(
                 self._sparse_search_tokens_once_with_index,
                 tokens,

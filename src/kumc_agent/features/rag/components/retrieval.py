@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -76,26 +77,49 @@ class RetrievalComponent:
         recency_half_life_days: float = 45.0,
         mmr_lambda: float = 0.75,
     ) -> list[Chunk]:
-        query_vector = np.asarray(self._embedder.embed_query(query), dtype=np.float32)
-        dense_hits = self._dense_index.search(
-            query_vector=query_vector,
-            top_k=max(0, dense_top_k),
+        dense_limit = max(0, int(dense_top_k))
+        sparse_limit = max(0, int(sparse_top_k))
+        sparse_initial_limit = max(
+            0,
+            sparse_limit
+            if sparse_initial_sparse_top_k is None
+            else int(sparse_initial_sparse_top_k),
         )
-        sparse_hits = self._search_sparse_mixed_sources(
-            query=query,
-            top_k=max(0, sparse_top_k),
-            sparse_top_k=max(
-                0,
-                sparse_top_k
-                if sparse_initial_sparse_top_k is None
-                else sparse_initial_sparse_top_k,
-            ),
-        )
-        if not sparse_hits:
-            sparse_hits = self._sparse_index.search_with_scores(
-                query,
-                top_k=max(0, sparse_top_k),
+
+        dense_hits = []
+        sparse_hits = []
+        if dense_limit > 0 and sparse_limit > 0:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                dense_future = executor.submit(
+                    self._retrieve_dense_hits,
+                    query=query,
+                    top_k=dense_limit,
+                )
+                sparse_future = executor.submit(
+                    self._retrieve_sparse_hits,
+                    query=query,
+                    top_k=sparse_limit,
+                    sparse_top_k=sparse_initial_limit,
+                )
+                try:
+                    dense_hits = dense_future.result()
+                except Exception:
+                    logger.exception("Dense retrieval failed.")
+                    dense_hits = []
+                try:
+                    sparse_hits = sparse_future.result()
+                except Exception:
+                    logger.exception("Sparse retrieval failed.")
+                    sparse_hits = []
+        elif dense_limit > 0:
+            dense_hits = self._retrieve_dense_hits(query=query, top_k=dense_limit)
+        elif sparse_limit > 0:
+            sparse_hits = self._retrieve_sparse_hits(
+                query=query,
+                top_k=sparse_limit,
+                sparse_top_k=sparse_initial_limit,
             )
+
         scored = self._merge_scores(dense_hits=dense_hits, sparse_hits=sparse_hits)
         _ = (
             recency_mode,
@@ -106,6 +130,36 @@ class RetrievalComponent:
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         _ = mmr_lambda  # Applied explicitly in RagService after rerank stage.
         return [item.chunk for item in ranked]
+
+    def _retrieve_dense_hits(self, *, query: str, top_k: int):
+        if top_k <= 0:
+            return []
+        query_vector = np.asarray(self._embedder.embed_query(query), dtype=np.float32)
+        return self._dense_index.search(
+            query_vector=query_vector,
+            top_k=max(0, top_k),
+        )
+
+    def _retrieve_sparse_hits(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        sparse_top_k: int,
+    ) -> list[tuple[Chunk, float]]:
+        if top_k <= 0:
+            return []
+        sparse_hits = self._search_sparse_mixed_sources(
+            query=query,
+            top_k=max(0, top_k),
+            sparse_top_k=max(0, sparse_top_k),
+        )
+        if sparse_hits:
+            return sparse_hits
+        return self._sparse_index.search_with_scores(
+            query,
+            top_k=max(0, top_k),
+        )
 
     def reorder_with_mmr(
         self,
