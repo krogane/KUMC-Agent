@@ -309,6 +309,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GEMINI_RAGAS_EMBEDDING_REQUESTS_PER_MINUTE": "4",
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_GOOGLE_APPLICATION_CREDENTIALS": ".secrets/google-sa.json",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
                     "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
@@ -370,6 +371,10 @@ class ConfigLoadingTests(unittest.TestCase):
                 4,
             )
             self.assertEqual(config.integrations.drive.batch_size, 11)
+            self.assertEqual(
+                config.integrations.drive.google_application_credentials,
+                str(base / ".secrets" / "google-sa.json"),
+            )
             self.assertEqual(config.integrations.drive.download_max_retries, 4)
             self.assertEqual(
                 config.integrations.drive.download_retry_initial_delay_seconds,

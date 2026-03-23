@@ -13,15 +13,13 @@ def format_sources(sources: list[Source], *, include_disclaimer: bool = True) ->
     refs: list[str] = []
     seen: set[str] = set()
     for source in sources:
-        label = str(source.label or "").strip()
         uri = str(source.uri or "").strip()
-        ref = label or uri
-        if not ref:
+        if not uri:
             continue
-        if ref in seen:
+        if uri in seen:
             continue
-        seen.add(ref)
-        refs.append(ref)
+        seen.add(uri)
+        refs.append(uri)
     if not refs:
         return ""
     sources_text = "\n".join(f"- {ref}" for ref in refs)

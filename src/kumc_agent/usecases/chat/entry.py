@@ -5,6 +5,7 @@ import logging
 from typing import Sequence
 
 from kumc_agent.domain.models.answer import Answer
+from kumc_agent.domain.policies.source_format import format_sources
 from kumc_agent.domain.models.source import Source
 from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase, ChatHistoryEntry, ChatRequest
@@ -57,6 +58,7 @@ class ChatEntryUsecase:
                     response.result.text,
                     payload=response.result.payload,
                     session_id=session_id,
+                    append_sources_to_response=request.append_sources_to_response,
                 )
             if response.failure is not None:
                 stderr_preview = " ".join((response.failure.stderr or "").strip().splitlines()[:2]).strip()
@@ -92,12 +94,18 @@ class ChatEntryUsecase:
         *,
         payload: dict[str, object],
         session_id: str,
+        append_sources_to_response: bool,
     ) -> Answer:
         route = "openclaw"
         metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
         metadata.pop("routing_decision", None)
-        if "fast_mode" in payload and "fast_mode" not in metadata:
-            metadata["fast_mode"] = payload.get("fast_mode")
+        if "fast_mode" not in metadata and "fastmode" in metadata:
+            metadata["fast_mode"] = metadata.get("fastmode")
+        fast_mode_value = payload.get("fast_mode")
+        if fast_mode_value is None:
+            fast_mode_value = payload.get("fastmode")
+        if fast_mode_value is not None and "fast_mode" not in metadata:
+            metadata["fast_mode"] = fast_mode_value
         if "rag_query" in payload and "rag_query" not in metadata:
             metadata["rag_query"] = payload.get("rag_query")
         if "rag_iterations" in payload and "rag_iterations" not in metadata:
@@ -127,8 +135,12 @@ class ChatEntryUsecase:
                     )
                 )
 
+        final_text = text
+        if append_sources_to_response and "主な情報源:" not in final_text:
+            final_text = final_text + format_sources(parsed_sources)
+
         return Answer(
-            text=text,
+            text=final_text,
             route=route,
             sources=parsed_sources,
             metadata=metadata,

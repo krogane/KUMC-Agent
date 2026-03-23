@@ -84,7 +84,6 @@ class QueryRouterTests(unittest.TestCase):
         values = {
             "target_model": "material_search",
             "use_additional_memory": True,
-            "include_capabilities_info": True,
             "idea_generation": True,
             "needs_additional_query": True,
             "material_names": ["運営資料", "議事録"],
@@ -101,7 +100,7 @@ class QueryRouterTests(unittest.TestCase):
         self.assertEqual(decision.target_model, "material_search")
         self.assertEqual(decision.recency_mode, "hard")
         self.assertEqual(decision.material_names, ["運営資料", "議事録"])
-        self.assertTrue(decision.include_capabilities_info)
+        self.assertFalse(decision.include_capabilities_info)
         self.assertTrue(decision.use_additional_memory)
         self.assertFalse(decision.idea_generation)
         self.assertFalse(decision.needs_additional_query)
@@ -119,7 +118,6 @@ class QueryRouterTests(unittest.TestCase):
         values = {
             "target_model": "rag",
             "use_additional_memory": False,
-            "include_capabilities_info": False,
             "idea_generation": True,
             "needs_additional_query": True,
             "recency_mode": "soft",
@@ -145,28 +143,35 @@ class QueryRouterTests(unittest.TestCase):
         self.assertIn("additional_queries", called_tasks)
         self.assertNotIn("material_names", called_tasks)
 
-    def test_refusal_short_circuits_followup_tasks(self) -> None:
+    def test_deprecated_target_model_falls_back_to_rag(self) -> None:
         router = _build_router()
         values = {
-            "target_model": "refusal",
+            "target_model": "no_rag",
             "use_additional_memory": True,
+            "idea_generation": False,
+            "needs_additional_query": False,
+            "recency_mode": "soft",
         }
 
         with patch.object(router, "_run_task_with_retries") as mocked:
             mocked.side_effect = (
                 lambda *, task_name, **_: values.get(task_name, router._default_task_value(task_name))
             )
-            decision = router.route("契約の内容を教えて")
+            decision = router.route("一般知識だけで答えられる質問")
 
-        self.assertEqual(decision.target_model, "refusal")
-        self.assertEqual(decision.recency_mode, "off")
+        self.assertEqual(decision.target_model, "rag")
+        self.assertEqual(decision.recency_mode, "soft")
         self.assertTrue(decision.use_additional_memory)
         self.assertFalse(decision.include_capabilities_info)
 
         called_tasks = [
             call.kwargs["task_name"] for call in mocked.call_args_list if "task_name" in call.kwargs
         ]
-        self.assertEqual(sorted(set(called_tasks)), ["target_model", "use_additional_memory"])
+        self.assertIn("target_model", called_tasks)
+        self.assertIn("use_additional_memory", called_tasks)
+        self.assertIn("idea_generation", called_tasks)
+        self.assertIn("needs_additional_query", called_tasks)
+        self.assertIn("recency_mode", called_tasks)
 
     def test_routing_disabled_returns_safe_default(self) -> None:
         router = _build_router()

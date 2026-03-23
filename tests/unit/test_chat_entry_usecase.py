@@ -71,6 +71,44 @@ class _OpenClawDisabledClient:
         raise AssertionError("run_turn should not be called when disabled")
 
 
+class _OpenClawFastmodeAliasClient:
+    enabled = True
+
+    def run_turn(self, *, query: str, session_id: str, user_context):  # noqa: ANN001
+        _ = query
+        _ = session_id
+        _ = user_context
+        return OpenClawResponse(
+            ok=True,
+            result=OpenClawTurnResult(
+                text="openclaw answer",
+                payload={
+                    "sources": [{"id": "s1", "label": "source-1", "uri": "file://x"}],
+                    "fastmode": False,
+                    "metadata": {},
+                },
+            ),
+        )
+
+
+class _OpenClawWithEmbeddedSourcesClient:
+    enabled = True
+
+    def run_turn(self, *, query: str, session_id: str, user_context):  # noqa: ANN001
+        _ = query
+        _ = session_id
+        _ = user_context
+        return OpenClawResponse(
+            ok=True,
+            result=OpenClawTurnResult(
+                text="openclaw answer\n\n主な情報源:\n- source-1",
+                payload={
+                    "sources": [{"id": "s1", "label": "source-1", "uri": "file://x"}],
+                },
+            ),
+        )
+
+
 class ChatEntryUsecaseTests(unittest.TestCase):
     def test_openclaw_success_is_returned_without_local_fallback(self) -> None:
         fake_chat = _FakeChatUsecase()
@@ -83,7 +121,9 @@ class ChatEntryUsecaseTests(unittest.TestCase):
             ChatEntryRequest(query="質問", history_scope="guild:1", question_author="alice")
         )
 
-        self.assertEqual(answer.text, "openclaw answer")
+        self.assertIn("openclaw answer", answer.text)
+        self.assertIn("主な情報源:", answer.text)
+        self.assertIn("- file://x", answer.text)
         self.assertEqual(answer.route, "openclaw")
         self.assertEqual(len(answer.sources), 1)
         self.assertEqual(answer.sources[0], Source(id="s1", label="source-1", uri="file://x"))
@@ -136,6 +176,43 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         self.assertEqual(len(fake_chat.requests), 1)
         request = fake_chat.requests[0]
         self.assertFalse(request.disable_history)
+
+    def test_openclaw_fastmode_alias_is_normalized_to_fast_mode_metadata(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawFastmodeAliasClient(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="質問"))
+
+        self.assertIn("openclaw answer", answer.text)
+        self.assertIn("主な情報源:", answer.text)
+        self.assertEqual(answer.metadata.get("fast_mode"), False)
+        self.assertEqual(len(answer.sources), 1)
+
+    def test_openclaw_does_not_append_sources_when_disabled(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawSuccessClient(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="質問", append_sources_to_response=False))
+
+        self.assertEqual(answer.text, "openclaw answer")
+        self.assertEqual(len(answer.sources), 1)
+
+    def test_openclaw_does_not_duplicate_embedded_sources_section(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawWithEmbeddedSourcesClient(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="質問"))
+
+        self.assertEqual(answer.text.count("主な情報源:"), 1)
 
 
 if __name__ == "__main__":

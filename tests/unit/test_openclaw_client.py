@@ -270,6 +270,30 @@ class OpenClawClientTests(unittest.TestCase):
         self.assertEqual(response.result.payload.get("fast_mode"), True)
         self.assertEqual(response.result.payload.get("metadata"), embedded["metadata"])
 
+    def test_run_turn_recovers_embedded_json_payload_with_trailing_noise(self) -> None:
+        client = OpenClawClient(enabled=True, agent="ops")
+        embedded = {
+            "text": "hello from noisy embedded json",
+            "sources": [{"id": "s1", "label": "source", "uri": "https://example.com"}],
+            "fastmode": False,
+            "metadata": {"rag_query": "次の例会 議題"},
+        }
+        embedded_text = f"{json.dumps(embedded, ensure_ascii=False)}_"
+        completed = subprocess.CompletedProcess(
+            args=["openclaw"],
+            returncode=0,
+            stdout=json.dumps({"payloads": [{"text": embedded_text}]}, ensure_ascii=False) + "\n",
+            stderr="",
+        )
+        with patch("kumc_agent.infra.openclaw.client.subprocess.run", return_value=completed):
+            response = client.run_turn(query="status", session_id="guild:1")
+        self.assertTrue(response.ok)
+        assert response.result is not None
+        self.assertEqual(response.result.text, "hello from noisy embedded json")
+        self.assertEqual(response.result.payload.get("sources"), embedded["sources"])
+        self.assertEqual(response.result.payload.get("fast_mode"), False)
+        self.assertEqual(response.result.payload.get("metadata"), embedded["metadata"])
+
     def test_run_turn_writes_trace_log_and_masks_sensitive_values_when_debug_enabled(self) -> None:
         payload = {
             "text": "hello",

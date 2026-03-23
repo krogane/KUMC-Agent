@@ -259,10 +259,18 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_path(base_dir: Path, value: str) -> Path:
-    path = Path(value)
+    expanded = os.path.expandvars(value)
+    path = Path(expanded).expanduser()
     if path.is_absolute():
         return path
     return base_dir / path
+
+
+def _resolve_optional_path_str(base_dir: Path, value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    return str(_resolve_path(base_dir, raw))
 
 
 def _resolve_experiment_path(base_dir: Path, profile: str) -> Path:
@@ -1078,11 +1086,14 @@ def _to_runtime_config(
             ),
             drive=IntegrationDriveSection(
                 folder_id=str(integrations.get("drive", {}).get("folder_id", "")),
-                google_application_credentials=str(
-                    integrations.get("drive", {}).get(
-                        "google_application_credentials",
-                        "",
-                    )
+                google_application_credentials=_resolve_optional_path_str(
+                    base_dir,
+                    str(
+                        integrations.get("drive", {}).get(
+                            "google_application_credentials",
+                            "",
+                        )
+                    ),
                 ),
                 max_files=int(integrations.get("drive", {}).get("max_files", 0)),
                 batch_size=max(

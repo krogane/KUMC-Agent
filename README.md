@@ -197,4 +197,15 @@ pip install -r requirements.txt
 - OpenClaw 用の `AGENTS.md` / `SOUL.md` / `USER.md` などは `configs/openclaw/` 配下に配置してください（`integrations.openclaw.config_dir` で変更可）。
 - `chat` / `repl` は OpenClaw 優先で実行し、OpenClaw 側が失敗した場合のみ現行 RAG 経路へ自動フォールバックします。
 - OpenClaw から現行 RAG を呼ぶ場合は `kumc-agent tool rag` を使います。
-- OpenClaw モード (`KUMC_OPENCLAW_ENABLED=1`) では Discord frontend は VC サイドカー用途に縮退し、テキスト応答と内部自動 index ループを実行しません。
+- OpenClaw モード (`KUMC_OPENCLAW_ENABLED=1`) では Discord frontend は VC サイドカー用途に縮退し、テキスト応答を実行しません。内部自動 index ループは OpenClaw 設定に関わらず実行されます。
+
+## 12. Docker で OpenClaw を引き継ぐ
+
+- `docker-compose.yml` ではプロジェクト直下の `./.openclaw` を `/root/.openclaw` にマウントしているため、OpenClaw の agent/workspace/session を引き継げます。
+- `app/.venv` は匿名 volume (`/app/app/.venv`) でマスクしているため、巨大な `.venv` は引き継ぎません。
+- コンテナ内の `openclaw` CLI は `docker/DockerFile` で `npm install -g openclaw@latest` しており、`.venv` 非依存で実行されます。
+
+```bash
+docker compose build --no-cache bot
+docker compose up -d bot
+```

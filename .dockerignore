@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.*
+.openclaw/
+app/.venv
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.hf_cache/
+logs/

@@ -715,7 +715,7 @@ class GenerationComponent:
                 if selection.sub_index is None
                 else f"{chunk.id}:{selection.doc_index}-{selection.sub_index}"
             )
-            selected.append(Source(id=source_id, label=ref, uri=""))
+            selected.append(Source(id=source_id, label=ref, uri=ref))
             if limit is not None and len(selected) >= limit:
                 break
         return selected

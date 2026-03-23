@@ -113,6 +113,8 @@ def main() -> None:
                 force_disable_additional_memory=True,
             )
         )
+        tool_metadata = dict(answer.metadata)
+        tool_metadata.pop("contexts", None)
         payload = {
             "answer": answer.text,
             "route": answer.route,
@@ -126,7 +128,7 @@ def main() -> None:
             ],
             "routing_decision": answer.metadata.get("routing_decision"),
             "fast_mode": bool(answer.metadata.get("fast_mode", False)),
-            "metadata": answer.metadata,
+            "metadata": tool_metadata,
         }
         print(json.dumps(payload, ensure_ascii=False))
         logger.info("Local RAG tool completed")

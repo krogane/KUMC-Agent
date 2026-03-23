@@ -639,9 +639,7 @@ def main() -> None:
         logger.info("Logged in as %s", client.user)
         await context.vc.start()
         await _run_warmup(trigger="startup", force=True)
-        if openclaw_enabled:
-            logger.info("OpenClaw mode enabled. Internal auto-index loop is disabled.")
-        elif auto_index_task is None or auto_index_task.done():
+        if auto_index_task is None or auto_index_task.done():
             auto_index_task = asyncio.create_task(_auto_index_loop())
         if periodic_warmup_task is None or periodic_warmup_task.done():
             periodic_warmup_task = asyncio.create_task(_periodic_warmup_loop())

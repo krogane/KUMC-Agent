@@ -44,7 +44,7 @@ rag:
     tasks:
       target_model:
         provider: "gemini"
-        gemini_model: "gemini-3.1-flash-lite-preview"
+        gemini_model: "gemini-2.5-flash-lite"
         llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_target_model"
       use_additional_memory:

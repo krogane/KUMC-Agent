@@ -851,10 +851,61 @@ class OpenClawClient:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            return None
+            return OpenClawClient._extract_json_object_from_text(text)
         if isinstance(parsed, dict):
             return parsed
         return None
+
+    @staticmethod
+    def _extract_json_object_from_text(text: str) -> dict[str, object] | None:
+        for candidate in OpenClawClient._iter_json_object_candidates(text):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    @staticmethod
+    def _iter_json_object_candidates(text: str) -> list[str]:
+        raw = str(text or "")
+        out: list[str] = []
+        cursor = 0
+        length = len(raw)
+        while cursor < length:
+            start = raw.find("{", cursor)
+            if start < 0:
+                break
+            depth = 0
+            in_string = False
+            escaped = False
+            end = start
+            while end < length:
+                char = raw[end]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    end += 1
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        out.append(raw[start : end + 1].strip())
+                        cursor = end + 1
+                        break
+                end += 1
+            else:
+                cursor = start + 1
+        return out
 
     @staticmethod
     def _extract_json_list(stdout: str) -> list[Mapping[str, object]]:
@@ -928,14 +979,23 @@ class OpenClawClient:
     def _normalize_payload(payload: dict[str, object]) -> dict[str, object]:
         embedded = OpenClawClient._extract_embedded_payload(payload)
         if embedded is None:
-            return payload
-        merged = dict(payload)
-        for key in ("text", "answer", "route", "sources", "routing_decision", "fast_mode", "metadata"):
-            value = embedded.get(key)
-            if value is None:
-                continue
-            if OpenClawClient._is_empty_payload_value(merged.get(key)):
-                merged[key] = value
+            merged = dict(payload)
+        else:
+            merged = dict(payload)
+            for key in ("text", "answer", "route", "sources", "routing_decision", "fast_mode", "metadata"):
+                value = embedded.get(key)
+                if value is None:
+                    continue
+                if OpenClawClient._is_empty_payload_value(merged.get(key)):
+                    merged[key] = value
+            if OpenClawClient._is_empty_payload_value(merged.get("fast_mode")):
+                embedded_fast_mode = embedded.get("fastmode")
+                if embedded_fast_mode is not None:
+                    merged["fast_mode"] = embedded_fast_mode
+        if OpenClawClient._is_empty_payload_value(merged.get("fast_mode")):
+            payload_fast_mode = merged.get("fastmode")
+            if payload_fast_mode is not None:
+                merged["fast_mode"] = payload_fast_mode
         return merged
 
     @staticmethod
