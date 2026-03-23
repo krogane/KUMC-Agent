@@ -85,6 +85,10 @@ KUMC-Agent/
 最小必須:
 
 - `KUMC_DISCORD_BOT_TOKEN`
+- `KUMC_OPENCLAW_ENABLED` (`1` で OpenClaw 優先経路を有効化)
+- `KUMC_OPENCLAW_AGENT` (OpenClaw の対象 agent ID/名前。既定: `main`)
+- `KUMC_OPENCLAW_MODEL` (OpenClaw で使うモデル ID。例: `google/gemini-3-flash-preview`)
+- `OLLAMA_API_KEY` (OpenClaw がローカル Ollama provider を使う場合。通常は `ollama-local`)
 - `KUMC_GEMINI_API_KEY`
 - `KUMC_GEMINI_REQUESTS_PER_MINUTE` (Gemini API の1分あたり呼び出し上限)
 - `KUMC_GOOGLE_APPLICATION_CREDENTIALS`
@@ -130,6 +134,7 @@ PYTHONPATH=src python -m kumc_agent.frontends.discord.app
 ```bash
 PYTHONPATH=src python -m kumc_agent.cli repl
 PYTHONPATH=src python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
+PYTHONPATH=src python -m kumc_agent.cli tool rag --query "KUMCの活動内容は？"
 PYTHONPATH=src python -m kumc_agent.cli index build
 PYTHONPATH=src python -m kumc_agent.cli index update
 PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl --ragas-batch-size 10
@@ -185,3 +190,11 @@ pip install -r requirements.txt
 
 - `.env` の実値（token/api key）はコミットしない
 - `data/` と `model/` は大容量のため Git 管理対象外を前提
+
+## 11. OpenClaw Migration Notes
+
+- OpenClaw 連携は `openclaw` CLI を叩く薄いラッパー実装です (`src/kumc_agent/infra/openclaw`)。
+- OpenClaw 用の `AGENTS.md` / `SOUL.md` / `USER.md` などは `configs/openclaw/` 配下に配置してください（`integrations.openclaw.config_dir` で変更可）。
+- `chat` / `repl` は OpenClaw 優先で実行し、OpenClaw 側が失敗した場合のみ現行 RAG 経路へ自動フォールバックします。
+- OpenClaw から現行 RAG を呼ぶ場合は `kumc-agent tool rag` を使います。
+- OpenClaw モード (`KUMC_OPENCLAW_ENABLED=1`) では Discord frontend は VC サイドカー用途に縮退し、テキスト応答と内部自動 index ループを実行しません。

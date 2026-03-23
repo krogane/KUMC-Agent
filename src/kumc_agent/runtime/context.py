@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
+from kumc_agent.usecases.chat.entry import ChatEntryUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
 from kumc_agent.usecases.eval.ragas import EvaluateRagasUsecase
 from kumc_agent.usecases.indexing.build import BuildIndexUsecase
@@ -17,6 +18,7 @@ from kumc_agent.usecases.warmup.run import WarmupUsecase
 class RuntimeContext:
     config: RuntimeConfig
     chat_answer: ChatAnswerUsecase
+    chat_entry: ChatEntryUsecase
     chat_route: ChatRouteUsecase
     warmup: WarmupUsecase
     build_index: BuildIndexUsecase

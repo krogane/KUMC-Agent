@@ -197,6 +197,11 @@ ops:
 integrations:
   discord:
     bot_token: ""
+  openclaw:
+    enabled: true
+    agent: "main"
+    model: "google/gemini-3-flash-preview"
+    config_dir: "configs/openclaw"
   drive:
     folder_id: ""
     google_application_credentials: ""

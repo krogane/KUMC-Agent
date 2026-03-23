@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.frontends.discord.commands import parse_command, parse_interaction_command
 from kumc_agent.runtime.container import build_runtime_context
-from kumc_agent.usecases.chat.answer import ChatRequest
+from kumc_agent.usecases.chat.entry import ChatEntryRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
 from kumc_agent.usecases.warmup.run import WarmupRequest
@@ -37,6 +37,7 @@ def main() -> None:
 
     command_prefix = context.config.app.command_prefix.strip()
     index_command_prefix = context.config.app.index_command_prefix.strip()
+    openclaw_enabled = bool(context.config.integrations.openclaw.enabled)
     special_channel_names = {
         name.strip()
         for name in context.config.rag.history.special_channel_names
@@ -502,8 +503,8 @@ def main() -> None:
         context.vc.notify_rag_started()
         try:
             answer = await asyncio.to_thread(
-                lambda: context.chat_answer.execute(
-                    ChatRequest(
+                lambda: context.chat_entry.execute(
+                    ChatEntryRequest(
                         query=query,
                         question_author=_question_author_from_message(message),
                         history_scope=_history_scope_for_message(message),
@@ -638,7 +639,9 @@ def main() -> None:
         logger.info("Logged in as %s", client.user)
         await context.vc.start()
         await _run_warmup(trigger="startup", force=True)
-        if auto_index_task is None or auto_index_task.done():
+        if openclaw_enabled:
+            logger.info("OpenClaw mode enabled. Internal auto-index loop is disabled.")
+        elif auto_index_task is None or auto_index_task.done():
             auto_index_task = asyncio.create_task(_auto_index_loop())
         if periodic_warmup_task is None or periodic_warmup_task.done():
             periodic_warmup_task = asyncio.create_task(_periodic_warmup_loop())
@@ -667,6 +670,8 @@ def main() -> None:
             options=data.get("options"),
         )
         if parsed.kind == "none":
+            return
+        if openclaw_enabled:
             return
 
         if parsed.kind == "build_index":
@@ -786,6 +791,8 @@ def main() -> None:
             handled = await context.vc.maybe_quit_from_command(message)
             if not handled:
                 await message.channel.send("`/ai quit` はVCのチャット欄でのみ有効です。")
+            return
+        if openclaw_enabled and parsed.kind in {"build_index", "eval", "stop"}:
             return
 
         if parsed.kind == "build_index":

@@ -1,3 +1,5 @@
+# OpenClaw CLI is managed outside pip:
+# npm install -g --prefix app/.venv openclaw@latest
 discord.py
 discord-ext-voice-recv
 PyNaCl

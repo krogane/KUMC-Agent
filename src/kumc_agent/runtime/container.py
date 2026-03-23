@@ -17,6 +17,7 @@ from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
+from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
@@ -39,6 +40,7 @@ from kumc_agent.features.vc.config import VCManagerConfig
 from kumc_agent.features.vc.service import VCService
 from kumc_agent.runtime.context import RuntimeContext
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
+from kumc_agent.usecases.chat.entry import ChatEntryUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
 from kumc_agent.usecases.eval.ragas import EvaluateRagasUsecase
 from kumc_agent.usecases.indexing.build import BuildIndexUsecase
@@ -430,6 +432,16 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
+    openclaw_client = OpenClawClient(
+        enabled=config.integrations.openclaw.enabled,
+        agent=config.integrations.openclaw.agent,
+        model=config.integrations.openclaw.model,
+        config_dir=config.integrations.openclaw.config_dir,
+    )
+    chat_entry_usecase = ChatEntryUsecase(
+        chat_usecase=chat_answer_usecase,
+        openclaw_client=openclaw_client,
+    )
     chat_route_usecase = ChatRouteUsecase(router=router)
     warmup_usecase = WarmupUsecase(
         config=config,
@@ -445,6 +457,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     return RuntimeContext(
         config=config,
         chat_answer=chat_answer_usecase,
+        chat_entry=chat_entry_usecase,
         chat_route=chat_route_usecase,
         warmup=warmup_usecase,
         build_index=build_index_usecase,

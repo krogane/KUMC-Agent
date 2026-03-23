@@ -20,6 +20,7 @@ class ChatRequest:
     generation_history_override: Sequence[ChatHistoryEntry] | None = None
     append_sources_to_response: bool = True
     extra_mode_instruction: str | None = None
+    disable_history: bool = False
 
 
 class ChatAnswerUsecase:
@@ -37,4 +38,5 @@ class ChatAnswerUsecase:
             generation_history_override=request.generation_history_override,
             append_sources_to_response=request.append_sources_to_response,
             extra_mode_instruction=request.extra_mode_instruction,
+            disable_history=request.disable_history,
         )

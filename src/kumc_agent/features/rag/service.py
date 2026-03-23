@@ -75,6 +75,7 @@ class RagService:
         generation_history_override: Sequence[ChatHistoryEntry] | None = None,
         append_sources_to_response: bool = True,
         extra_mode_instruction: str | None = None,
+        disable_history: bool = False,
     ) -> Answer:
         cleaned_query = (query or "").strip()
         if not cleaned_query:
@@ -83,6 +84,8 @@ class RagService:
         routing_history: Sequence[ChatHistoryEntry] | None
         if routing_history_override is not None:
             routing_history = list(routing_history_override)
+        elif disable_history:
+            routing_history = []
         else:
             routing_history = self._history_for_prompt(
                 limit=self._config.prompt_default_turns,
@@ -107,6 +110,8 @@ class RagService:
 
         if generation_history_override is not None:
             generation_history = list(generation_history_override)
+        elif disable_history:
+            generation_history = []
         else:
             generation_history = self._history_for_prompt(
                 limit=(
@@ -138,6 +143,7 @@ class RagService:
                 routing_decision=decision,
                 force_fast_mode=force_fast_mode,
                 history_scope=history_scope,
+                disable_history=disable_history,
             )
 
         if decision.target_model == "no_rag":
@@ -162,6 +168,7 @@ class RagService:
                 routing_decision=decision,
                 force_fast_mode=force_fast_mode,
                 history_scope=history_scope,
+                disable_history=disable_history,
             )
 
         self._prepare_reranker_runtime(force_fast_mode=force_fast_mode)
@@ -213,6 +220,7 @@ class RagService:
                 routing_decision=decision,
                 force_fast_mode=force_fast_mode,
                 history_scope=history_scope,
+                disable_history=disable_history,
             )
 
         rag_generation = self._resolve_generation_settings(
@@ -241,6 +249,7 @@ class RagService:
             routing_decision=decision,
             force_fast_mode=force_fast_mode,
             history_scope=history_scope,
+            disable_history=disable_history,
         )
 
     def _resolve_generation_settings(
@@ -1514,6 +1523,7 @@ class RagService:
         routing_decision: RoutingDecision,
         force_fast_mode: bool,
         history_scope: str | int | None,
+        disable_history: bool,
     ) -> Answer:
         text = answer.text
         if force_fast_mode and text:
@@ -1531,12 +1541,13 @@ class RagService:
         }
         metadata["fast_mode"] = force_fast_mode
         finalized = replace(answer, text=text, metadata=metadata)
-        self._record_history(
-            query=query,
-            answer=finalized.text,
-            sources=[source.label for source in finalized.sources],
-            history_scope=history_scope,
-        )
+        if not disable_history:
+            self._record_history(
+                query=query,
+                answer=finalized.text,
+                sources=[source.label for source in finalized.sources],
+                history_scope=history_scope,
+            )
         return finalized
 
     def _history_for_prompt(

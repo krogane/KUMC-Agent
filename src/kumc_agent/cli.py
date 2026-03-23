@@ -10,6 +10,7 @@ from kumc_agent.frontends.discord.app import main as run_discord
 from kumc_agent.frontends.http.app import main as run_http
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
+from kumc_agent.usecases.chat.entry import ChatEntryRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
 from kumc_agent.usecases.indexing.update import UpdateIndexRequest
@@ -26,6 +27,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="Run one chat query")
     chat_parser.add_argument("--query", required=True)
+
+    tool_parser = subparsers.add_parser("tool", help="Tool bridge commands")
+    tool_sub = tool_parser.add_subparsers(dest="tool_command", required=True)
+    tool_rag_parser = tool_sub.add_parser("rag", help="Run local RAG tool payload")
+    tool_rag_parser.add_argument("--query", required=True)
+    tool_rag_parser.add_argument("--question-author", default=None)
+    tool_rag_parser.add_argument("--history-scope", default=None)
+    tool_rag_parser.add_argument("--force-fast-mode", action="store_true")
 
     index_parser = subparsers.add_parser("index", help="Index operations")
     index_sub = index_parser.add_subparsers(dest="index_command", required=True)
@@ -85,9 +94,42 @@ def main() -> None:
 
     if args.command == "chat":
         logger.info("Running chat query. length=%d", len(args.query or ""))
-        answer = context.chat_answer.execute(ChatRequest(query=args.query))
+        answer = context.chat_entry.execute(ChatEntryRequest(query=args.query))
         print(answer.text)
         logger.info("Chat query completed")
+        return
+
+    if args.command == "tool" and args.tool_command == "rag":
+        logger.info("Running local RAG tool. query_length=%d", len(args.query or ""))
+        answer = context.chat_answer.execute(
+            ChatRequest(
+                query=args.query,
+                question_author=args.question_author,
+                history_scope=args.history_scope,
+                force_fast_mode=bool(args.force_fast_mode),
+                disable_history=True,
+                routing_history_override=[],
+                generation_history_override=[],
+                force_disable_additional_memory=True,
+            )
+        )
+        payload = {
+            "answer": answer.text,
+            "route": answer.route,
+            "sources": [
+                {
+                    "id": source.id,
+                    "label": source.label,
+                    "uri": source.uri,
+                }
+                for source in answer.sources
+            ],
+            "routing_decision": answer.metadata.get("routing_decision"),
+            "fast_mode": bool(answer.metadata.get("fast_mode", False)),
+            "metadata": answer.metadata,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        logger.info("Local RAG tool completed")
         return
 
     if args.command == "index":

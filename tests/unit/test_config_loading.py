@@ -298,6 +298,9 @@ class ConfigLoadingTests(unittest.TestCase):
                 os.environ,
                 {
                     "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_OPENCLAW_ENABLED": "0",
+                    "KUMC_OPENCLAW_AGENT": "ops-agent",
+                    "KUMC_OPENCLAW_MODEL": "gemini/gemini-3-flash-preview",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_GEMINI_REQUESTS_PER_MINUTE": "12",
                     "KUMC_GEMINI_EMBEDDING_REQUESTS_PER_MINUTE": "6",
@@ -348,6 +351,16 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertFalse(config.features.retrieval.sparse_use_normalized_form)
             self.assertFalse(config.features.retrieval.sparse_remove_symbols)
             self.assertEqual(config.integrations.discord.bot_token, "token")
+            self.assertFalse(config.integrations.openclaw.enabled)
+            self.assertEqual(config.integrations.openclaw.agent, "ops-agent")
+            self.assertEqual(
+                config.integrations.openclaw.model,
+                "gemini/gemini-3-flash-preview",
+            )
+            self.assertEqual(
+                config.integrations.openclaw.config_dir,
+                base / "configs" / "openclaw",
+            )
             self.assertEqual(config.integrations.gemini_requests_per_minute, 12)
             self.assertEqual(config.integrations.gemini_embedding_requests_per_minute, 6)
             self.assertEqual(config.integrations.gemini_summary_requests_per_minute, 7)
@@ -413,6 +426,28 @@ class ConfigLoadingTests(unittest.TestCase):
             ):
                 with self.assertRaises(ConfigLoadError):
                     load_runtime_config(base_dir=base)
+
+    def test_openclaw_default_agent_is_main(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._prepare_base(base)
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+        self.assertEqual(config.integrations.openclaw.agent, "main")
+        self.assertEqual(config.integrations.openclaw.model, "")
+        self.assertEqual(
+            config.integrations.openclaw.config_dir,
+            base / "configs" / "openclaw",
+        )
 
     def test_rag_generation_profiles_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

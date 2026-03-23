@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from kumc_agent.runtime.context import RuntimeContext
-from kumc_agent.usecases.chat.answer import ChatRequest
+from kumc_agent.usecases.chat.entry import ChatEntryRequest
 
 
 def run_repl(context: RuntimeContext) -> None:
@@ -18,5 +18,5 @@ def run_repl(context: RuntimeContext) -> None:
         if query.lower() in {"exit", "quit"}:
             break
 
-        answer = context.chat_answer.execute(ChatRequest(query=query))
+        answer = context.chat_entry.execute(ChatEntryRequest(query=query))
         print(answer.text)

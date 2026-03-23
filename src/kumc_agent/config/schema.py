@@ -334,6 +334,14 @@ class IntegrationDiscordSection:
 
 
 @dataclass(frozen=True)
+class IntegrationOpenClawSection:
+    enabled: bool
+    agent: str
+    model: str
+    config_dir: Path
+
+
+@dataclass(frozen=True)
 class IntegrationDriveSection:
     folder_id: str
     google_application_credentials: str
@@ -356,6 +364,7 @@ class IntegrationCraftersColonySection:
 @dataclass(frozen=True)
 class IntegrationSection:
     discord: IntegrationDiscordSection
+    openclaw: IntegrationOpenClawSection
     drive: IntegrationDriveSection
     crafters_colony: IntegrationCraftersColonySection
     gemini_api_key: str

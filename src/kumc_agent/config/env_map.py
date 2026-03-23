@@ -67,6 +67,9 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_INDEX_COMMAND_PREFIX", "app.index_command_prefix", str),
     EnvBinding("KUMC_MAX_INPUT_CHARACTERS", "app.max_input_characters", _to_int),
     EnvBinding("KUMC_DISCORD_BOT_TOKEN", "integrations.discord.bot_token", str),
+    EnvBinding("KUMC_OPENCLAW_ENABLED", "integrations.openclaw.enabled", _to_bool),
+    EnvBinding("KUMC_OPENCLAW_AGENT", "integrations.openclaw.agent", str),
+    EnvBinding("KUMC_OPENCLAW_MODEL", "integrations.openclaw.model", str),
     EnvBinding("KUMC_GEMINI_API_KEY", "integrations.gemini_api_key", str),
     EnvBinding(
         "KUMC_GEMINI_REQUESTS_PER_MINUTE",

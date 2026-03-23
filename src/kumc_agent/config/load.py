@@ -28,6 +28,7 @@ from kumc_agent.config.schema import (
     IntegrationCraftersColonySection,
     IntegrationDiscordSection,
     IntegrationDriveSection,
+    IntegrationOpenClawSection,
     IntegrationSection,
     LLMSection,
     ModelSection,
@@ -273,6 +274,23 @@ def _resolve_experiment_path(base_dir: Path, profile: str) -> Path:
     return base_dir / "configs" / "experiments" / profile_clean
 
 
+def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(config)
+    integrations = updated.get("integrations")
+    if not isinstance(integrations, dict):
+        integrations = {}
+        updated["integrations"] = integrations
+    openclaw = integrations.get("openclaw")
+    if not isinstance(openclaw, dict):
+        openclaw = {}
+        integrations["openclaw"] = openclaw
+    openclaw.setdefault("enabled", True)
+    openclaw.setdefault("agent", "main")
+    openclaw.setdefault("model", "")
+    openclaw.setdefault("config_dir", "configs/openclaw")
+    return updated
+
+
 def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
     resolved_base_dir = base_dir or Path(__file__).resolve().parents[3]
     load_dotenv(resolved_base_dir / ".env", override=False)
@@ -284,6 +302,7 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
             merged = deep_merge(merged, payload, allow_new_keys=True)
         except MergeError as exc:
             raise ConfigLoadError(str(exc)) from exc
+    merged = _backfill_default_config_values(merged)
 
     try:
         merged = _apply_env_overrides(merged)
@@ -1042,6 +1061,20 @@ def _to_runtime_config(
         integrations=IntegrationSection(
             discord=IntegrationDiscordSection(
                 bot_token=str(integrations.get("discord", {}).get("bot_token", "")),
+            ),
+            openclaw=IntegrationOpenClawSection(
+                enabled=bool(integrations.get("openclaw", {}).get("enabled", True)),
+                agent=str(integrations.get("openclaw", {}).get("agent", "main")),
+                model=str(integrations.get("openclaw", {}).get("model", "")),
+                config_dir=_resolve_path(
+                    base_dir,
+                    str(
+                        integrations.get("openclaw", {}).get(
+                            "config_dir",
+                            "configs/openclaw",
+                        )
+                    ),
+                ),
             ),
             drive=IntegrationDriveSection(
                 folder_id=str(integrations.get("drive", {}).get("folder_id", "")),
