@@ -288,6 +288,7 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(integrations, dict):
         integrations = {}
         updated["integrations"] = integrations
+    integrations.setdefault("openai_api_key", "")
     openclaw = integrations.get("openclaw")
     if not isinstance(openclaw, dict):
         openclaw = {}
@@ -295,6 +296,8 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     openclaw.setdefault("enabled", True)
     openclaw.setdefault("agent", "main")
     openclaw.setdefault("model", "")
+    openclaw.setdefault("lite_agent", "")
+    openclaw.setdefault("lite_model", "")
     openclaw.setdefault("config_dir", "configs/openclaw")
     return updated
 
@@ -1074,6 +1077,12 @@ def _to_runtime_config(
                 enabled=bool(integrations.get("openclaw", {}).get("enabled", True)),
                 agent=str(integrations.get("openclaw", {}).get("agent", "main")),
                 model=str(integrations.get("openclaw", {}).get("model", "")),
+                lite_agent=str(
+                    integrations.get("openclaw", {}).get("lite_agent", "")
+                ),
+                lite_model=str(
+                    integrations.get("openclaw", {}).get("lite_model", "")
+                ),
                 config_dir=_resolve_path(
                     base_dir,
                     str(
@@ -1149,6 +1158,7 @@ def _to_runtime_config(
                     integrations.get("crafters_colony", {}).get("max_articles", 0)
                 ),
             ),
+            openai_api_key=str(integrations.get("openai_api_key", "")),
             gemini_api_key=str(integrations.get("gemini_api_key", "")),
             gemini_requests_per_minute=max(
                 0,

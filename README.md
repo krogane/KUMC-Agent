@@ -87,7 +87,10 @@ KUMC-Agent/
 - `KUMC_DISCORD_BOT_TOKEN`
 - `KUMC_OPENCLAW_ENABLED` (`1` で OpenClaw 優先経路を有効化)
 - `KUMC_OPENCLAW_AGENT` (OpenClaw の対象 agent ID/名前。既定: `main`)
-- `KUMC_OPENCLAW_MODEL` (OpenClaw で使うモデル ID。例: `google/gemini-3-flash-preview`)
+- `KUMC_OPENCLAW_MODEL` (OpenClaw で使うモデル ID。例: `openai/gpt-5.4`)
+- `KUMC_OPENCLAW_LITE_AGENT` (`force_fast_mode=true` の時に使う軽量エージェント。例: `lite`)
+- `KUMC_OPENCLAW_LITE_MODEL` (軽量エージェントで使うモデル ID。例: `google/gemini-3-flash-preview`)
+- `KUMC_OPENAI_API_KEY` (OpenClaw が OpenAI モデルを使う場合)
 - `OLLAMA_API_KEY` (OpenClaw がローカル Ollama provider を使う場合。通常は `ollama-local`)
 - `KUMC_GEMINI_API_KEY`
 - `KUMC_GEMINI_REQUESTS_PER_MINUTE` (Gemini API の1分あたり呼び出し上限)
@@ -195,6 +198,8 @@ pip install -r requirements.txt
 
 - OpenClaw 連携は `openclaw` CLI を叩く薄いラッパー実装です (`src/kumc_agent/infra/openclaw`)。
 - OpenClaw 用の `AGENTS.md` / `SOUL.md` / `USER.md` などは `configs/openclaw/` 配下に配置してください（`integrations.openclaw.config_dir` で変更可）。
+- `configs/openclaw/skills/**` 配下の Skill ファイルも OpenClaw workspace の `skills/**` へ同期され、次回ターンから利用されます。
+- Skill 定義が存在する場合、セッションIDへ Skill リビジョンが自動付与されるため、`/new` なしでも Skill 更新が反映されます（履歴はリビジョン単位で分離）。
 - `chat` / `repl` は OpenClaw 優先で実行し、OpenClaw 側が失敗した場合のみ現行 RAG 経路へ自動フォールバックします。
 - OpenClaw から現行 RAG を呼ぶ場合は `kumc-agent tool rag` を使います。
 - OpenClaw モード (`KUMC_OPENCLAW_ENABLED=1`) では Discord frontend は VC サイドカー用途に縮退し、テキスト応答を実行しません。内部自動 index ループは OpenClaw 設定に関わらず実行されます。

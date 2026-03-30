@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 import os
@@ -167,6 +168,9 @@ class OpenClawClient:
         enabled: bool,
         agent: str,
         model: str = "",
+        lite_agent: str = "",
+        lite_model: str = "",
+        openai_api_key: str = "",
         config_dir: Path | str | None = None,
         timeout_seconds: float = 120.0,
         command: str = "openclaw",
@@ -174,6 +178,9 @@ class OpenClawClient:
         self._enabled = bool(enabled)
         self._agent = str(agent or "").strip() or "main"
         self._model = self._normalize_model(model)
+        self._lite_agent = str(lite_agent or "").strip()
+        self._lite_model = self._normalize_model(lite_model)
+        self._openai_api_key = str(openai_api_key or "").strip()
         self._config_dir = self._resolve_config_dir(config_dir)
         self._workspace_cache: dict[str, Path] = {}
         self._timeout_seconds = max(1.0, float(timeout_seconds))
@@ -196,6 +203,8 @@ class OpenClawClient:
             return f"google/{raw.split('/', 1)[1]}"
         if raw and "/" not in raw and lowered.startswith("gemini-"):
             return f"google/{raw}"
+        if raw and "/" not in raw and lowered.startswith("gpt-"):
+            return f"openai/{raw}"
         return raw
 
     @staticmethod
@@ -238,8 +247,25 @@ class OpenClawClient:
             )
 
         normalized_session = str(session_id or "").strip() or "default"
-        self._sync_bootstrap_files(agent=self._agent)
-        model_failure = self._configure_model_if_needed()
+        sanitized_user_context = user_context or {}
+        fast_mode_requested = _is_truthy(
+            str(sanitized_user_context.get("force_fast_mode", ""))
+        )
+        active_agent, active_model = self._resolve_turn_agent_and_model(
+            fast_mode_requested=fast_mode_requested
+        )
+        self._sync_bootstrap_files(agent=active_agent)
+        skills_revision = self._compute_skills_revision()
+        self._invalidate_stale_skills_snapshot_cache(
+            agent=active_agent,
+            skills_revision=skills_revision,
+        )
+        effective_session = self._rewrite_session_id_for_skills(
+            session_id=normalized_session,
+            agent=active_agent,
+            skills_revision=skills_revision,
+        )
+        model_failure = self._configure_model_if_needed(active_model)
         if model_failure is not None:
             self._trace.write(
                 "run_turn_failed",
@@ -254,22 +280,25 @@ class OpenClawClient:
         self._trace.write(
             "run_turn_start",
             session_id=normalized_session,
+            effective_session_id=effective_session,
             configured_agent=self._agent,
+            active_agent=active_agent,
+            active_model=active_model,
+            fast_mode_requested=fast_mode_requested,
             query=cleaned_query,
-            user_context=user_context or {},
+            user_context=sanitized_user_context,
             config_dir=str(self._config_dir) if self._config_dir is not None else "",
         )
         message = self._build_message(
             query=cleaned_query,
             session_id=normalized_session,
-            user_context=user_context or {},
+            user_context=sanitized_user_context,
         )
         self._trace.write("message_built", message=message)
 
-        active_agent = self._agent
         local_mode = False
         cmd = self._build_command(
-            session_id=normalized_session,
+            session_id=effective_session,
             message=message,
             agent=active_agent,
             local=local_mode,
@@ -319,8 +348,12 @@ class OpenClawClient:
             )
             active_agent = ""
             self._sync_bootstrap_files(agent=active_agent)
+            self._invalidate_stale_skills_snapshot_cache(
+                agent=active_agent,
+                skills_revision=skills_revision,
+            )
             retry_cmd = self._build_command(
-                session_id=normalized_session,
+                session_id=effective_session,
                 message=message,
                 agent=active_agent,
                 local=local_mode,
@@ -368,7 +401,7 @@ class OpenClawClient:
             )
             local_mode = True
             retry_cmd = self._build_command(
-                session_id=normalized_session,
+                session_id=effective_session,
                 message=message,
                 agent=active_agent,
                 local=local_mode,
@@ -407,7 +440,7 @@ class OpenClawClient:
             )
             time.sleep(1.0)
             retry_cmd = self._build_command(
-                session_id=normalized_session,
+                session_id=effective_session,
                 message=message,
                 agent=active_agent,
                 local=local_mode,
@@ -546,16 +579,22 @@ class OpenClawClient:
             cmd.insert(2, "--local")
         return cmd
 
-    def _configure_model_if_needed(self) -> OpenClawFailure | None:
-        if not self._model:
+    def _resolve_turn_agent_and_model(self, *, fast_mode_requested: bool) -> tuple[str, str]:
+        if fast_mode_requested and self._lite_agent:
+            model = self._lite_model or self._model
+            return self._lite_agent, model
+        return self._agent, self._model
+
+    def _configure_model_if_needed(self, model: str) -> OpenClawFailure | None:
+        if not model:
             return None
-        cmd = [self._command, "models", "set", self._model]
-        self._trace.write("model_configuration_start", model=self._model, command=cmd)
+        cmd = [self._command, "models", "set", model]
+        self._trace.write("model_configuration_start", model=model, command=cmd)
         completed, failure = self._run_command(cmd)
         if failure is not None:
             self._trace.write(
                 "model_configuration_failed",
-                model=self._model,
+                model=model,
                 reason=failure.reason,
                 detail=failure.detail,
                 return_code=failure.return_code,
@@ -575,7 +614,7 @@ class OpenClawClient:
         if completed.returncode != 0:
             self._trace.write(
                 "model_configuration_failed",
-                model=self._model,
+                model=model,
                 return_code=completed.returncode,
                 stdout=stdout,
                 stderr=stderr,
@@ -589,7 +628,7 @@ class OpenClawClient:
             )
         self._trace.write(
             "model_configuration_success",
-            model=self._model,
+            model=model,
             return_code=completed.returncode,
             stdout=stdout,
             stderr=stderr,
@@ -620,6 +659,14 @@ class OpenClawClient:
                 google_api_key = str(env.get("GOOGLE_API_KEY", "")).strip()
                 if google_api_key:
                     env["GEMINI_API_KEY"] = google_api_key
+        openai_api_key = str(env.get("OPENAI_API_KEY", "")).strip()
+        if not openai_api_key:
+            if self._openai_api_key:
+                env["OPENAI_API_KEY"] = self._openai_api_key
+            else:
+                kumc_openai_api_key = str(env.get("KUMC_OPENAI_API_KEY", "")).strip()
+                if kumc_openai_api_key:
+                    env["OPENAI_API_KEY"] = kumc_openai_api_key
         try:
             completed = subprocess.run(
                 cmd,
@@ -699,11 +746,18 @@ class OpenClawClient:
         if self._config_dir is None:
             return
         try:
-            sources = [
+            root_md_sources = [
                 path
                 for path in sorted(self._config_dir.iterdir())
                 if path.is_file() and path.suffix.lower() == ".md"
             ]
+            skills_dir = self._config_dir / "skills"
+            skill_sources = (
+                [path for path in sorted(skills_dir.rglob("*")) if path.is_file()]
+                if skills_dir.is_dir()
+                else []
+            )
+            sources = [*root_md_sources, *skill_sources]
         except OSError as exc:
             logger.warning(
                 "Failed to enumerate OpenClaw config directory for bootstrap sync. config_dir=%s error=%s",
@@ -728,15 +782,20 @@ class OpenClawClient:
 
         synced_files: list[str] = []
         for source in sources:
-            target = workspace / source.name
+            try:
+                relative_path = source.relative_to(self._config_dir)
+            except ValueError:
+                relative_path = Path(source.name)
+            target = workspace / relative_path
             try:
                 content = source.read_text(encoding="utf-8")
+                target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
                     existing = target.read_text(encoding="utf-8")
                     if existing == content:
                         continue
                 target.write_text(content, encoding="utf-8")
-                synced_files.append(source.name)
+                synced_files.append(str(relative_path))
             except OSError as exc:
                 logger.warning(
                     "Failed to sync OpenClaw bootstrap file. source=%s target=%s error=%s",
@@ -751,6 +810,204 @@ class OpenClawClient:
                 workspace=str(workspace),
                 files=synced_files,
             )
+
+    def _rewrite_session_id_for_skills(
+        self,
+        *,
+        session_id: str,
+        agent: str,
+        skills_revision: str | None = None,
+    ) -> str:
+        revision = skills_revision
+        if revision is None:
+            revision = self._compute_skills_revision()
+        if not revision:
+            return session_id
+        rewritten = f"{session_id}#skills-{revision}"
+        if rewritten != session_id:
+            self._trace.write(
+                "session_id_rewritten_for_skills",
+                agent=str(agent or "").strip() or "main",
+                original_session_id=session_id,
+                rewritten_session_id=rewritten,
+                skills_revision=revision,
+            )
+        return rewritten
+
+    def _compute_skills_revision(self) -> str | None:
+        if self._config_dir is None:
+            return None
+        skills_dir = self._config_dir / "skills"
+        if not skills_dir.is_dir():
+            return None
+        files = [path for path in sorted(skills_dir.rglob("*")) if path.is_file()]
+        if not files:
+            return None
+
+        digest = hashlib.sha256()
+        has_content = False
+        for path in files:
+            try:
+                relative = path.relative_to(self._config_dir).as_posix()
+                digest.update(relative.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(path.read_bytes())
+                digest.update(b"\0")
+                has_content = True
+            except OSError as exc:
+                logger.warning(
+                    "Failed to hash OpenClaw skill file for session revision. path=%s error=%s",
+                    path,
+                    exc,
+                )
+        if not has_content:
+            return None
+        return digest.hexdigest()[:10]
+
+    @staticmethod
+    def _parse_skill_name_from_frontmatter(*, text: str) -> str | None:
+        raw = str(text or "")
+        if not raw.startswith("---"):
+            return None
+        end_marker = raw.find("\n---", 3)
+        if end_marker < 0:
+            return None
+        frontmatter = raw[3:end_marker]
+        match = re.search(
+            r'(?mi)^\s*name\s*:\s*(?:"([^"]+)"|\'([^\']+)\'|([^\n#]+))\s*$',
+            frontmatter,
+        )
+        if not match:
+            return None
+        candidate = next((group for group in match.groups() if group), "")
+        normalized = str(candidate).strip()
+        if not normalized:
+            return None
+        return normalized.lower()
+
+    def _collect_config_skill_names(self) -> set[str]:
+        if self._config_dir is None:
+            return set()
+        skills_dir = self._config_dir / "skills"
+        if not skills_dir.is_dir():
+            return set()
+        names: set[str] = set()
+        for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+            if not skill_md.is_file():
+                continue
+            parent_name = skill_md.parent.name.strip().lower()
+            if parent_name:
+                names.add(parent_name)
+            try:
+                parsed_name = self._parse_skill_name_from_frontmatter(
+                    text=skill_md.read_text(encoding="utf-8")
+                )
+            except OSError:
+                continue
+            if parsed_name:
+                names.add(parsed_name)
+        return names
+
+    @staticmethod
+    def _normalize_agent_key(agent: str) -> str:
+        return str(agent or "").strip() or "main"
+
+    def _resolve_session_store_candidates(self, *, agent: str) -> list[Path]:
+        agent_key = self._normalize_agent_key(agent)
+        candidates = [
+            Path.cwd() / ".openclaw" / "agents" / agent_key / "sessions" / "sessions.json",
+            Path.home() / ".openclaw" / "agents" / agent_key / "sessions" / "sessions.json",
+        ]
+        out: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+        return out
+
+    @staticmethod
+    def _extract_snapshot_skill_names(snapshot: Mapping[str, object]) -> set[str]:
+        resolved = snapshot.get("resolvedSkills")
+        if not isinstance(resolved, list):
+            return set()
+        names: set[str] = set()
+        for item in resolved:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip().lower()
+            if name:
+                names.add(name)
+        return names
+
+    def _invalidate_stale_skills_snapshot_cache(
+        self,
+        *,
+        agent: str,
+        skills_revision: str | None,
+    ) -> None:
+        if not skills_revision:
+            return
+        expected_skill_names = self._collect_config_skill_names()
+        if not expected_skill_names:
+            return
+        agent_key = self._normalize_agent_key(agent)
+        expected_suffix = f"#skills-{skills_revision}"
+        for store_path in self._resolve_session_store_candidates(agent=agent_key):
+            if not store_path.is_file():
+                continue
+            try:
+                raw = json.loads(store_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+
+            changed = False
+            invalidated_entries: list[str] = []
+            for entry_key, entry in raw.items():
+                if not isinstance(entry, dict):
+                    continue
+                if not str(entry_key).startswith(f"agent:{agent_key}:"):
+                    continue
+                snapshot = entry.get("skillsSnapshot")
+                if not isinstance(snapshot, dict):
+                    continue
+                session_value = str(entry.get("sessionId") or "").strip()
+                if session_value and expected_suffix not in session_value:
+                    entry.pop("skillsSnapshot", None)
+                    changed = True
+                    invalidated_entries.append(str(entry_key))
+                    continue
+                snapshot_skill_names = self._extract_snapshot_skill_names(snapshot)
+                if expected_skill_names.issubset(snapshot_skill_names):
+                    continue
+                entry.pop("skillsSnapshot", None)
+                changed = True
+                invalidated_entries.append(str(entry_key))
+
+            if not changed:
+                continue
+            try:
+                store_path.write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                self._trace.write(
+                    "skills_snapshot_cache_invalidated",
+                    agent=agent_key,
+                    session_store=str(store_path),
+                    entries=invalidated_entries,
+                    skills_revision=skills_revision,
+                    expected_skills=sorted(expected_skill_names),
+                )
+            except OSError:
+                logger.warning(
+                    "Failed to update stale OpenClaw skills snapshot cache. path=%s",
+                    store_path,
+                )
 
     def _resolve_workspace(self, *, agent: str) -> Path | None:
         cache_key = str(agent or "").strip() or "main"

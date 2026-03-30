@@ -354,7 +354,7 @@ class OpenClawClientTests(unittest.TestCase):
         client = OpenClawClient(
             enabled=True,
             agent="ops",
-            model="gemini/gemini-3-flash-preview",
+            model="gpt-5.4",
         )
         set_model = subprocess.CompletedProcess(
             args=["openclaw", "models", "set"],
@@ -380,14 +380,14 @@ class OpenClawClientTests(unittest.TestCase):
         self.assertTrue(str(first_cmd[0]).endswith("openclaw"))
         self.assertEqual(
             first_cmd[1:],
-            ["models", "set", "google/gemini-3-flash-preview"],
+            ["models", "set", "openai/gpt-5.4"],
         )
 
     def test_run_turn_returns_failure_when_model_configuration_fails(self) -> None:
         client = OpenClawClient(
             enabled=True,
             agent="ops",
-            model="gemini/gemini-3-flash-preview",
+            model="gpt-5.4",
         )
         set_model_failure = subprocess.CompletedProcess(
             args=["openclaw", "models", "set"],
@@ -406,6 +406,47 @@ class OpenClawClientTests(unittest.TestCase):
             response.failure.reason if response.failure else "",
             "model_configuration_failed",
         )
+
+    def test_run_turn_uses_lite_agent_and_model_when_force_fast_mode_enabled(self) -> None:
+        client = OpenClawClient(
+            enabled=True,
+            agent="main",
+            model="openai/gpt-5.4",
+            lite_agent="lite",
+            lite_model="google/gemini-3-flash-preview",
+        )
+        set_model = subprocess.CompletedProcess(
+            args=["openclaw", "models", "set"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+        turn = subprocess.CompletedProcess(
+            args=["openclaw", "agent"],
+            returncode=0,
+            stdout='{"text":"hello lite"}\n',
+            stderr="",
+        )
+        with patch(
+            "kumc_agent.infra.openclaw.client.subprocess.run",
+            side_effect=[set_model, turn],
+        ) as run_mock:
+            response = client.run_turn(
+                query="status",
+                session_id="guild:1",
+                user_context={"force_fast_mode": True},
+            )
+
+        self.assertTrue(response.ok)
+        self.assertEqual(run_mock.call_count, 2)
+        first_cmd = run_mock.call_args_list[0].args[0]
+        second_cmd = run_mock.call_args_list[1].args[0]
+        self.assertEqual(
+            first_cmd[1:],
+            ["models", "set", "google/gemini-3-flash-preview"],
+        )
+        self.assertIn("--agent", second_cmd)
+        self.assertEqual(second_cmd[second_cmd.index("--agent") + 1], "lite")
 
     def test_run_turn_bridges_kumc_gemini_api_key_to_openclaw_env(self) -> None:
         client = OpenClawClient(enabled=True, agent="ops")
@@ -429,6 +470,29 @@ class OpenClawClientTests(unittest.TestCase):
         self.assertTrue(response.ok)
         env = run_mock.call_args.kwargs.get("env", {})
         self.assertEqual(env.get("GEMINI_API_KEY"), "test-key")
+
+    def test_run_turn_bridges_kumc_openai_api_key_to_openclaw_env(self) -> None:
+        client = OpenClawClient(enabled=True, agent="ops")
+        completed = subprocess.CompletedProcess(
+            args=["openclaw"],
+            returncode=0,
+            stdout='{"text":"ok"}\n',
+            stderr="",
+        )
+        with patch.dict(
+            "kumc_agent.infra.openclaw.client.os.environ",
+            {"KUMC_OPENAI_API_KEY": "test-openai-key"},
+            clear=True,
+        ):
+            with patch(
+                "kumc_agent.infra.openclaw.client.subprocess.run",
+                return_value=completed,
+            ) as run_mock:
+                response = client.run_turn(query="status", session_id="guild:1")
+
+        self.assertTrue(response.ok)
+        env = run_mock.call_args.kwargs.get("env", {})
+        self.assertEqual(env.get("OPENAI_API_KEY"), "test-openai-key")
 
     def test_run_turn_bridges_google_api_key_to_gemini_api_key_when_missing(self) -> None:
         client = OpenClawClient(enabled=True, agent="ops")
@@ -483,9 +547,15 @@ class OpenClawClientTests(unittest.TestCase):
             tmp_root = Path(tmp_dir).resolve()
             config_dir = tmp_root / "openclaw-config"
             workspace_dir = tmp_root / "workspace"
+            skill_dir = config_dir / "skills" / "create_and_send_markdown"
             config_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir.mkdir(parents=True, exist_ok=True)
             (config_dir / "AGENTS.md").write_text("# Config Agents\n", encoding="utf-8")
             (config_dir / "SOUL.md").write_text("# Config Soul\n", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: create_and_send_markdown\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
 
             client = OpenClawClient(enabled=True, agent="ops", config_dir=config_dir)
             agents_list = subprocess.CompletedProcess(
@@ -519,6 +589,192 @@ class OpenClawClientTests(unittest.TestCase):
                 (workspace_dir / "SOUL.md").read_text(encoding="utf-8"),
                 "# Config Soul\n",
             )
+            self.assertEqual(
+                (workspace_dir / "skills" / "create_and_send_markdown" / "SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+                "---\nname: create_and_send_markdown\ndescription: test\n---\n",
+            )
+
+    def test_run_turn_rewrites_session_id_when_skills_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir).resolve()
+            config_dir = tmp_root / "openclaw-config"
+            workspace_dir = tmp_root / "workspace"
+            skill_dir = config_dir / "skills" / "create_document"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "AGENTS.md").write_text("# Config Agents\n", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: create_document\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+
+            client = OpenClawClient(enabled=True, agent="ops", config_dir=config_dir)
+            agents_list = subprocess.CompletedProcess(
+                args=["openclaw", "agents", "list", "--json"],
+                returncode=0,
+                stdout=json.dumps(
+                    [{"id": "ops", "workspace": str(workspace_dir), "isDefault": False}]
+                ),
+                stderr="",
+            )
+            turn = subprocess.CompletedProcess(
+                args=["openclaw"],
+                returncode=0,
+                stdout='{"text":"ok"}\n',
+                stderr="",
+            )
+            with patch(
+                "kumc_agent.infra.openclaw.client.subprocess.run",
+                side_effect=[agents_list, turn],
+            ) as run_mock:
+                response = client.run_turn(query="status", session_id="guild:1")
+
+            self.assertTrue(response.ok)
+            self.assertEqual(run_mock.call_count, 2)
+            cmd = run_mock.call_args_list[1].args[0]
+            self.assertIn("--session-id", cmd)
+            session_value = cmd[cmd.index("--session-id") + 1]
+            self.assertRegex(session_value, r"^guild:1#skills-[0-9a-f]{10}$")
+
+    def test_run_turn_invalidates_stale_skills_snapshot_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir).resolve()
+            config_dir = tmp_root / "openclaw-config"
+            workspace_dir = tmp_root / "workspace"
+            skill_dir = config_dir / "skills" / "create_document"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "AGENTS.md").write_text("# Config Agents\n", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: create_document\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+
+            client = OpenClawClient(enabled=True, agent="ops", config_dir=config_dir)
+            skills_revision = client._compute_skills_revision()
+            self.assertIsNotNone(skills_revision)
+            assert skills_revision is not None
+
+            sessions_path = (
+                tmp_root / ".openclaw" / "agents" / "ops" / "sessions" / "sessions.json"
+            )
+            sessions_path.parent.mkdir(parents=True, exist_ok=True)
+            sessions_payload = {
+                "agent:ops:ops": {
+                    "sessionId": f"guild:1#skills-{skills_revision}",
+                    "skillsSnapshot": {
+                        "version": 0,
+                        "resolvedSkills": [{"name": "healthcheck"}],
+                    },
+                }
+            }
+            sessions_path.write_text(
+                json.dumps(sessions_payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            agents_list = subprocess.CompletedProcess(
+                args=["openclaw", "agents", "list", "--json"],
+                returncode=0,
+                stdout=json.dumps(
+                    [{"id": "ops", "workspace": str(workspace_dir), "isDefault": False}]
+                ),
+                stderr="",
+            )
+            turn = subprocess.CompletedProcess(
+                args=["openclaw"],
+                returncode=0,
+                stdout='{"text":"ok"}\n',
+                stderr="",
+            )
+
+            original_cwd = Path.cwd()
+            os.chdir(tmp_root)
+            try:
+                with patch(
+                    "kumc_agent.infra.openclaw.client.subprocess.run",
+                    side_effect=[agents_list, turn],
+                ):
+                    response = client.run_turn(query="status", session_id="guild:1")
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertTrue(response.ok)
+            updated = json.loads(sessions_path.read_text(encoding="utf-8"))
+            entry = updated.get("agent:ops:ops", {})
+            self.assertIsInstance(entry, dict)
+            self.assertNotIn("skillsSnapshot", entry)
+
+    def test_run_turn_keeps_skills_snapshot_cache_when_custom_skill_already_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir).resolve()
+            config_dir = tmp_root / "openclaw-config"
+            workspace_dir = tmp_root / "workspace"
+            skill_dir = config_dir / "skills" / "create_document"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "AGENTS.md").write_text("# Config Agents\n", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: create_document\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+
+            client = OpenClawClient(enabled=True, agent="ops", config_dir=config_dir)
+            skills_revision = client._compute_skills_revision()
+            self.assertIsNotNone(skills_revision)
+            assert skills_revision is not None
+
+            sessions_path = (
+                tmp_root / ".openclaw" / "agents" / "ops" / "sessions" / "sessions.json"
+            )
+            sessions_path.parent.mkdir(parents=True, exist_ok=True)
+            sessions_payload = {
+                "agent:ops:ops": {
+                    "sessionId": f"guild:1#skills-{skills_revision}",
+                    "skillsSnapshot": {
+                        "version": 0,
+                        "resolvedSkills": [{"name": "create_document"}],
+                    },
+                }
+            }
+            sessions_path.write_text(
+                json.dumps(sessions_payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            agents_list = subprocess.CompletedProcess(
+                args=["openclaw", "agents", "list", "--json"],
+                returncode=0,
+                stdout=json.dumps(
+                    [{"id": "ops", "workspace": str(workspace_dir), "isDefault": False}]
+                ),
+                stderr="",
+            )
+            turn = subprocess.CompletedProcess(
+                args=["openclaw"],
+                returncode=0,
+                stdout='{"text":"ok"}\n',
+                stderr="",
+            )
+
+            original_cwd = Path.cwd()
+            os.chdir(tmp_root)
+            try:
+                with patch(
+                    "kumc_agent.infra.openclaw.client.subprocess.run",
+                    side_effect=[agents_list, turn],
+                ):
+                    response = client.run_turn(query="status", session_id="guild:1")
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertTrue(response.ok)
+            updated = json.loads(sessions_path.read_text(encoding="utf-8"))
+            entry = updated.get("agent:ops:ops", {})
+            self.assertIsInstance(entry, dict)
+            self.assertIn("skillsSnapshot", entry)
 
     def test_run_turn_falls_back_when_config_dir_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

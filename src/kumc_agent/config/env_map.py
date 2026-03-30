@@ -70,6 +70,9 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_OPENCLAW_ENABLED", "integrations.openclaw.enabled", _to_bool),
     EnvBinding("KUMC_OPENCLAW_AGENT", "integrations.openclaw.agent", str),
     EnvBinding("KUMC_OPENCLAW_MODEL", "integrations.openclaw.model", str),
+    EnvBinding("KUMC_OPENCLAW_LITE_AGENT", "integrations.openclaw.lite_agent", str),
+    EnvBinding("KUMC_OPENCLAW_LITE_MODEL", "integrations.openclaw.lite_model", str),
+    EnvBinding("KUMC_OPENAI_API_KEY", "integrations.openai_api_key", str),
     EnvBinding("KUMC_GEMINI_API_KEY", "integrations.gemini_api_key", str),
     EnvBinding(
         "KUMC_GEMINI_REQUESTS_PER_MINUTE",

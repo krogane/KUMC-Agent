@@ -436,6 +436,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         enabled=config.integrations.openclaw.enabled,
         agent=config.integrations.openclaw.agent,
         model=config.integrations.openclaw.model,
+        lite_agent=config.integrations.openclaw.lite_agent,
+        lite_model=config.integrations.openclaw.lite_model,
+        openai_api_key=config.integrations.openai_api_key,
         config_dir=config.integrations.openclaw.config_dir,
     )
     chat_entry_usecase = ChatEntryUsecase(

@@ -338,6 +338,8 @@ class IntegrationOpenClawSection:
     enabled: bool
     agent: str
     model: str
+    lite_agent: str
+    lite_model: str
     config_dir: Path
 
 
@@ -367,6 +369,7 @@ class IntegrationSection:
     openclaw: IntegrationOpenClawSection
     drive: IntegrationDriveSection
     crafters_colony: IntegrationCraftersColonySection
+    openai_api_key: str
     gemini_api_key: str
     gemini_requests_per_minute: int
     gemini_embedding_requests_per_minute: int

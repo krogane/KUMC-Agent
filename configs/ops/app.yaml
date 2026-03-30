@@ -200,7 +200,9 @@ integrations:
   openclaw:
     enabled: true
     agent: "main"
-    model: "google/gemini-3-flash-preview"
+    model: "openai/gpt-5.4"
+    lite_agent: "lite"
+    lite_model: "google/gemini-3-flash-preview"
     config_dir: "configs/openclaw"
   drive:
     folder_id: ""
@@ -216,6 +218,7 @@ integrations:
     author_url: ""
     max_pages: 100
     max_articles: 0
+  openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000
   gemini_embedding_requests_per_minute: 100

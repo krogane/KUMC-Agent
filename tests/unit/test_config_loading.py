@@ -131,6 +131,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     author_url: ""
                     max_pages: 100
                     max_articles: 0
+                  openai_api_key: ""
                   gemini_api_key: ""
                   gemini_requests_per_minute: 60
                   gemini_embedding_requests_per_minute: 9
@@ -301,6 +302,9 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_OPENCLAW_ENABLED": "0",
                     "KUMC_OPENCLAW_AGENT": "ops-agent",
                     "KUMC_OPENCLAW_MODEL": "gemini/gemini-3-flash-preview",
+                    "KUMC_OPENCLAW_LITE_AGENT": "lite",
+                    "KUMC_OPENCLAW_LITE_MODEL": "google/gemini-3-flash-preview",
+                    "KUMC_OPENAI_API_KEY": "openai-key",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_GEMINI_REQUESTS_PER_MINUTE": "12",
                     "KUMC_GEMINI_EMBEDDING_REQUESTS_PER_MINUTE": "6",
@@ -358,6 +362,12 @@ class ConfigLoadingTests(unittest.TestCase):
                 config.integrations.openclaw.model,
                 "gemini/gemini-3-flash-preview",
             )
+            self.assertEqual(config.integrations.openclaw.lite_agent, "lite")
+            self.assertEqual(
+                config.integrations.openclaw.lite_model,
+                "google/gemini-3-flash-preview",
+            )
+            self.assertEqual(config.integrations.openai_api_key, "openai-key")
             self.assertEqual(
                 config.integrations.openclaw.config_dir,
                 base / "configs" / "openclaw",
@@ -449,6 +459,9 @@ class ConfigLoadingTests(unittest.TestCase):
                 config = load_runtime_config(base_dir=base)
         self.assertEqual(config.integrations.openclaw.agent, "main")
         self.assertEqual(config.integrations.openclaw.model, "")
+        self.assertEqual(config.integrations.openclaw.lite_agent, "")
+        self.assertEqual(config.integrations.openclaw.lite_model, "")
+        self.assertEqual(config.integrations.openai_api_key, "")
         self.assertEqual(
             config.integrations.openclaw.config_dir,
             base / "configs" / "openclaw",
