@@ -20,7 +20,6 @@ from kumc_agent.config.schema import (
     FunctionCallSection,
     RagGenerationProfileSection,
     RagGenerationSection,
-    RagIdeaGenerationSection,
     IndexingChunkingSection,
     IndexingRefreshSection,
     IndexingSection,
@@ -363,7 +362,6 @@ def _to_runtime_config(
     rag_generation_rag = rag_generation.get("rag", {})
     rag_generation_no_rag = rag_generation.get("no_rag", {})
     rag_generation_refusal = rag_generation.get("refusal", {})
-    rag_generation_idea = rag_generation.get("idea_generation", {})
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
@@ -450,20 +448,6 @@ def _to_runtime_config(
         default_prompt_name="answer_refusal",
         fallback=no_rag_generation_profile,
     )
-    idea_generation_profile = RagIdeaGenerationSection(
-        prompt_name=str(
-            rag_generation_idea.get(
-                "prompt_name",
-                "answer_idea",
-            )
-        ),
-        temperature=float(
-            rag_generation_idea.get(
-                "temperature",
-                rag_generation_profile.temperature,
-            )
-        ),
-    )
     routing_provider = str(
         rag_routing.get(
             "provider",
@@ -512,7 +496,6 @@ def _to_runtime_config(
         target_model=_build_routing_task("target_model"),
         use_additional_memory=_build_routing_task("use_additional_memory"),
         include_capabilities_info=_build_routing_task("include_capabilities_info"),
-        idea_generation=_build_routing_task("idea_generation"),
         needs_additional_query=_build_routing_task("needs_additional_query"),
         additional_queries=_build_routing_task("additional_queries"),
         material_names=_build_routing_task("material_names"),
@@ -678,7 +661,6 @@ def _to_runtime_config(
                 rag=rag_generation_profile,
                 no_rag=no_rag_generation_profile,
                 refusal=refusal_generation_profile,
-                idea_generation=idea_generation_profile,
             ),
             prompt_texts=RagPromptTextSection(
                 empty_context=str(

@@ -138,6 +138,7 @@ PYTHONPATH=src python -m kumc_agent.frontends.discord.app
 PYTHONPATH=src python -m kumc_agent.cli repl
 PYTHONPATH=src python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
 PYTHONPATH=src python -m kumc_agent.cli tool rag --query "KUMCの活動内容は？"
+PYTHONPATH=src python -m kumc_agent.cli tool rag --query "KUMCの活動内容は？" --query "次回の例会日程は？"
 PYTHONPATH=src python -m kumc_agent.cli index build
 PYTHONPATH=src python -m kumc_agent.cli index update
 PYTHONPATH=src python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl --ragas-batch-size 10

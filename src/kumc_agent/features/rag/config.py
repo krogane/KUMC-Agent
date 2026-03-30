@@ -12,12 +12,6 @@ class RagGenerationSettings:
 
 
 @dataclass(frozen=True)
-class RagIdeaGenerationSettings:
-    prompt_name: str
-    temperature: float
-
-
-@dataclass(frozen=True)
 class RagPromptTextSettings:
     empty_context: str = "(コンテキストなし)"
     empty_history: str = "(履歴なし)"
@@ -57,7 +51,6 @@ class RagConfig:
     rag_generation: RagGenerationSettings
     no_rag_generation: RagGenerationSettings
     refusal_generation: RagGenerationSettings
-    idea_generation: RagIdeaGenerationSettings
     material_search_max_names: int = 3
     parent_doc_enabled: bool = True
     parent_chunk_cap: int = 2

@@ -19,6 +19,26 @@ from kumc_agent.utils.logging import configure_logging, default_execution_log_pa
 logger = logging.getLogger(__name__)
 
 
+def _build_tool_rag_payload(answer: object) -> dict[str, object]:
+    metadata = dict(getattr(answer, "metadata", {}) or {})
+    metadata.pop("contexts", None)
+    return {
+        "answer": getattr(answer, "text", ""),
+        "route": getattr(answer, "route", ""),
+        "sources": [
+            {
+                "id": source.id,
+                "label": source.label,
+                "uri": source.uri,
+            }
+            for source in getattr(answer, "sources", [])
+        ],
+        "routing_decision": metadata.get("routing_decision"),
+        "fast_mode": bool(metadata.get("fast_mode", False)),
+        "metadata": metadata,
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kumc-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -31,7 +51,12 @@ def _build_parser() -> argparse.ArgumentParser:
     tool_parser = subparsers.add_parser("tool", help="Tool bridge commands")
     tool_sub = tool_parser.add_subparsers(dest="tool_command", required=True)
     tool_rag_parser = tool_sub.add_parser("rag", help="Run local RAG tool payload")
-    tool_rag_parser.add_argument("--query", required=True)
+    tool_rag_parser.add_argument(
+        "--query",
+        action="append",
+        required=True,
+        help="RAG query text. Specify multiple times to run multiple queries.",
+    )
     tool_rag_parser.add_argument("--question-author", default=None)
     tool_rag_parser.add_argument("--history-scope", default=None)
     tool_rag_parser.add_argument("--force-fast-mode", action="store_true")
@@ -100,37 +125,56 @@ def main() -> None:
         return
 
     if args.command == "tool" and args.tool_command == "rag":
-        logger.info("Running local RAG tool. query_length=%d", len(args.query or ""))
-        answer = context.chat_answer.execute(
-            ChatRequest(
-                query=args.query,
-                question_author=args.question_author,
-                history_scope=args.history_scope,
-                force_fast_mode=bool(args.force_fast_mode),
-                disable_history=True,
-                routing_history_override=[],
-                generation_history_override=[],
-                force_disable_additional_memory=True,
-            )
+        raw_queries = args.query if isinstance(args.query, list) else [args.query]
+        queries = [str(value or "") for value in raw_queries]
+        logger.info(
+            "Running local RAG tool. query_count=%d total_query_length=%d",
+            len(queries),
+            sum(len(query) for query in queries),
         )
-        tool_metadata = dict(answer.metadata)
-        tool_metadata.pop("contexts", None)
-        payload = {
-            "answer": answer.text,
-            "route": answer.route,
-            "sources": [
-                {
-                    "id": source.id,
-                    "label": source.label,
-                    "uri": source.uri,
-                }
-                for source in answer.sources
-            ],
-            "routing_decision": answer.metadata.get("routing_decision"),
-            "fast_mode": bool(answer.metadata.get("fast_mode", False)),
-            "metadata": tool_metadata,
-        }
-        print(json.dumps(payload, ensure_ascii=False))
+
+        if len(queries) == 1:
+            answer = context.chat_answer.execute(
+                ChatRequest(
+                    query=queries[0],
+                    question_author=args.question_author,
+                    history_scope=args.history_scope,
+                    force_fast_mode=bool(args.force_fast_mode),
+                    disable_history=True,
+                    routing_history_override=[],
+                    generation_history_override=[],
+                    force_disable_additional_memory=True,
+                )
+            )
+            payload = _build_tool_rag_payload(answer)
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            results: list[dict[str, object]] = []
+            for query in queries:
+                answer = context.chat_answer.execute(
+                    ChatRequest(
+                        query=query,
+                        question_author=args.question_author,
+                        history_scope=args.history_scope,
+                        force_fast_mode=bool(args.force_fast_mode),
+                        disable_history=True,
+                        routing_history_override=[],
+                        generation_history_override=[],
+                        force_disable_additional_memory=True,
+                    )
+                )
+                result = _build_tool_rag_payload(answer)
+                result["query"] = query
+                results.append(result)
+            print(
+                json.dumps(
+                    {
+                        "query_count": len(results),
+                        "results": results,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         logger.info("Local RAG tool completed")
         return
 

@@ -256,11 +256,7 @@ class WarmupUsecase:
             )
 
         task_names = (
-            "target_model",
             "use_additional_memory",
-            "include_capabilities_info",
-            "idea_generation",
-            "needs_additional_query",
             "additional_queries",
             "material_names",
             "recency_mode",

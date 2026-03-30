@@ -27,10 +27,10 @@ from kumc_agent.features.indexing.service import IndexingService
 from kumc_agent.features.rag.config import (
     RagConfig,
     RagGenerationSettings,
-    RagIdeaGenerationSettings,
     RagPromptTextSettings,
 )
 from kumc_agent.features.rag.components.generation import GenerationComponent
+from kumc_agent.features.rag.components.entry_routing import EntryQueryRouter
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
 from kumc_agent.features.rag.components.routing import QueryRouter, RoutingTaskConfig
 from kumc_agent.features.rag.service import RagService
@@ -281,14 +281,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                     config.rag.routing.tasks.include_capabilities_info.prompt_name
                 ),
             ),
-            "idea_generation": RoutingTaskConfig(
-                provider=config.rag.routing.tasks.idea_generation.provider,
-                gemini_model=config.rag.routing.tasks.idea_generation.gemini_model,
-                llama_model_path=(
-                    config.rag.routing.tasks.idea_generation.llama_model_path
-                ),
-                prompt_name=config.rag.routing.tasks.idea_generation.prompt_name,
-            ),
             "needs_additional_query": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.needs_additional_query.provider,
                 gemini_model=(
@@ -356,10 +348,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 temperature=config.rag.generation.refusal.temperature,
                 max_output_tokens=config.rag.generation.refusal.max_output_tokens,
                 prompt_name=config.rag.generation.refusal.prompt_name,
-            ),
-            idea_generation=RagIdeaGenerationSettings(
-                prompt_name=config.rag.generation.idea_generation.prompt_name,
-                temperature=config.rag.generation.idea_generation.temperature,
             ),
             material_search_max_names=config.rag.routing.material_search_max_names,
             parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
@@ -432,6 +420,21 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
+    entry_router = EntryQueryRouter(
+        provider=config.rag.routing.provider,
+        gemini_model=config.rag.routing.gemini_model,
+        llama_model_path=config.rag.routing.llama_model_path,
+        temperature=config.rag.routing.temperature,
+        max_new_tokens=config.rag.routing.max_new_tokens,
+        max_retries=config.rag.routing.max_retries,
+        llm_threads=config.providers.llm.threads,
+        llm_gpu_layers=config.providers.llm.gpu_layers,
+        llm_ctx_size=4096,
+        gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
+        prompt_name="routing_openclaw_gate",
+        log_enabled=config.rag.routing.log_enabled,
+    )
     openclaw_client = OpenClawClient(
         enabled=config.integrations.openclaw.enabled,
         agent=config.integrations.openclaw.agent,
@@ -444,6 +447,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     chat_entry_usecase = ChatEntryUsecase(
         chat_usecase=chat_answer_usecase,
         openclaw_client=openclaw_client,
+        entry_router=entry_router,
     )
     chat_route_usecase = ChatRouteUsecase(router=router)
     warmup_usecase = WarmupUsecase(

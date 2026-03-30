@@ -102,9 +102,7 @@ class RagService:
         if force_fast_mode:
             decision = replace(
                 decision,
-                target_model="rag",
                 material_names=[],
-                needs_additional_query=False,
                 additional_queries=[],
             )
 
@@ -123,64 +121,16 @@ class RagService:
                 history_scope=history_scope,
             )
 
-        if decision.target_model == "refusal":
-            refusal_generation = self._resolve_generation_settings(
-                target_model="refusal",
-                idea_generation=False,
-            )
-            answer = self._generation.generate_refusal(
-                query=cleaned_query,
-                history=generation_history,
-                provider=refusal_generation.provider,
-                temperature=refusal_generation.temperature,
-                max_output_tokens=refusal_generation.max_output_tokens,
-                refusal_prompt_name=refusal_generation.prompt_name,
-                extra_mode_instruction=extra_mode_instruction,
-            )
-            return self._finalize_answer(
-                query=cleaned_query,
-                answer=answer,
-                routing_decision=decision,
-                force_fast_mode=force_fast_mode,
-                history_scope=history_scope,
-                disable_history=disable_history,
-            )
-
-        if decision.target_model == "no_rag":
-            no_rag_generation = self._resolve_generation_settings(
-                target_model="no_rag",
-                idea_generation=decision.idea_generation,
-            )
-            answer = self._generation.generate_no_rag(
-                query=cleaned_query,
-                history=generation_history,
-                provider=no_rag_generation.provider,
-                include_capabilities_info=decision.include_capabilities_info,
-                temperature=no_rag_generation.temperature,
-                max_output_tokens=no_rag_generation.max_output_tokens,
-                answer_prompt_name=no_rag_generation.prompt_name,
-                extra_mode_instruction=extra_mode_instruction,
-                json_max_retries=self._config.answer_json_max_retries,
-            )
-            return self._finalize_answer(
-                query=cleaned_query,
-                answer=answer,
-                routing_decision=decision,
-                force_fast_mode=force_fast_mode,
-                history_scope=history_scope,
-                disable_history=disable_history,
-            )
-
         self._prepare_reranker_runtime(force_fast_mode=force_fast_mode)
         effective_recency_mode = self._resolve_recency_mode(decision.recency_mode)
-        if decision.target_model == "material_search":
+        material_route = bool(decision.material_names)
+        if material_route:
             chunks = self._retrieve_material_route_chunks(
                 query=cleaned_query,
                 decision=decision,
                 recency_mode=effective_recency_mode,
                 force_fast_mode=force_fast_mode,
             )
-            material_route = True
         else:
             chunks = self._retrieve_chunks(
                 query=cleaned_query,
@@ -189,7 +139,6 @@ class RagService:
                 recency_mode=effective_recency_mode,
                 excluded_source_types=None,
             )
-            material_route = False
 
         chunks = self._rank_and_select_chunks(
             query=cleaned_query,
@@ -201,7 +150,6 @@ class RagService:
         if not chunks:
             no_rag_generation = self._resolve_generation_settings(
                 target_model="no_rag",
-                idea_generation=decision.idea_generation,
             )
             answer = self._generation.generate_no_rag(
                 query=cleaned_query,
@@ -225,7 +173,6 @@ class RagService:
 
         rag_generation = self._resolve_generation_settings(
             target_model="rag",
-            idea_generation=decision.idea_generation,
         )
         answer = self._generation.generate_rag_answer(
             query=cleaned_query,
@@ -256,7 +203,6 @@ class RagService:
         self,
         *,
         target_model: str,
-        idea_generation: bool,
     ) -> RagGenerationSettings:
         normalized = (target_model or "").strip().lower()
         if normalized == "no_rag":
@@ -265,15 +211,6 @@ class RagService:
             base = self._config.refusal_generation
         else:
             base = self._config.rag_generation
-        if normalized != "refusal" and idea_generation:
-            prompt_name = (self._config.idea_generation.prompt_name or "").strip()
-            if not prompt_name:
-                prompt_name = base.prompt_name
-            return replace(
-                base,
-                prompt_name=prompt_name,
-                temperature=self._config.idea_generation.temperature,
-            )
         return base
 
     def _retrieve_chunks(
@@ -285,9 +222,7 @@ class RagService:
         recency_mode: str,
         excluded_source_types: set[str] | None,
     ) -> list[Chunk]:
-        if force_fast_mode or not (
-            decision.needs_additional_query and decision.additional_queries
-        ):
+        if force_fast_mode or not decision.additional_queries:
             return self._retrieve_single_query_chunks(
                 query=query,
                 recency_mode=recency_mode,
@@ -384,12 +319,7 @@ class RagService:
                 return dense_name_contexts
             return self._retrieve_chunks(
                 query=query,
-                decision=replace(
-                    decision,
-                    target_model="rag",
-                    needs_additional_query=False,
-                    additional_queries=[],
-                ),
+                decision=decision,
                 force_fast_mode=force_fast_mode,
                 recency_mode=recency_mode,
                 excluded_source_types=excluded_source_types,
@@ -424,12 +354,7 @@ class RagService:
                 return dense_name_contexts
             return self._retrieve_chunks(
                 query=query,
-                decision=replace(
-                    decision,
-                    target_model="rag",
-                    needs_additional_query=False,
-                    additional_queries=[],
-                ),
+                decision=decision,
                 force_fast_mode=force_fast_mode,
                 recency_mode=recency_mode,
                 excluded_source_types=excluded_source_types,
@@ -453,12 +378,7 @@ class RagService:
             return dense_name_contexts
         return self._retrieve_chunks(
             query=query,
-            decision=replace(
-                decision,
-                target_model="rag",
-                needs_additional_query=False,
-                additional_queries=[],
-            ),
+            decision=decision,
             force_fast_mode=force_fast_mode,
             recency_mode=recency_mode,
             excluded_source_types=excluded_source_types,
@@ -1530,13 +1450,10 @@ class RagService:
             text = f"{self._config.fast_model_notice}\n\n{text}"
         metadata = dict(answer.metadata)
         metadata["routing_decision"] = {
-            "target_model": routing_decision.target_model,
             "recency_mode": routing_decision.recency_mode,
             "material_names": list(routing_decision.material_names),
-            "idea_generation": routing_decision.idea_generation,
             "include_capabilities_info": routing_decision.include_capabilities_info,
             "use_additional_memory": routing_decision.use_additional_memory,
-            "needs_additional_query": routing_decision.needs_additional_query,
             "additional_queries": list(routing_decision.additional_queries),
         }
         metadata["fast_mode"] = force_fast_mode

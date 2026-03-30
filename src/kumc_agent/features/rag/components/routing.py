@@ -20,10 +20,7 @@ logger = logging.getLogger(__name__)
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
 
 _ROUTING_TASK_NAMES = (
-    "target_model",
     "use_additional_memory",
-    "idea_generation",
-    "needs_additional_query",
     "additional_queries",
     "material_names",
     "recency_mode",
@@ -31,11 +28,8 @@ _ROUTING_TASK_NAMES = (
 
 _ROUTING_BOOL_TASKS = {
     "use_additional_memory",
-    "idea_generation",
-    "needs_additional_query",
 }
 
-_TARGET_MODEL_VALUES = {"rag", "material_search"}
 _RECENCY_VALUES = {"off", "soft", "hard"}
 _RETRYABLE_GENERATION_STATUS_CODES = {429, 500, 502, 503, 504}
 _RETRYABLE_GENERATION_ERROR_KEYWORDS = {
@@ -53,21 +47,15 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
     "あなたは、厳格なルーティング判定エンジンです。\n"
     "与えられる質問は、京大マインクラフト同好会KUMCという大学サークルのアシスタントボットに向けられた質問です。サークル情報も参考に、以下の各フィールドでルーティングを行ってください。JSONのみを返してください。Markdownや説明文は出力しないでください。\n\n"
     "## フィールド一覧:\n"
-    "- target_model: rag | material_search\n"
     "- material_names: string[] (max {material_search_max_names})\n"
-    "- idea_generation: bool\n"
     "- recency_mode: off | soft | hard\n"
     "- use_additional_memory: bool\n"
-    "- needs_additional_query: bool\n"
     "- additional_queries: string[] (max 3)\n\n"
     "## 各フィールド・選択肢の説明:\n"
-    "- target_model(rag): 質問の回答にRAG検索が必要な場合は target_model=rag とする。\n"
-    "- target_model(material_search): 質問が特定の資料名に言及している場合は target_model=material_search とし、material_names に資料名を最大 {material_search_max_names} 件入れる。資料名を抽出できない場合は material_names=[] のまま返す。\n"
-    "- idea_generation: 質問がアイデア（案や計画を含む）の作成を要求するものである場合は idea_generation=true とする。\n"
+    "- material_names: 質問が特定の資料名に言及している場合は material_names に資料名を最大 {material_search_max_names} 件入れる。資料名を抽出できない場合は material_names=[] のまま返す。material_names が空ならRAG、空でなければ material_search とみなされる。\n"
     "- recency_mode: 最新情報の重視度。通常は soft。最新の情報が重要な質問は hard。時系列を考慮しなくても良い・過去の資料・出来事について質問している場合は off。\n"
     "- use_additional_memory: 回答に追加のチャット履歴があると望ましい場合（例: 指示語が含まれる・文脈が曖昧・過去のチャットに関連する）は true とする。\n"
-    "- needs_additional_query: 「質問文にRAG検索に必要最低限の語句が全く含まれていない場合」または「質問への回答に多段階検索が必須な場合」にのみ true とする。\n"
-    "- additional_queries: needs_additional_query=true の場合のみ出力する。重複を避けた追加クエリを1件、必要最小限の場合にのみ2件まで出力する。needs_additional_query=false の場合は [] とする。\n\n"
+    "- additional_queries: RAG検索に有用な重複しない追加クエリを必要最小限で返す。追加不要な場合は [] とする。\n\n"
     "## サークル情報\n"
     "- 主な活動内容: 週1回（土曜20:00〜）のオンライン例会・メンバー同士のマルチプレイ（サバイバルやHypixelなど）・マップ制作（京大RPGやミニゲーム）・Minecraftサーバー運営・NFなどのイベント出展・新歓の開催・外部団体とのコラボ（コラボ先はStardy・エンドラRTA軍団・北田さんなど）・対面でのご飯会・プログラミング関連（AtCoderやハッカソンへの参加）\n\n"
     "## 現在の日付\n"
@@ -194,13 +182,10 @@ class QueryRouter:
     @staticmethod
     def _default_decision() -> RoutingDecision:
         return RoutingDecision(
-            target_model="rag",
             recency_mode="off",
             material_names=[],
-            idea_generation=False,
             include_capabilities_info=False,
             use_additional_memory=False,
-            needs_additional_query=False,
             additional_queries=[],
         )
 
@@ -212,76 +197,28 @@ class QueryRouter:
         history: Sequence[ChatHistoryEntry] | None,
     ) -> RoutingDecision:
         phase_one = self._run_tasks_parallel(
-            task_names=("target_model", "use_additional_memory"),
+            task_names=_ROUTING_TASK_NAMES,
             query=query,
             question_author=question_author,
             history=history,
             context={},
         )
-        target_model = str(phase_one.get("target_model") or "rag").strip().lower()
-        if target_model not in _TARGET_MODEL_VALUES:
-            target_model = "rag"
         use_additional_memory = bool(phase_one.get("use_additional_memory", False))
-
-        phase_two_names: list[str] = [
-            "idea_generation",
-            "needs_additional_query",
-        ]
-        if target_model == "material_search":
-            phase_two_names.append("material_names")
-        if target_model in {"rag", "material_search"}:
-            phase_two_names.append("recency_mode")
-
-        phase_two = self._run_tasks_parallel(
-            task_names=tuple(phase_two_names),
-            query=query,
-            question_author=question_author,
-            history=history,
-            context={"target_model": target_model},
-        )
-
-        needs_additional_query = bool(phase_two.get("needs_additional_query", False))
-
-        additional_queries: list[str] = []
-        if needs_additional_query:
-            additional_queries = self._run_task_with_retries(
-                task_name="additional_queries",
-                query=query,
-                question_author=question_author,
-                history=history,
-                context={
-                    "target_model": target_model,
-                    "needs_additional_query": True,
-                },
-            )
-            if not additional_queries:
-                needs_additional_query = False
-
-        if target_model == "material_search":
-            material_names = phase_two.get("material_names")
-            if not isinstance(material_names, list):
-                material_names = []
-            recency_mode = str(phase_two.get("recency_mode") or "off").strip().lower()
-            if recency_mode not in _RECENCY_VALUES:
-                recency_mode = "off"
-            return RoutingDecision(
-                target_model="material_search",
-                recency_mode=recency_mode,
-                material_names=material_names,
-                use_additional_memory=use_additional_memory,
-            )
-
-        recency_mode = str(phase_two.get("recency_mode") or "off").strip().lower()
+        recency_mode = str(phase_one.get("recency_mode") or "off").strip().lower()
         if recency_mode not in _RECENCY_VALUES:
             recency_mode = "off"
+        material_names = phase_one.get("material_names")
+        if not isinstance(material_names, list):
+            material_names = []
+        additional_queries = phase_one.get("additional_queries")
+        if not isinstance(additional_queries, list):
+            additional_queries = []
 
         return RoutingDecision(
-            target_model="rag",
             recency_mode=recency_mode,
-            idea_generation=bool(phase_two.get("idea_generation", False)),
+            material_names=material_names,
             use_additional_memory=use_additional_memory,
-            needs_additional_query=needs_additional_query,
-            additional_queries=additional_queries if needs_additional_query else [],
+            additional_queries=additional_queries,
         )
 
     def _run_tasks_parallel(
@@ -730,8 +667,6 @@ class QueryRouter:
         return content.split(":", 1)[0].strip()
 
     def _select_field_line(self, task_name: str, field_lines: Sequence[str]) -> str:
-        if task_name == "target_model":
-            return "- target_model: rag | material_search"
         target_key = task_name
         for line in field_lines:
             if self._bullet_key(line) == target_key:
@@ -754,19 +689,6 @@ class QueryRouter:
             key = self._bullet_key(line)
             if not key:
                 continue
-            if task_name == "target_model" and key in {
-                "target_model",
-                "target_model(rag)",
-                "target_model(material_search)",
-            }:
-                selected.append(line)
-                continue
-            if task_name == "material_names" and key in {
-                "material_names",
-                "target_model(material_search)",
-            }:
-                selected.append(line)
-                continue
             if key == task_name:
                 selected.append(line)
 
@@ -774,17 +696,14 @@ class QueryRouter:
             return selected
 
         fallback = {
-            "target_model": [
-                "- target_model: rag / material_search から1つ選択する。"
-            ],
             "material_names": [
-                "- material_names: material_searchに必要な資料名を重複なく抽出する。"
+                "- material_names: material_searchに必要な資料名を重複なく抽出し、空配列ならRAGとして扱われる。"
             ],
             "recency_mode": [
                 "- recency_mode: off / soft / hard から1つ選択する。"
             ],
             "additional_queries": [
-                "- additional_queries: 重複しない追加クエリを必要最小限で返す。"
+                "- additional_queries: 重複しない追加クエリを必要最小限で返し、不要なら空配列を返す。"
             ],
         }
         if task_name in fallback:
@@ -855,12 +774,6 @@ class QueryRouter:
         if task_name in _ROUTING_BOOL_TASKS:
             return self._coerce_bool(value)
 
-        if task_name == "target_model":
-            target_model = str(value or "").strip().lower()
-            if target_model in _TARGET_MODEL_VALUES:
-                return target_model
-            return None
-
         if task_name == "recency_mode":
             recency_mode = str(value or "").strip().lower()
             if recency_mode in _RECENCY_VALUES:
@@ -881,8 +794,6 @@ class QueryRouter:
     def _default_task_value(self, task_name: str) -> object:
         if task_name in _ROUTING_BOOL_TASKS:
             return False
-        if task_name == "target_model":
-            return "rag"
         if task_name == "recency_mode":
             return "off"
         return []
@@ -891,11 +802,6 @@ class QueryRouter:
         property_schema: dict[str, object]
         if task_name in _ROUTING_BOOL_TASKS:
             property_schema = {"type": "boolean"}
-        elif task_name == "target_model":
-            property_schema = {
-                "type": "string",
-                "enum": ["rag", "material_search"],
-            }
         elif task_name == "recency_mode":
             property_schema = {
                 "type": "string",

@@ -443,16 +443,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding(
-        "KUMC_RAG_IDEA_PROMPT_NAME",
-        "rag.generation.idea_generation.prompt_name",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_TEMPERATURE",
-        "rag.generation.idea_generation.temperature",
-        _to_float,
-    ),
-    EnvBinding(
         "KUMC_INDEXING_FIRST_RECURSIVE_CHUNK_SIZE",
         "indexing.chunking.first_recursive_chunk_size",
         _to_int,

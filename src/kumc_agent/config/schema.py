@@ -143,7 +143,6 @@ class RagRoutingTasksSection:
     target_model: RagRoutingTaskSection
     use_additional_memory: RagRoutingTaskSection
     include_capabilities_info: RagRoutingTaskSection
-    idea_generation: RagRoutingTaskSection
     needs_additional_query: RagRoutingTaskSection
     additional_queries: RagRoutingTaskSection
     material_names: RagRoutingTaskSection
@@ -188,17 +187,10 @@ class RagGenerationProfileSection:
 
 
 @dataclass(frozen=True)
-class RagIdeaGenerationSection:
-    prompt_name: str
-    temperature: float
-
-
-@dataclass(frozen=True)
 class RagGenerationSection:
     rag: RagGenerationProfileSection
     no_rag: RagGenerationProfileSection
     refusal: RagGenerationProfileSection
-    idea_generation: RagIdeaGenerationSection
 
 
 @dataclass(frozen=True)

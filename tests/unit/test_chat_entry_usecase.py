@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from kumc_agent.domain.models.answer import Answer
+from kumc_agent.domain.models.entry_routing import EntryRoutingDecision
 from kumc_agent.domain.models.source import Source
 from kumc_agent.infra.openclaw.client import OpenClawFailure, OpenClawResponse, OpenClawTurnResult
 from kumc_agent.usecases.chat.entry import ChatEntryRequest, ChatEntryUsecase
@@ -109,12 +110,65 @@ class _OpenClawWithEmbeddedSourcesClient:
         )
 
 
+class _OpenClawUnexpectedCallClient:
+    enabled = True
+
+    def run_turn(self, *, query: str, session_id: str, user_context):  # noqa: ANN001
+        _ = query
+        _ = session_id
+        _ = user_context
+        raise AssertionError("OpenClaw should not be called")
+
+
+class _EntryRouterDirectRag:
+    model_label = "gemini:gemini-test"
+
+    def decide(self, query: str) -> EntryRoutingDecision:
+        _ = query
+        return EntryRoutingDecision(
+            route="direct_rag",
+            reason="サークル関連の事実照会",
+        )
+
+
+class _EntryRouterOpenClaw:
+    model_label = "gemini:gemini-test"
+
+    def decide(self, query: str) -> EntryRoutingDecision:
+        _ = query
+        return EntryRoutingDecision(
+            route="openclaw",
+            reason="複雑質問",
+        )
+
+
+class _EntryRouterRaises:
+    model_label = "gemini:gemini-test"
+
+    def decide(self, query: str) -> EntryRoutingDecision:
+        _ = query
+        raise RuntimeError("classifier unavailable")
+
+
+class _EntryRouterFallbackOutput:
+    model_label = "gemini:gemini-test"
+
+    def decide(self, query: str) -> EntryRoutingDecision:
+        _ = query
+        return EntryRoutingDecision(
+            route="openclaw",
+            reason="fallback:classification_failed",
+            payload={"raw": '{"route":"invalid"}'},
+        )
+
+
 class ChatEntryUsecaseTests(unittest.TestCase):
     def test_openclaw_success_is_returned_without_local_fallback(self) -> None:
         fake_chat = _FakeChatUsecase()
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawSuccessClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         answer = usecase.execute(
@@ -135,6 +189,10 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         if isinstance(payload, dict):
             self.assertNotIn("route", payload)
             self.assertNotIn("routing_decision", payload)
+        self.assertEqual(answer.metadata.get("entry_route"), "openclaw")
+        self.assertEqual(answer.metadata.get("entry_route_reason"), "複雑質問")
+        self.assertEqual(answer.metadata.get("entry_route_model"), "gemini:gemini-test")
+        self.assertEqual(answer.metadata.get("entry_route_fallback"), False)
         self.assertEqual(fake_chat.requests, [])
 
     def test_openclaw_failure_falls_back_and_disables_local_history(self) -> None:
@@ -142,6 +200,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawFailureClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         answer = usecase.execute(ChatEntryRequest(query="質問"))
@@ -151,6 +210,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         request = fake_chat.requests[0]
         self.assertTrue(request.disable_history)
         self.assertTrue(answer.metadata.get("openclaw_fallback"))
+        self.assertEqual(answer.metadata.get("entry_route"), "openclaw")
 
     def test_openclaw_uses_valid_default_session_id_when_history_scope_missing(self) -> None:
         fake_chat = _FakeChatUsecase()
@@ -158,6 +218,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=openclaw,  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         _ = usecase.execute(ChatEntryRequest(query="質問", history_scope=None))
@@ -170,6 +231,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawDisabledClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         _ = usecase.execute(ChatEntryRequest(query="質問"))
@@ -182,6 +244,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawFastmodeAliasClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         answer = usecase.execute(ChatEntryRequest(query="質問"))
@@ -196,6 +259,7 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawSuccessClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         answer = usecase.execute(ChatEntryRequest(query="質問", append_sources_to_response=False))
@@ -208,11 +272,67 @@ class ChatEntryUsecaseTests(unittest.TestCase):
         usecase = ChatEntryUsecase(
             chat_usecase=fake_chat,
             openclaw_client=_OpenClawWithEmbeddedSourcesClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterOpenClaw(),  # type: ignore[arg-type]
         )
 
         answer = usecase.execute(ChatEntryRequest(query="質問"))
 
         self.assertEqual(answer.text.count("主な情報源:"), 1)
+
+    def test_direct_rag_route_bypasses_openclaw(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawUnexpectedCallClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterDirectRag(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="次回の例会はいつ？"))
+
+        self.assertEqual(answer.text, "fallback")
+        self.assertEqual(len(fake_chat.requests), 1)
+        self.assertFalse(fake_chat.requests[0].disable_history)
+        self.assertEqual(answer.metadata.get("entry_route"), "direct_rag")
+        self.assertEqual(answer.metadata.get("entry_route_reason"), "サークル関連の事実照会")
+        self.assertEqual(answer.metadata.get("entry_route_model"), "gemini:gemini-test")
+        self.assertEqual(answer.metadata.get("entry_route_fallback"), False)
+
+    def test_classifier_failure_falls_back_to_openclaw_route(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawSuccessClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterRaises(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="質問"))
+
+        self.assertEqual(answer.route, "openclaw")
+        self.assertEqual(answer.metadata.get("entry_route"), "openclaw")
+        self.assertEqual(answer.metadata.get("entry_route_reason"), "fallback:classifier_error")
+        self.assertEqual(answer.metadata.get("entry_route_fallback"), True)
+        self.assertEqual(fake_chat.requests, [])
+
+    def test_classifier_fallback_output_sets_entry_route_fallback_true(self) -> None:
+        fake_chat = _FakeChatUsecase()
+        usecase = ChatEntryUsecase(
+            chat_usecase=fake_chat,
+            openclaw_client=_OpenClawSuccessClient(),  # type: ignore[arg-type]
+            entry_router=_EntryRouterFallbackOutput(),  # type: ignore[arg-type]
+        )
+
+        answer = usecase.execute(ChatEntryRequest(query="質問"))
+
+        self.assertEqual(answer.route, "openclaw")
+        self.assertEqual(answer.metadata.get("entry_route"), "openclaw")
+        self.assertEqual(
+            answer.metadata.get("entry_route_reason"), "fallback:classification_failed"
+        )
+        self.assertEqual(answer.metadata.get("entry_route_fallback"), True)
+        payload = answer.metadata.get("entry_route_payload")
+        self.assertIsInstance(payload, dict)
+        if isinstance(payload, dict):
+            self.assertIn("raw", payload)
 
 
 if __name__ == "__main__":
