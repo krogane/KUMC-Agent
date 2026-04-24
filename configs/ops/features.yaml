@@ -13,6 +13,7 @@ features:
     hatenablog: true
     crafters_colony: true
     x: true
+    notion: false
   retrieval:
     top_k: 8
     dense_top_k: 15

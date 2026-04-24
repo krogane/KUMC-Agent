@@ -11,6 +11,7 @@ BASE_SOURCE_DIRS = (
     "x",
     "hatenablog",
     "crafters_colony",
+    "notion",
 )
 SECOND_REC_SOURCE_DIRS = (
     "docs",
@@ -20,6 +21,7 @@ SECOND_REC_SOURCE_DIRS = (
     "vc",
     "hatenablog",
     "crafters_colony",
+    "notion",
 )
 
 
@@ -100,7 +102,7 @@ def sparse_chunk_dirs(config: AppConfig) -> list[Path]:
                 dirs.append(vc_second)
 
     if config.prop_enabled and config.second_rec_enabled:
-        for name in ("docs", "sheets", "hatenablog", "crafters_colony"):
+        for name in ("docs", "sheets", "hatenablog", "crafters_colony", "notion"):
             candidate = config.prop_chunk_dir / name
             if candidate.exists():
                 dirs.append(candidate)

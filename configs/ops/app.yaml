@@ -210,6 +210,9 @@ integrations:
     author_url: ""
     max_pages: 100
     max_articles: 0
+  notion:
+    api_token: ""
+    database_ids: []
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000

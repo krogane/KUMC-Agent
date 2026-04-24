@@ -114,6 +114,7 @@ class SourcesSection:
     hatenablog: bool
     crafters_colony: bool
     x: bool
+    notion: bool
 
 
 @dataclass(frozen=True)
@@ -356,11 +357,18 @@ class IntegrationCraftersColonySection:
 
 
 @dataclass(frozen=True)
+class IntegrationNotionSection:
+    api_token: str
+    database_ids: list[str]
+
+
+@dataclass(frozen=True)
 class IntegrationSection:
     discord: IntegrationDiscordSection
     openclaw: IntegrationOpenClawSection
     drive: IntegrationDriveSection
     crafters_colony: IntegrationCraftersColonySection
+    notion: IntegrationNotionSection
     openai_api_key: str
     gemini_api_key: str
     gemini_requests_per_minute: int

@@ -37,6 +37,7 @@ _METADATA_KEYS = (
     "source_file_name",
     "source_type",
     "source_date",
+    "updated_at",
     "meeting_date",
     "meeting_label",
     "guild_id",
@@ -57,6 +58,12 @@ _METADATA_KEYS = (
     "crafters_colony_title",
     "crafters_colony_published_at",
     "crafters_colony_article_url",
+    "notion_database_id",
+    "notion_page_id",
+    "notion_title",
+    "notion_url",
+    "notion_created_time",
+    "notion_last_edited_time",
     "x_author_handle",
 )
 
@@ -95,6 +102,14 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
         "crafters_colony_title",
         "crafters_colony_published_at",
         "crafters_colony_article_url",
+        "source_date",
+        "updated_at",
+        "notion_database_id",
+        "notion_page_id",
+        "notion_title",
+        "notion_url",
+        "notion_created_time",
+        "notion_last_edited_time",
     ):
         value = data.get(key)
         if isinstance(value, str) and value:
@@ -119,7 +134,8 @@ def _build_base_metadata(
     metadata: dict[str, object] = {
         "source_file_name": source_file_name,
         "source_type": source_type,
-        "source_date": SOURCE_DATE_UNKNOWN,
+        "source_date": drive_metadata.get("source_date", SOURCE_DATE_UNKNOWN),
+        "updated_at": drive_metadata.get("updated_at", ""),
         "meeting_date": "",
         "meeting_label": "",
         "drive_file_name": drive_file_name,
@@ -138,6 +154,12 @@ def _build_base_metadata(
             "crafters_colony_article_url",
             "",
         ),
+        "notion_database_id": drive_metadata.get("notion_database_id", ""),
+        "notion_page_id": drive_metadata.get("notion_page_id", ""),
+        "notion_title": drive_metadata.get("notion_title", ""),
+        "notion_url": drive_metadata.get("notion_url", ""),
+        "notion_created_time": drive_metadata.get("notion_created_time", ""),
+        "notion_last_edited_time": drive_metadata.get("notion_last_edited_time", ""),
     }
     metadata["source_date"] = infer_source_date(metadata=metadata)
     return metadata

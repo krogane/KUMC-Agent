@@ -145,6 +145,22 @@ def infer_source_date(
             str(meta.get("crafters_colony_published_at") or "")
         )
 
+    if source_type == "notion":
+        notion_last_edited = normalize_source_date(
+            str(meta.get("notion_last_edited_time") or "")
+        )
+        if notion_last_edited is not None:
+            return notion_last_edited
+        notion_created = normalize_source_date(
+            str(meta.get("notion_created_time") or "")
+        )
+        if notion_created is not None:
+            return notion_created
+        updated_at = normalize_source_date(str(meta.get("updated_at") or ""))
+        if updated_at is not None:
+            return updated_at
+        return SOURCE_DATE_UNKNOWN
+
     if source_type == "vc_transcript":
         meeting_date = normalize_source_date(str(meta.get("meeting_date") or ""))
         if meeting_date is not None:

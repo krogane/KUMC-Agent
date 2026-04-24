@@ -741,6 +741,9 @@ class GenerationComponent:
         ref = _crafters_colony_url_from_metadata(metadata)
         if ref:
             return ref
+        ref = _notion_url_from_metadata(metadata)
+        if ref:
+            return ref
         ref = _drive_url_from_metadata(metadata)
         if ref:
             return ref
@@ -1122,6 +1125,15 @@ def _crafters_colony_url_from_metadata(
     if not metadata:
         return None
     url = str(metadata.get("crafters_colony_article_url") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    return url
+
+
+def _notion_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
+    if not metadata:
+        return None
+    url = str(metadata.get("notion_url") or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return None
     return url

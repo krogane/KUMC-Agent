@@ -27,6 +27,8 @@ _RECENCY_KEYS = (
     "hatenablog_updated_at",
     "hatenablog_created_at",
     "crafters_colony_published_at",
+    "notion_last_edited_time",
+    "notion_created_time",
     "first_message_date",
     "source_date",
     "created_at",

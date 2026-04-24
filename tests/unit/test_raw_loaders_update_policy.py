@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
+from kumc_agent.infra.loaders.notion import NotionLoader
 from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.loaders.x_impl import XConvertStats
 
@@ -94,6 +95,26 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
                 loaded = loader.load()
 
             self.assertEqual(9, loaded)
+            mocked.assert_called_once()
+            kwargs = mocked.call_args.kwargs
+            self.assertTrue(kwargs["skip_existing"])
+            self.assertTrue(kwargs["update_existing"])
+            self.assertTrue(kwargs["sync_deleted"])
+
+    def test_notion_loader_enables_up_to_date_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            loader = NotionLoader(
+                api_token="token",
+                database_ids=["db-1"],
+                raw_dir=Path(td),
+            )
+            with patch(
+                "kumc_agent.infra.loaders.notion_impl.download_notion_database_pages",
+                return_value=6,
+            ) as mocked:
+                loaded = loader.load()
+
+            self.assertEqual(6, loaded)
             mocked.assert_called_once()
             kwargs = mocked.call_args.kwargs
             self.assertTrue(kwargs["skip_existing"])

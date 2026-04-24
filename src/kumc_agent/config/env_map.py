@@ -147,6 +147,7 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "integrations.crafters_colony.max_articles",
         _to_int,
     ),
+    EnvBinding("KUMC_NOTION_API_TOKEN", "integrations.notion.api_token", str),
     EnvBinding("KUMC_LLM_PROVIDER", "providers.llm.provider", str),
     EnvBinding("KUMC_LLM_GEMINI_MODEL", "providers.llm.gemini_model", str),
     EnvBinding("KUMC_LLM_LLAMA_MODEL_PATH", "providers.llm.llama_model_path", str),

@@ -17,6 +17,7 @@ from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
+from kumc_agent.infra.loaders.notion import NotionLoader
 from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
@@ -409,6 +410,15 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         max_articles=config.integrations.crafters_colony.max_articles,
     )
     x_loader = XPostsLoader(raw_dir=config.app.raw_dir)
+    notion_loader = (
+        NotionLoader(
+            api_token=config.integrations.notion.api_token,
+            database_ids=config.integrations.notion.database_ids,
+            raw_dir=config.app.raw_dir,
+        )
+        if config.features.sources.notion
+        else None
+    )
 
     build_index_usecase = BuildIndexUsecase(
         indexing_service=indexing_service,
@@ -417,6 +427,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         hatenablog_loader=hatena_loader,
         crafters_colony_loader=crafters_loader,
         x_loader=x_loader,
+        notion_loader=notion_loader,
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)

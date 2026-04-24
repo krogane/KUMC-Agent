@@ -27,6 +27,7 @@ from kumc_agent.config.schema import (
     IntegrationCraftersColonySection,
     IntegrationDiscordSection,
     IntegrationDriveSection,
+    IntegrationNotionSection,
     IntegrationOpenClawSection,
     IntegrationSection,
     LLMSection,
@@ -366,6 +367,12 @@ def _to_runtime_config(
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
     ops_ragas_metrics = ops.get("ragas_metrics", {})
+    notion = integrations.get("notion", {})
+    if not isinstance(notion, dict):
+        notion = {}
+    notion_database_ids_raw = notion.get("database_ids", [])
+    if not isinstance(notion_database_ids_raw, list):
+        notion_database_ids_raw = []
 
     special_channel_names_raw = rag_history.get("special_channel_names", ["kumc-agent"])
     if isinstance(special_channel_names_raw, str):
@@ -576,6 +583,7 @@ def _to_runtime_config(
                 hatenablog=bool(features["sources"]["hatenablog"]),
                 crafters_colony=bool(features["sources"]["crafters_colony"]),
                 x=bool(features["sources"].get("x", True)),
+                notion=bool(features["sources"].get("notion", False)),
             ),
             retrieval=RetrievalSection(
                 top_k=int(features["retrieval"]["top_k"]),
@@ -1139,6 +1147,14 @@ def _to_runtime_config(
                 max_articles=int(
                     integrations.get("crafters_colony", {}).get("max_articles", 0)
                 ),
+            ),
+            notion=IntegrationNotionSection(
+                api_token=str(notion.get("api_token", "")),
+                database_ids=[
+                    str(value).strip()
+                    for value in notion_database_ids_raw
+                    if str(value).strip()
+                ],
             ),
             openai_api_key=str(integrations.get("openai_api_key", "")),
             gemini_api_key=str(integrations.get("gemini_api_key", "")),

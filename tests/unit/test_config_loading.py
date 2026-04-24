@@ -131,6 +131,9 @@ class ConfigLoadingTests(unittest.TestCase):
                     author_url: ""
                     max_pages: 100
                     max_articles: 0
+                  notion:
+                    api_token: ""
+                    database_ids: ["db-primary", "db-secondary"]
                   openai_api_key: ""
                   gemini_api_key: ""
                   gemini_requests_per_minute: 60
@@ -198,6 +201,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     discord: false
                     hatenablog: false
                     crafters_colony: false
+                    notion: false
                   retrieval:
                     top_k: 5
                     dense_top_k: 5
@@ -314,6 +318,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_GOOGLE_APPLICATION_CREDENTIALS": ".secrets/google-sa.json",
+                    "KUMC_NOTION_API_TOKEN": "secret-notion-token",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
                     "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
@@ -384,6 +389,14 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(
                 config.integrations.drive.google_application_credentials,
                 str(base / ".secrets" / "google-sa.json"),
+            )
+            self.assertEqual(
+                config.integrations.notion.api_token,
+                "secret-notion-token",
+            )
+            self.assertEqual(
+                config.integrations.notion.database_ids,
+                ["db-primary", "db-secondary"],
             )
             self.assertEqual(config.integrations.drive.download_max_retries, 4)
             self.assertEqual(

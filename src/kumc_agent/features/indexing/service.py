@@ -69,6 +69,7 @@ class IndexingService:
         self._raw_vc_dir = self._raw_dir / "vc"
         self._raw_hatenablog_dir = self._raw_dir / "hatenablog"
         self._raw_crafters_colony_dir = self._raw_dir / "crafters_colony"
+        self._raw_notion_dir = self._raw_dir / "notion"
 
         self._first_rec_docs_dir = self._first_rec_dir / "docs"
         self._first_rec_sheets_dir = self._first_rec_dir / "sheets"
@@ -76,6 +77,7 @@ class IndexingService:
         self._first_rec_x_dir = self._first_rec_dir / "x"
         self._first_rec_hatenablog_dir = self._first_rec_dir / "hatenablog"
         self._first_rec_crafters_colony_dir = self._first_rec_dir / "crafters_colony"
+        self._first_rec_notion_dir = self._first_rec_dir / "notion"
 
         self._second_rec_docs_dir = self._second_rec_dir / "docs"
         self._second_rec_sheets_dir = self._second_rec_dir / "sheets"
@@ -84,6 +86,7 @@ class IndexingService:
         self._second_rec_vc_dir = self._second_rec_dir / "vc"
         self._second_rec_hatenablog_dir = self._second_rec_dir / "hatenablog"
         self._second_rec_crafters_colony_dir = self._second_rec_dir / "crafters_colony"
+        self._second_rec_notion_dir = self._second_rec_dir / "notion"
 
         self._sparse_second_rec_docs_dir = self._sparse_second_rec_dir / "docs"
         self._sparse_second_rec_sheets_dir = self._sparse_second_rec_dir / "sheets"
@@ -94,6 +97,7 @@ class IndexingService:
         self._sparse_second_rec_crafters_colony_dir = (
             self._sparse_second_rec_dir / "crafters_colony"
         )
+        self._sparse_second_rec_notion_dir = self._sparse_second_rec_dir / "notion"
 
         self._summary_docs_dir = self._summary_dir / "docs"
         self._summary_sheets_dir = self._summary_dir / "sheets"
@@ -101,11 +105,13 @@ class IndexingService:
         self._summary_x_dir = self._summary_dir / "x"
         self._summary_hatenablog_dir = self._summary_dir / "hatenablog"
         self._summary_crafters_colony_dir = self._summary_dir / "crafters_colony"
+        self._summary_notion_dir = self._summary_dir / "notion"
 
         self._prop_docs_dir = self._prop_dir / "docs"
         self._prop_sheets_dir = self._prop_dir / "sheets"
         self._prop_hatenablog_dir = self._prop_dir / "hatenablog"
         self._prop_crafters_colony_dir = self._prop_dir / "crafters_colony"
+        self._prop_notion_dir = self._prop_dir / "notion"
 
     def build(
         self,
@@ -200,6 +206,7 @@ class IndexingService:
             self._raw_vc_dir,
             self._raw_hatenablog_dir,
             self._raw_crafters_colony_dir,
+            self._raw_notion_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -467,6 +474,19 @@ class IndexingService:
                 update_existing=refresh.update_first_recursive_chunk_data,
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_notion_dir,
+                chunk_dir=self._first_rec_notion_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                source_type="notion",
+                stage="first_recursive",
+                file_extensions=(".md",),
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
 
         if (
@@ -545,6 +565,18 @@ class IndexingService:
                     update_existing=refresh.update_second_recursive_chunk_data,
                     sync_deleted=refresh.update_second_recursive_chunk_data,
                 )
+            if self._first_rec_notion_dir.exists():
+                recursive_chunk_jsonl_dir(
+                    input_chunk_dir=self._first_rec_notion_dir,
+                    output_chunk_dir=self._second_rec_notion_dir,
+                    chunk_size=chunking.second_recursive_chunk_size,
+                    chunk_overlap=chunking.second_recursive_chunk_overlap,
+                    separators=DOCS_SEPARATORS,
+                    stage="second_recursive",
+                    skip_existing=not refresh.clear_second_recursive_chunk_data,
+                    update_existing=refresh.update_second_recursive_chunk_data,
+                    sync_deleted=refresh.update_second_recursive_chunk_data,
+                )
             if self._raw_vc_dir.exists():
                 recursive_chunk_dir(
                     raw_data_dir=self._raw_vc_dir,
@@ -579,6 +611,7 @@ class IndexingService:
                         self._second_rec_crafters_colony_dir,
                         self._sparse_second_rec_crafters_colony_dir,
                     ),
+                    (self._second_rec_notion_dir, self._sparse_second_rec_notion_dir),
                 ):
                     if not input_dir.exists():
                         continue
@@ -644,6 +677,13 @@ class IndexingService:
                     if stages.second_recursive_enabled
                     else None,
                 ),
+                (
+                    self._first_rec_notion_dir,
+                    self._summary_notion_dir,
+                    self._second_rec_notion_dir
+                    if stages.second_recursive_enabled
+                    else None,
+                ),
             ):
                 if not input_dir.exists():
                     continue
@@ -675,6 +715,7 @@ class IndexingService:
                         self._second_rec_crafters_colony_dir,
                         self._prop_crafters_colony_dir,
                     ),
+                    (self._second_rec_notion_dir, self._prop_notion_dir),
                 ):
                     if not input_dir.exists():
                         continue
@@ -698,6 +739,7 @@ class IndexingService:
                     self._summary_sheets_dir,
                     self._summary_hatenablog_dir,
                     self._summary_crafters_colony_dir,
+                    self._summary_notion_dir,
                 ]
             elif stages.second_recursive_enabled:
                 raptor_input_dirs = [
@@ -705,6 +747,7 @@ class IndexingService:
                     self._second_rec_sheets_dir,
                     self._second_rec_hatenablog_dir,
                     self._second_rec_crafters_colony_dir,
+                    self._second_rec_notion_dir,
                 ]
             else:
                 raptor_input_dirs = [
@@ -712,6 +755,7 @@ class IndexingService:
                     self._first_rec_sheets_dir,
                     self._first_rec_hatenablog_dir,
                     self._first_rec_crafters_colony_dir,
+                    self._first_rec_notion_dir,
                 ]
             raptor_chunk_global(
                 input_chunk_dirs=raptor_input_dirs,
@@ -731,6 +775,7 @@ class IndexingService:
                     self._second_rec_sheets_dir,
                     self._second_rec_hatenablog_dir,
                     self._second_rec_crafters_colony_dir,
+                    self._second_rec_notion_dir,
                 ]
             )
             if self._second_rec_messages_dir.exists():
@@ -744,6 +789,7 @@ class IndexingService:
                     self._first_rec_sheets_dir,
                     self._first_rec_hatenablog_dir,
                     self._first_rec_crafters_colony_dir,
+                    self._first_rec_notion_dir,
                 ]
             )
             if self._first_rec_messages_dir.exists():
@@ -763,6 +809,7 @@ class IndexingService:
                         self._prop_sheets_dir,
                         self._prop_hatenablog_dir,
                         self._prop_crafters_colony_dir,
+                        self._prop_notion_dir,
                     ]
                 )
             )
@@ -906,6 +953,7 @@ class IndexingService:
                         self._sparse_second_rec_vc_dir,
                         self._sparse_second_rec_hatenablog_dir,
                         self._sparse_second_rec_crafters_colony_dir,
+                        self._sparse_second_rec_notion_dir,
                     ]
                 ),
                 second_chunks=self._load_legacy_chunks_from_dirs(
@@ -917,6 +965,7 @@ class IndexingService:
                         self._second_rec_vc_dir,
                         self._second_rec_hatenablog_dir,
                         self._second_rec_crafters_colony_dir,
+                        self._second_rec_notion_dir,
                     ]
                 ),
             )
@@ -1446,6 +1495,7 @@ class IndexingService:
             (self._raw_vc_dir, {".txt"}, "vc_transcript"),
             (self._raw_hatenablog_dir, {".md"}, "hatenablog"),
             (self._raw_crafters_colony_dir, {".md"}, "crafters_colony"),
+            (self._raw_notion_dir, {".md"}, "notion"),
         )
 
         documents: list[Document] = []
@@ -1572,6 +1622,7 @@ class IndexingService:
             "hatenablog_updated_at",
             "hatenablog_created_at",
             "crafters_colony_published_at",
+            "notion_last_edited_time",
             "created_at",
             "source_date",
             "first_message_date",

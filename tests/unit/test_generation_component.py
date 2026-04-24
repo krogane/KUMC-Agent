@@ -260,6 +260,41 @@ class GenerationComponentTests(unittest.TestCase):
         self.assertEqual(len(answer.sources), 1)
         self.assertEqual(answer.sources[0].label, "https://docs.google.com/document/d/file-123/")
 
+    def test_rag_prefers_notion_url_as_source_reference(self) -> None:
+        component, _ = self._component(
+            {
+                "answer_rag": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+            },
+            llm_response='{"answer":"Notion参照","sources":[1]}',
+        )
+        answer = component.generate_rag_answer(
+            query="質問",
+            chunks=[
+                Chunk(
+                    id="notion-1",
+                    document_id="doc-1",
+                    text="本文",
+                    index=0,
+                    metadata={
+                        "source_type": "notion",
+                        "notion_url": "https://www.notion.so/workspace/page-1234",
+                    },
+                )
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            append_sources_to_response=False,
+        )
+        self.assertEqual(answer.text, "Notion参照")
+        self.assertEqual(len(answer.sources), 1)
+        self.assertEqual(
+            answer.sources[0].label,
+            "https://www.notion.so/workspace/page-1234",
+        )
+
     def test_discord_context_annotation_keeps_date_line_plain(self) -> None:
         component, llm = self._component(
             {

@@ -172,6 +172,16 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
         title_key="crafters_colony_title",
         on_entry=_upsert,
     )
+    _collect_drive_like_entries(
+        cfg=cfg,
+        raw_dir=cfg.raw_data_dir / "notion",
+        source_type="notion",
+        file_extensions=(".md",),
+        title_key="notion_title",
+        source_key_fields=("notion_page_id",),
+        alias_extra_fields=("notion_url",),
+        on_entry=_upsert,
+    )
     _collect_message_entries(
         cfg=cfg,
         raw_dir=cfg.raw_data_dir / "messages",
@@ -224,6 +234,8 @@ def _collect_drive_like_entries(
     source_type: str,
     file_extensions: tuple[str, ...],
     title_key: str | None,
+    source_key_fields: tuple[str, ...] = ("drive_file_id",),
+    alias_extra_fields: tuple[str, ...] = (),
     on_entry,
 ) -> None:
     if not raw_dir.exists():
@@ -234,9 +246,14 @@ def _collect_drive_like_entries(
     for path in sorted(set(files), key=lambda value: str(value)):
         sidecar = _load_sidecar(path)
         source_file_name = path.name
-        source_key = (
-            str(sidecar.get("drive_file_id") or "").strip() or source_file_name
-        )
+        source_key = ""
+        for field_name in source_key_fields:
+            candidate = str(sidecar.get(field_name) or "").strip()
+            if candidate:
+                source_key = candidate
+                break
+        if not source_key:
+            source_key = source_file_name
         canonical_name = ""
         if title_key:
             canonical_name = str(sidecar.get(title_key) or "").strip()
@@ -254,6 +271,8 @@ def _collect_drive_like_entries(
         ]
         if title_key:
             aliases.append(str(sidecar.get(title_key) or "").strip())
+        for field_name in alias_extra_fields:
+            aliases.append(str(sidecar.get(field_name) or "").strip())
         entry = MaterialCatalogEntry(
             material_id=f"{source_type}:{source_key}",
             source_type=source_type,
