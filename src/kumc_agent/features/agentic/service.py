@@ -10,6 +10,7 @@ from kumc_agent.domain.models.agentic import (
     AgentStep,
     AgenticSearchRequest,
     AgenticSearchResponse,
+    ToolSchema,
 )
 from kumc_agent.domain.models.retrieval import Citation, RetrievalQuery
 from kumc_agent.infra.agentic.repository import AgentTraceRepository
@@ -25,6 +26,7 @@ class AgenticSearchService:
     ) -> None:
         self.ask_service = ask_service
         self.repository = repository
+        self.tool_schemas = _default_tool_schemas()
 
     def search(self, request: AgenticSearchRequest) -> AgenticSearchResponse:
         started = monotonic()
@@ -64,7 +66,11 @@ class AgenticSearchService:
         add_step(
             "PLAN",
             input_payload={"query": request.query},
-            output_payload={"subqueries": subqueries, "success_criteria": _success_criteria(request.query)},
+            output_payload={
+                "subqueries": subqueries,
+                "success_criteria": _success_criteria(request.query),
+                "tools": [tool.name for tool in self.tool_schemas],
+            },
         )
 
         notes: list[str] = []
@@ -116,7 +122,11 @@ class AgenticSearchService:
         add_step(
             "VERIFY",
             input_payload={"query": request.query, "citation_count": len(unique_citations)},
-            output_payload={"verified": verified, "missing": missing},
+            output_payload={
+                "verified": verified,
+                "missing": missing,
+                "judge": _deterministic_pairwise_judge(request.query, notes, unique_citations),
+            },
             status="succeeded" if verified else "needs_more_evidence",
         )
 
@@ -267,6 +277,46 @@ def _success_criteria(query: str) -> list[str]:
     if any(word in query for word in ("いつ", "日時", "期限")):
         criteria.append("日付または時刻がある")
     return criteria
+
+
+def _default_tool_schemas() -> tuple[ToolSchema, ...]:
+    return (
+        ToolSchema(
+            name="search_retrieval",
+            description="Search the indexed retrieval corpus with ACL filtering.",
+            input_schema={"type": "object", "required": ["query"]},
+            output_schema={"type": "object", "properties": {"citations": {"type": "array"}}},
+            read_only=True,
+        ),
+        ToolSchema(
+            name="read_context",
+            description="Read packed retrieved context as untrusted data.",
+            input_schema={"type": "object", "required": ["citation_ids"]},
+            output_schema={"type": "object", "properties": {"notes": {"type": "array"}}},
+            read_only=True,
+        ),
+        ToolSchema(
+            name="verify_answer",
+            description="Deterministically verify whether citations and notes satisfy the query.",
+            input_schema={"type": "object", "required": ["query", "notes", "citations"]},
+            output_schema={"type": "object", "properties": {"verified": {"type": "boolean"}}},
+            read_only=True,
+        ),
+    )
+
+
+def _deterministic_pairwise_judge(
+    query: str,
+    notes: list[str],
+    citations: list[Citation],
+) -> dict[str, object]:
+    return {
+        "strategy": "deterministic_v1",
+        "query_terms": len([part for part in query.split() if part.strip()]),
+        "note_count": len([note for note in notes if note.strip()]),
+        "citation_count": len(citations),
+        "preferred": "answer_with_citations" if citations else "insufficient_evidence",
+    }
 
 
 def _unique_citations(citations: list[Citation]) -> list[Citation]:

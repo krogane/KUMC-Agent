@@ -41,8 +41,6 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の�
 - `logging`: 実行ログを出すために使う
 - `Path`: ファイルパスを扱うために使う
 - `run_repl`: コンソール対話モードを起動する
-- `run_discord`: 既存互換の Discord frontend を起動する
-- `run_http`: 既存互換の HTTP frontend を起動する
 - `build_runtime_context`: 旧来互換の chat / index / eval 用の依存関係をまとめて作る
 - `ChatRequest` などの request class: usecase に渡す入力データを表す
 - `configure_logging`: ログ設定を行う
@@ -60,19 +58,20 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の�
 - `answer`: 回答本文
 - `route`: どの回答ルートが使われたか
 - `sources`: 回答の根拠になった情報源
-- `routing_decision`: ルーティング判断の情報
-- `fast_mode`: 高速モードだったかどうか
-- `metadata`: その他の付加情報
+- `metadata`: ルーティング判断、高速モード、その他の付加情報
 
 ここでは `metadata` から `contexts` を削除しています。
 `contexts` は検索で集めた本文断片など、サイズが大きくなりやすい情報だと考えられます。
 CLI の出力を軽くし、ツール連携で扱いやすくするために除外しています。
 
+この payload では、`routing_decision` や `fast_mode` のような診断情報はトップレベルには置きません。
+CLI や外部連携向け payload では、主結果として扱う安定フィールドだけをトップレベルに置き、内部判断や実行モードなどの診断情報は `metadata` にまとめる方針です。
+
 ### `_workflow_response_payload`
 
 `work` と `approval` コマンドの結果を JSON 化しやすい形に変換します。
 
-workflow 系の処理では、タスク、イベント、予定、会議、承認、Minecraft サーバー操作など、複数種類の結果が返る可能性があります。
+workflow 系の処理では、タスク候補、イベント候補、予定候補、タスク、イベント、予定、会議、承認、Minecraft サーバー操作など、複数種類の結果が返る可能性があります。
 この関数はそれらをまとめて辞書にします。
 
 日時のように `isoformat()` を持つ値は文字列へ変換します。
@@ -138,6 +137,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --query "KUMCの�
 
 また、このコマンドでは履歴や追加メモリを無効化する指定が入っています。
 そのため、外部ツールから安定した RAG 結果を得る用途に向いています。
+ルーティング判断や高速モードのような診断情報が必要な場合は、トップレベルではなく `metadata` の中を確認します。
 
 ### `index build` / `index update`
 
@@ -168,19 +168,9 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli eval ragas --eval-file dat
 評価ファイル、件数上限、結果出力先、RAGAS のバッチサイズやタイムアウト、回答キャッシュの扱いなどを指定できます。
 結果として、評価件数、完全一致率、トークン重複率、RAGAS 指標などを JSON で表示します。
 
-### `discord` / `http`
-
-既存互換の frontend を起動します。
-
-- `discord`: 既存の Discord frontend
-- `http`: 互換用の HTTP stub frontend
-
-README では、新しい Discord slash-command app は `bot`、実装済み API app は `api` を使う説明になっています。
-そのため、`discord` と `http` は主に互換維持のための入口と考えると理解しやすいです。
-
 ### `bot` / `api` / `worker`
 
-Wave 1 以降の新しい app entrypoint です。
+本番プロセス向けの app entrypoint です。
 
 ```bash
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli bot
@@ -194,6 +184,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker
 
 これらは `main()` の中で必要になったタイミングで import されています。
 常にすべての app を読み込むのではなく、実行するコマンドに必要なものだけを読み込む構成です。
+旧 `discord` / `http` 入口は削除され、Discord は `bot`、HTTP API は `api` に統一されています。
 
 ### `admin`
 
@@ -262,6 +253,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の�
 - `--admin`
 
 これらは `AccessContext` にまとめられ、回答時の権限判定や表示制御に使われます。
+`--source` には `image`、`member`、`task`、`event` も指定できます。専用データが未登録の場合は、存在や利用可否を断定せず安全な応答になります。
 
 ### `work`
 
@@ -281,30 +273,35 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 - `task_add`: タスク追加
 - `task_list`: タスク一覧
 - `task_done`: タスク完了
-- `event_add`: イベント追加
+- `event_add`: イベント候補を作成
 - `event_list`: イベント一覧
 - `event_brief`: イベント概要
-- `schedule_add`: スケジュール追加
+- `schedule_add`: スケジュール候補を作成
 - `schedule_list`: スケジュール一覧
 - `doc_draft`: 文書下書き
 - `x_draft`: X 投稿文下書き
 - `announcement_draft`: 告知文下書き
 - `mc_status`: Minecraft サーバー状態確認
 - `mc_request`: Minecraft 関連操作リクエスト
+- `image_search`: 登録済み Asset から画像候補を検索
+- `image_usage_request`: 画像利用の承認依頼候補を作成
+- `member_search`: 権限付きでメンバー候補を検索
 
 入力は `WorkRequest` にまとめられ、`workflow.workflow.run(...)` に渡されます。
 結果は `_workflow_response_payload()` で JSON 向けに整形されます。
+`event_add` と `schedule_add` は正本を直接登録せず、`event_candidates` / `schedule_candidates` として返します。正本の `events` / `schedules` に入るのは、`approval --type event|schedule --action approve` で承認された後です。
+`image_usage_request` は `asset_usage_requests` と汎用 `workflow_candidates` を返します。承認前に外部公開可能とは判断しません。`member_search` は organizer / admin 権限がない場合、対象情報の有無を示唆しない拒否応答を返します。
 
 ### `approval`
 
 承認操作の入口です。
 
 ```bash
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --action list
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --action approve --target-id task_...
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type task --action list
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type event --action approve --target-id <candidate-id>
 ```
 
-現在の `--type` は `task` のみです。
+`--type` には `task`、`event`、`schedule`、`announcement`、`automation_rule`、`asset_usage`、`server_operation`、`finance_record`、`member_assignment`、`other` を指定できます。
 `--action` では次の操作を指定できます。
 
 - `list`: 承認待ち一覧
@@ -314,6 +311,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --action approve 
 - `edit`: 編集
 
 `work` と同じ workflow app context を使い、`workflow.workflow.approval(...)` を呼びます。
+`task`、`event`、`schedule` は候補を正本へ昇格できます。それ以外の type は現時点では承認記録のみを保存し、外部投稿、サーバー操作、会計確定などの副作用は実行しません。
 
 ### `automation`
 
@@ -351,7 +349,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli automation --action dry_ru
 
 ### 早い段階で処理されるコマンド
 
-`discord`、`http`、`bot`、`api`、`worker`、`admin`、`db`、`ingest`、`ask`、`work`、`approval`、`automation` は、`build_runtime_context()` を作る前に処理されます。
+`bot`、`api`、`worker`、`admin`、`db`、`ingest`、`ask`、`work`、`approval`、`automation` は、`build_runtime_context()` を作る前に処理されます。
 
 これは、それぞれが専用の app context を持っているためです。
 たとえば `ask` は retrieval app context、`work` は workflow app context、`automation` は automation app context を使います。
@@ -386,6 +384,10 @@ KUMCは...
 
 JSON にしている理由は、人間だけでなく、スクリプト、CI、外部ツールからも結果を読み取りやすくするためです。
 `ensure_ascii=False` を指定しているため、日本語は `\uXXXX` のようなエスケープではなく、そのまま表示されます。
+
+payload のトップレベルには、回答本文、処理結果、作成されたタスクやイベントなど、利用者や外部連携先が主結果として扱う安定フィールドを置きます。
+一方で、ルーティング判断、選択された内部 handler、実行モード、ポリシー判定、trace 情報のような診断情報は、payload 種別にかかわらず `metadata` に入れます。
+この方針により、コマンドごとに診断情報の置き場所がばらつくことを避けています。
 
 ## ログ設定
 

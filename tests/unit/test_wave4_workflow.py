@@ -122,12 +122,24 @@ class Wave4WorkflowTests(unittest.TestCase):
                     work_type="event_add",
                     instruction="イベント: 新歓会 日時: 2026-05-05 場所: 部室",
                 )
-            ).events[0]
+            ).event_candidates[0]
+            self.assertEqual(event.status, "proposed")
+            approved = service.approval(
+                action="approve",
+                target_type="event",
+                target_id=event.id,
+                access=AccessContext(user_id="organizer", is_admin=True),
+            )
+            stored_event = approved.events[0]
+            self.assertEqual(
+                service.repository.get_event_candidate(event.id).status,
+                "merged",
+            )
             service.repository.save_task(
                 Task(
                     id="task-1",
                     title="新歓会の受付表を作成",
-                    related_event_id=event.id,
+                    related_event_id=stored_event.id,
                     status="todo",
                 )
             )
@@ -135,7 +147,7 @@ class Wave4WorkflowTests(unittest.TestCase):
             brief = service.run(
                 WorkRequest(
                     work_type="event_brief",
-                    target=event.id,
+                    target=stored_event.id,
                     access=AccessContext(is_admin=True),
                 )
             )
@@ -152,9 +164,17 @@ class Wave4WorkflowTests(unittest.TestCase):
                     instruction="予定: 定例会 2026-05-12 19:00 場所: Discord",
                 )
             )
+            self.assertEqual(len(added.schedule_candidates), 1)
+            self.assertEqual(added.schedule_candidates[0].status, "proposed")
+            approved = service.approval(
+                action="approve",
+                target_type="schedule",
+                target_id=added.schedule_candidates[0].id,
+                access=AccessContext(user_id="organizer", is_admin=True),
+            )
             listed = service.run(WorkRequest(work_type="schedule_list"))
 
-            self.assertEqual(len(added.schedules), 1)
+            self.assertEqual(len(approved.schedules), 1)
             self.assertIn("定例会", listed.detail_markdown)
 
     def test_migration_contains_wave4_tables(self) -> None:
@@ -169,6 +189,13 @@ class Wave4WorkflowTests(unittest.TestCase):
             "schedule_events",
             "approval_records",
         ):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_event_schedule_candidate_migration_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "008_event_schedule_candidates.sql"
+        ).read_text(encoding="utf-8")
+        for table in ("event_candidates", "schedule_candidates"):
             self.assertIn(f"create table if not exists {table}", sql)
 
 

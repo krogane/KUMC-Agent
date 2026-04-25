@@ -33,7 +33,9 @@ class ContextPacker:
                 text = _summary_only_text(text)
             block = (
                 f"[{len(packed) + 1}] {metadata.get('source_title') or metadata.get('source_kind') or 'source'}\n"
+                "<untrusted_retrieved_data>\n"
                 f"{text}"
+                "\n</untrusted_retrieved_data>"
             )
             if total + len(block) > self._config.max_context_characters:
                 break

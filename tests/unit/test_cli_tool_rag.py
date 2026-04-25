@@ -40,7 +40,7 @@ class CliToolRagTests(unittest.TestCase):
             chat_answer=chat_answer,
         )
 
-    def test_tool_rag_single_query_keeps_legacy_output_shape(self) -> None:
+    def test_tool_rag_single_query_keeps_diagnostics_in_metadata(self) -> None:
         chat_answer = _FakeChatAnswer(
             [
                 Answer(
@@ -84,7 +84,11 @@ class CliToolRagTests(unittest.TestCase):
         self.assertEqual(payload["route"], "rag")
         self.assertNotIn("query_count", payload)
         self.assertNotIn("results", payload)
+        self.assertNotIn("routing_decision", payload)
+        self.assertNotIn("fast_mode", payload)
         self.assertNotIn("contexts", payload["metadata"])
+        self.assertEqual(payload["metadata"]["routing_decision"], {"target_model": "rag"})
+        self.assertEqual(payload["metadata"]["fast_mode"], True)
         self.assertEqual(payload["sources"][0]["id"], "s1")
 
         self.assertEqual(len(chat_answer.requests), 1)
@@ -139,12 +143,16 @@ class CliToolRagTests(unittest.TestCase):
         first = payload["results"][0]
         self.assertEqual(first["query"], "first query")
         self.assertEqual(first["answer"], "answer 1")
+        self.assertNotIn("fast_mode", first)
         self.assertNotIn("contexts", first["metadata"])
+        self.assertEqual(first["metadata"]["fast_mode"], False)
 
         second = payload["results"][1]
         self.assertEqual(second["query"], "second query")
         self.assertEqual(second["answer"], "answer 2")
+        self.assertNotIn("fast_mode", second)
         self.assertNotIn("contexts", second["metadata"])
+        self.assertEqual(second["metadata"]["fast_mode"], True)
 
         queries = [getattr(request, "query") for request in chat_answer.requests]
         self.assertEqual(queries, ["first query", "second query"])

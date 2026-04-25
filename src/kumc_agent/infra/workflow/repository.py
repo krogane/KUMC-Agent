@@ -10,7 +10,9 @@ from kumc_agent.domain.models.retrieval import Citation
 from kumc_agent.domain.models.workflow import (
     ApprovalRecord,
     Event,
+    EventCandidate,
     Meeting,
+    ScheduleCandidate,
     ScheduleEvent,
     Task,
     TaskCandidate,
@@ -57,6 +59,24 @@ class WorkflowRepository(Protocol):
     def save_event(self, event: Event) -> Event:
         ...
 
+    def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
+        ...
+
+    def get_event_candidate(self, candidate_id: str) -> EventCandidate | None:
+        ...
+
+    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+        ...
+
+    def update_event_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventCandidate:
+        ...
+
     def get_event(self, event_id: str) -> Event | None:
         ...
 
@@ -70,6 +90,31 @@ class WorkflowRepository(Protocol):
         ...
 
     def save_schedule(self, schedule: ScheduleEvent) -> ScheduleEvent:
+        ...
+
+    def save_schedule_candidate(self, candidate: ScheduleCandidate) -> ScheduleCandidate:
+        ...
+
+    def get_schedule_candidate(self, candidate_id: str) -> ScheduleCandidate | None:
+        ...
+
+    def list_schedule_candidates(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[ScheduleCandidate]:
+        ...
+
+    def update_schedule_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ScheduleCandidate:
+        ...
+
+    def get_schedule(self, schedule_id: str) -> ScheduleEvent | None:
         ...
 
     def list_schedules(
@@ -160,6 +205,44 @@ class FileWorkflowRepository:
         _append_jsonl(self.root_dir / "events.jsonl", _event_payload(stored))
         return stored
 
+    def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
+        stored = _touch(candidate)
+        _append_jsonl(self.root_dir / "event_candidates.jsonl", _event_candidate_payload(stored))
+        return stored
+
+    def get_event_candidate(self, candidate_id: str) -> EventCandidate | None:
+        return _latest_by_id(
+            self.root_dir / "event_candidates.jsonl",
+            _event_candidate_from_payload,
+        ).get(candidate_id)
+
+    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+        candidates = list(
+            _latest_by_id(
+                self.root_dir / "event_candidates.jsonl",
+                _event_candidate_from_payload,
+            ).values()
+        )
+        if status:
+            candidates = [candidate for candidate in candidates if candidate.status == status]
+        return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
+
+    def update_event_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventCandidate:
+        candidate = self.get_event_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_event_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
     def get_event(self, event_id: str) -> Event | None:
         return _latest_by_id(self.root_dir / "events.jsonl", _event_from_payload).get(event_id)
 
@@ -188,6 +271,57 @@ class FileWorkflowRepository:
         stored = _touch(schedule)
         _append_jsonl(self.root_dir / "schedule_events.jsonl", _schedule_payload(stored))
         return stored
+
+    def save_schedule_candidate(self, candidate: ScheduleCandidate) -> ScheduleCandidate:
+        stored = _touch(candidate)
+        _append_jsonl(
+            self.root_dir / "schedule_candidates.jsonl",
+            _schedule_candidate_payload(stored),
+        )
+        return stored
+
+    def get_schedule_candidate(self, candidate_id: str) -> ScheduleCandidate | None:
+        return _latest_by_id(
+            self.root_dir / "schedule_candidates.jsonl",
+            _schedule_candidate_from_payload,
+        ).get(candidate_id)
+
+    def list_schedule_candidates(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[ScheduleCandidate]:
+        candidates = list(
+            _latest_by_id(
+                self.root_dir / "schedule_candidates.jsonl",
+                _schedule_candidate_from_payload,
+            ).values()
+        )
+        if status:
+            candidates = [candidate for candidate in candidates if candidate.status == status]
+        return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
+
+    def update_schedule_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ScheduleCandidate:
+        candidate = self.get_schedule_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_schedule_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def get_schedule(self, schedule_id: str) -> ScheduleEvent | None:
+        return _latest_by_id(
+            self.root_dir / "schedule_events.jsonl",
+            _schedule_from_payload,
+        ).get(schedule_id)
 
     def list_schedules(
         self,
@@ -420,6 +554,82 @@ class PostgresWorkflowRepository:
             conn.commit()
         return stored
 
+    def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
+        stored = _touch(candidate)
+        payload = _event_candidate_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into event_candidates (
+                      id, title, summary, starts_at, ends_at, place,
+                      related_source_ids, evidence, confidence, status,
+                      created_by, metadata, created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      title = excluded.title,
+                      summary = excluded.summary,
+                      starts_at = excluded.starts_at,
+                      ends_at = excluded.ends_at,
+                      place = excluded.place,
+                      related_source_ids = excluded.related_source_ids,
+                      evidence = excluded.evidence,
+                      confidence = excluded.confidence,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        payload["title"],
+                        payload["summary"],
+                        _parse_datetime(payload["starts_at"]),
+                        _parse_datetime(payload["ends_at"]),
+                        payload["place"],
+                        json.dumps(payload["related_source_ids"], ensure_ascii=False),
+                        json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                        payload["confidence"],
+                        payload["status"],
+                        payload["created_by"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_event_candidate(self, candidate_id: str) -> EventCandidate | None:
+        rows = self._fetch("select * from event_candidates where id = %s", (candidate_id,))
+        return _event_candidate_from_row(rows[0]) if rows else None
+
+    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+        if status:
+            rows = self._fetch(
+                "select * from event_candidates where status = %s order by created_at asc",
+                (status,),
+            )
+        else:
+            rows = self._fetch("select * from event_candidates order by created_at asc", ())
+        return [_event_candidate_from_row(row) for row in rows]
+
+    def update_event_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventCandidate:
+        candidate = self.get_event_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_event_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
     def get_event(self, event_id: str) -> Event | None:
         rows = self._fetch("select * from events where id = %s", (event_id,))
         return _event_from_row(rows[0]) if rows else None
@@ -517,6 +727,88 @@ class PostgresWorkflowRepository:
                 )
             conn.commit()
         return stored
+
+    def save_schedule_candidate(self, candidate: ScheduleCandidate) -> ScheduleCandidate:
+        stored = _touch(candidate)
+        payload = _schedule_candidate_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into schedule_candidates (
+                      id, title, starts_at, ends_at, place, related_event_id,
+                      evidence, confidence, status, created_by, metadata,
+                      created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      title = excluded.title,
+                      starts_at = excluded.starts_at,
+                      ends_at = excluded.ends_at,
+                      place = excluded.place,
+                      related_event_id = excluded.related_event_id,
+                      evidence = excluded.evidence,
+                      confidence = excluded.confidence,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        payload["title"],
+                        _parse_datetime(payload["starts_at"]),
+                        _parse_datetime(payload["ends_at"]),
+                        payload["place"],
+                        payload["related_event_id"],
+                        json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                        payload["confidence"],
+                        payload["status"],
+                        payload["created_by"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_schedule_candidate(self, candidate_id: str) -> ScheduleCandidate | None:
+        rows = self._fetch("select * from schedule_candidates where id = %s", (candidate_id,))
+        return _schedule_candidate_from_row(rows[0]) if rows else None
+
+    def list_schedule_candidates(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[ScheduleCandidate]:
+        if status:
+            rows = self._fetch(
+                "select * from schedule_candidates where status = %s order by created_at asc",
+                (status,),
+            )
+        else:
+            rows = self._fetch("select * from schedule_candidates order by created_at asc", ())
+        return [_schedule_candidate_from_row(row) for row in rows]
+
+    def update_schedule_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ScheduleCandidate:
+        candidate = self.get_schedule_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_schedule_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def get_schedule(self, schedule_id: str) -> ScheduleEvent | None:
+        rows = self._fetch("select * from schedule_events where id = %s", (schedule_id,))
+        return _schedule_from_row(rows[0]) if rows else None
 
     def list_schedules(
         self,
@@ -839,6 +1131,66 @@ def _event_from_row(row: tuple[object, ...]) -> Event:
     )
 
 
+def _event_candidate_payload(candidate: EventCandidate) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "title": candidate.title,
+        "summary": candidate.summary,
+        "starts_at": _dt(candidate.starts_at),
+        "ends_at": _dt(candidate.ends_at),
+        "place": candidate.place,
+        "related_source_ids": list(candidate.related_source_ids),
+        "evidence": [_citation_payload(citation) for citation in candidate.evidence],
+        "confidence": candidate.confidence,
+        "status": candidate.status,
+        "created_by": candidate.created_by,
+        "metadata": dict(candidate.metadata),
+        "created_at": _dt(candidate.created_at),
+        "updated_at": _dt(candidate.updated_at),
+    }
+
+
+def _event_candidate_from_payload(payload: dict[str, object]) -> EventCandidate:
+    evidence = _json_payload(payload.get("evidence") or [])
+    return EventCandidate(
+        id=str(payload["id"]),
+        title=str(payload["title"]),
+        summary=payload.get("summary") and str(payload["summary"]),
+        starts_at=_parse_datetime(payload.get("starts_at")),
+        ends_at=_parse_datetime(payload.get("ends_at")),
+        place=payload.get("place") and str(payload["place"]),
+        related_source_ids=tuple(str(item) for item in _json_payload(payload.get("related_source_ids") or [])),
+        evidence=tuple(_citation_from_payload(dict(item)) for item in evidence),
+        confidence=str(payload.get("confidence") or "low"),
+        status=str(payload.get("status") or "proposed"),
+        created_by=str(payload.get("created_by") or "agent"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _event_candidate_from_row(row: tuple[object, ...]) -> EventCandidate:
+    return _event_candidate_from_payload(
+        {
+            "id": row[0],
+            "title": row[1],
+            "summary": row[2],
+            "starts_at": row[3],
+            "ends_at": row[4],
+            "place": row[5],
+            "related_source_ids": row[6],
+            "evidence": row[7],
+            "confidence": row[8],
+            "status": row[9],
+            "created_by": row[10],
+            "metadata": row[11],
+            "created_at": row[12],
+            "updated_at": row[13],
+        }
+    )
+
+
 def _meeting_payload(meeting: Meeting) -> dict[str, object]:
     return {
         "id": meeting.id,
@@ -952,6 +1304,63 @@ def _schedule_from_row(row: tuple[object, ...]) -> ScheduleEvent:
             "metadata": row[7],
             "created_at": row[8],
             "updated_at": row[9],
+        }
+    )
+
+
+def _schedule_candidate_payload(candidate: ScheduleCandidate) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "title": candidate.title,
+        "starts_at": _dt(candidate.starts_at),
+        "ends_at": _dt(candidate.ends_at),
+        "place": candidate.place,
+        "related_event_id": candidate.related_event_id,
+        "evidence": [_citation_payload(citation) for citation in candidate.evidence],
+        "confidence": candidate.confidence,
+        "status": candidate.status,
+        "created_by": candidate.created_by,
+        "metadata": dict(candidate.metadata),
+        "created_at": _dt(candidate.created_at),
+        "updated_at": _dt(candidate.updated_at),
+    }
+
+
+def _schedule_candidate_from_payload(payload: dict[str, object]) -> ScheduleCandidate:
+    evidence = _json_payload(payload.get("evidence") or [])
+    return ScheduleCandidate(
+        id=str(payload["id"]),
+        title=str(payload["title"]),
+        starts_at=_parse_datetime(payload.get("starts_at")),
+        ends_at=_parse_datetime(payload.get("ends_at")),
+        place=payload.get("place") and str(payload["place"]),
+        related_event_id=payload.get("related_event_id") and str(payload["related_event_id"]),
+        evidence=tuple(_citation_from_payload(dict(item)) for item in evidence),
+        confidence=str(payload.get("confidence") or "low"),
+        status=str(payload.get("status") or "proposed"),
+        created_by=str(payload.get("created_by") or "agent"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _schedule_candidate_from_row(row: tuple[object, ...]) -> ScheduleCandidate:
+    return _schedule_candidate_from_payload(
+        {
+            "id": row[0],
+            "title": row[1],
+            "starts_at": row[2],
+            "ends_at": row[3],
+            "place": row[4],
+            "related_event_id": row[5],
+            "evidence": row[6],
+            "confidence": row[7],
+            "status": row[8],
+            "created_by": row[9],
+            "metadata": row[10],
+            "created_at": row[11],
+            "updated_at": row[12],
         }
     )
 

@@ -12,6 +12,7 @@ from kumc_agent.features.minecraft import MinecraftSupportService
 from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.announcement import build_announcement_repository
 from kumc_agent.infra.minecraft import build_server_operation_repository
+from kumc_agent.infra.operations import build_operations_repository
 from kumc_agent.infra.workflow import build_workflow_repository
 
 
@@ -36,6 +37,10 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         postgres=foundation.postgres,
         fallback_dir=foundation.config.base_dir / "data" / "minecraft",
     )
+    operations_repository = build_operations_repository(
+        postgres=foundation.postgres,
+        fallback_dir=foundation.config.base_dir / "data" / "operations",
+    )
     docgen = DocGenService()
     return WorkflowAppContext(
         workflow=WorkflowService(
@@ -52,5 +57,6 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
                 repository=server_operation_repository,
                 feature_flags=foundation.feature_flags,
             ),
+            operations=operations_repository,
         )
     )

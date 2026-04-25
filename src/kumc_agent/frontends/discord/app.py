@@ -1,911 +1,480 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+import io
 import json
 import logging
-import threading
-from zoneinfo import ZoneInfo
 
-from kumc_agent.domain.models.answer import Answer
-from kumc_agent.frontends.discord.commands import parse_command, parse_interaction_command
-from kumc_agent.runtime.container import build_runtime_context
-from kumc_agent.usecases.chat.entry import ChatEntryRequest
-from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
-from kumc_agent.usecases.indexing.build import BuildIndexRequest
-from kumc_agent.usecases.warmup.run import WarmupRequest
-from kumc_agent.utils.logging import configure_logging, default_execution_log_path
+from kumc_agent.domain.models.agentic import AgenticSearchRequest
+from kumc_agent.domain.models.health import HealthReport
+from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
+from kumc_agent.domain.models.source import BackfillScope
+from kumc_agent.domain.models.workflow import WorkRequest
 
 logger = logging.getLogger(__name__)
-_JST = ZoneInfo("Asia/Tokyo")
-_ANSWER_PROMPT_LOG_FILENAME = "answer_prompts.jsonl"
 
 
-def main() -> None:
+def _format_health_report(report: HealthReport) -> str:
+    payload = report.as_dict()
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    if len(text) <= 1800:
+        return f"```json\n{text}\n```"
+    return f"status={report.status} components={len(report.components)}"
+
+
+def _format_markdown_attachment(*, content: str, filename: str):
     import discord
 
-    context = build_runtime_context()
-    configure_logging(
-        context.config.app.log_level,
-        file_path=default_execution_log_path(base_dir=context.config.base_dir),
+    payload = content.encode("utf-8")
+    return discord.File(
+        fp=io.BytesIO(payload),
+        filename=filename,
     )
+
+
+def _format_detail_attachment(*, content: str):
+    return _format_markdown_attachment(
+        content=content,
+        filename="kumc-agent-answer-detail.md",
+    )
+
+
+def create_bot(
+    *,
+    foundation_context: object,
+    retrieval_context: object,
+    agentic_context: object,
+    workflow_context: object,
+    automation_context: object,
+    ingestion_context: object,
+):
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+
+    globals()["discord"] = discord
+    globals()["app_commands"] = app_commands
 
     intents = discord.Intents.default()
-    intents.message_content = True
-    intents.voice_states = True
-    client = discord.Client(intents=intents)
+    bot = commands.Bot(command_prefix="!", intents=intents)
+    admin = app_commands.Group(name="admin", description="KUMC-Agent admin actions")
 
-    command_prefix = context.config.app.command_prefix.strip()
-    index_command_prefix = context.config.app.index_command_prefix.strip()
-    openclaw_enabled = bool(context.config.integrations.openclaw.enabled)
-    special_channel_names = {
-        name.strip()
-        for name in context.config.rag.history.special_channel_names
-        if name.strip()
-    }
+    def _is_authorized(interaction: discord.Interaction) -> bool:
+        allowed_users = set(foundation_context.config.security.maintenance_command_author_ids)
+        if allowed_users and int(interaction.user.id) not in allowed_users:
+            return False
+        allowed_guilds = set(foundation_context.config.security.discord_guild_allow_list)
+        guild_id = interaction.guild_id
+        if allowed_guilds and (guild_id is None or int(guild_id) not in allowed_guilds):
+            return False
+        return True
 
-    indexing_in_progress = False
-    indexing_task: asyncio.Task[None] | None = None
-    indexing_cancel_event = threading.Event()
-    indexing_started_at: datetime | None = None
-    evaluating_task: asyncio.Task[None] | None = None
-    evaluating_cancel_event = threading.Event()
-    channel_generation_tasks: dict[int, asyncio.Task[None]] = {}
-    channel_cancel_events: dict[int, threading.Event] = {}
-    auto_index_task: asyncio.Task[None] | None = None
-    periodic_warmup_task: asyncio.Task[None] | None = None
-    auto_index_last_run: date | None = None
-    answer_record_lock = threading.Lock()
-    warmup_lock = asyncio.Lock()
+    def _access_context(interaction: discord.Interaction) -> AccessContext:
+        roles = tuple(
+            str(getattr(role, "id", ""))
+            for role in getattr(interaction.user, "roles", [])
+            if getattr(role, "id", None)
+        )
+        return AccessContext(
+            user_id=str(interaction.user.id),
+            guild_id=str(interaction.guild_id or ""),
+            role_ids=roles,
+            is_admin=_is_authorized(interaction),
+        )
 
-    context.vc.bind_discord_client(
-        discord_client=client,
-        is_indexing_active=lambda: indexing_in_progress,
+    @admin.command(name="action", description="Run an approved admin action")
+    @app_commands.describe(action="Admin action to run")
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="health", value="health"),
+            app_commands.Choice(name="readiness", value="readiness"),
+            app_commands.Choice(name="sync", value="sync"),
+            app_commands.Choice(name="eval", value="eval"),
+            app_commands.Choice(name="feature_flags", value="feature_flags"),
+            app_commands.Choice(name="permissions", value="permissions"),
+            app_commands.Choice(name="reindex", value="reindex"),
+            app_commands.Choice(name="cost_report", value="cost_report"),
+        ]
     )
-
-    def _bot_mention_prefixes() -> tuple[str, ...]:
-        ids: set[int] = set()
-        current_user = client.user
-        if current_user is not None and getattr(current_user, "id", None):
-            ids.add(int(current_user.id))
-        prefixes: list[str] = []
-        for user_id in ids:
-            prefixes.append(f"<@{user_id}>")
-            prefixes.append(f"<@!{user_id}>")
-        return tuple(prefixes)
-
-    def _extract_query_from_message(message: discord.Message) -> str:
-        content = (message.content or "").strip()
-        if not content:
-            return ""
-
-        for prefix in _bot_mention_prefixes():
-            if content.startswith(prefix):
-                query = content[len(prefix) :].strip()
-                if query.startswith(command_prefix):
-                    query = query[len(command_prefix) :].strip()
-                return query
-
-        if content.startswith(command_prefix):
-            return content[len(command_prefix) :].strip()
-
-        if getattr(message, "guild", None) is None:
-            return content
-
-        channel_name = str(getattr(message.channel, "name", "") or "").strip()
-        if channel_name in special_channel_names:
-            return content
-        return ""
-
-    def _strip_fast_prefix(query: str) -> tuple[str, bool]:
-        normalized = (query or "").strip()
-        if not normalized:
-            return "", False
-        parts = normalized.split(maxsplit=1)
-        if parts[0].strip().lower() != "fast":
-            return normalized, False
-        if len(parts) == 1:
-            return "", True
-        return parts[1].strip(), True
-
-    def _is_special_channel_invocation(message: discord.Message) -> bool:
-        if getattr(message, "guild", None) is None:
-            return False
-        channel_name = str(getattr(message.channel, "name", "") or "").strip()
-        return channel_name in special_channel_names
-
-    def _history_scope_for_message(message: discord.Message) -> str:
-        guild = getattr(message, "guild", None)
-        guild_id = getattr(guild, "id", None)
-        if guild_id is not None:
-            return f"guild:{guild_id}"
-        return f"channel:{message.channel.id}"
-
-    def _question_author_from_message(message: discord.Message) -> str:
-        author = getattr(message, "author", None)
-        display_name = str(getattr(author, "display_name", "") or "").strip()
-        user_name = str(getattr(author, "name", "") or "").strip()
-        if display_name and user_name:
-            return f"{display_name} (@{user_name})"
-        if display_name:
-            return display_name
-        if user_name:
-            return f"@{user_name}"
-        return str(getattr(author, "id", "unknown"))
-
-    def _question_user_id(message: discord.Message) -> str:
-        value = getattr(getattr(message, "author", None), "id", None)
-        return "unknown" if value is None else str(value)
-
-    def _question_username(message: discord.Message) -> str:
-        author = getattr(message, "author", None)
-        username = str(getattr(author, "name", "") or "").strip()
-        if username:
-            return username
-        display_name = str(getattr(author, "display_name", "") or "").strip()
-        if display_name:
-            return display_name
-        return "unknown"
-
-    def _is_maintenance_authorized_user(author: object) -> bool:
-        allow = set(context.config.security.maintenance_command_author_ids)
-        if not allow:
-            return False
-        author_id = getattr(author, "id", None)
-        if author_id is None:
-            return False
-        return int(author_id) in allow
-
-    def _is_maintenance_authorized(message: discord.Message) -> bool:
-        return _is_maintenance_authorized_user(getattr(message, "author", None))
-
-    def _append_answer_record(
-        *,
-        message: discord.Message,
-        query: str,
-        routing_result: dict[str, object] | None,
-        answer: str,
-    ) -> None:
-        if not context.config.ops.answer_record_log_enabled:
-            return
-        query_text = (query or "").strip()
-        answer_text = (answer or "").strip()
-        if not query_text or not answer_text:
-            return
-        record = {
-            "timestamp": datetime.now(_JST).isoformat(timespec="seconds"),
-            "questioner_user_id": _question_user_id(message),
-            "questioner_username": _question_username(message),
-            "question": query_text,
-            "routing_result": routing_result,
-            "answer": answer_text,
-        }
-        try:
-            with answer_record_lock:
-                path = context.config.ops.answer_record_log_path
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as fw:
-                    fw.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            logger.exception("Failed to append answer record.")
-
-    def _append_answer_prompt_record(
-        *,
-        message: discord.Message,
-        query: str,
-        routing_result: dict[str, object] | None,
-        answer: Answer,
-    ) -> None:
-        if not context.config.ops.answer_record_log_enabled:
-            return
-        query_text = (query or "").strip()
-        if not query_text:
-            return
-
-        prompt_payload = answer.metadata.get("llm_prompt")
-        if not isinstance(prompt_payload, dict):
-            return
-        system_prompt = str(prompt_payload.get("system_prompt") or "").strip()
-        user_prompt = str(prompt_payload.get("user_prompt") or "").strip()
-        if not system_prompt and not user_prompt:
-            return
-
-        record = {
-            "timestamp": datetime.now(_JST).isoformat(timespec="seconds"),
-            "questioner_user_id": _question_user_id(message),
-            "questioner_username": _question_username(message),
-            "question": query_text,
-            "route": answer.route,
-            "routing_result": routing_result,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-        }
-        try:
-            with answer_record_lock:
-                path = context.config.ops.answer_record_log_path.with_name(
-                    _ANSWER_PROMPT_LOG_FILENAME
-                )
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as fw:
-                    fw.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            logger.exception("Failed to append answer prompt record.")
-
-    def _format_jst(value: datetime) -> str:
-        return value.astimezone(_JST).strftime("%Y/%m/%d %H:%M")
-
-    def _indexing_blocked_message() -> str:
-        started_at = indexing_started_at or datetime.now(_JST)
-        min_end = started_at + timedelta(
-            minutes=context.config.ops.index_update_estimate_min_minutes
-        )
-        max_end = started_at + timedelta(
-            minutes=context.config.ops.index_update_estimate_max_minutes
-        )
-        if min_end == max_end:
-            estimate = _format_jst(min_end)
-        else:
-            estimate = f"{_format_jst(min_end)}〜{_format_jst(max_end)}"
-        return (
-            "インデックス更新中のため、クエリ受付を停止しています。\n"
-            f"更新開始時刻: {_format_jst(started_at)} (JST)\n"
-            f"終了目安: {estimate} (JST)"
-        )
-
-    async def _resolve_referenced_message(
-        message: discord.Message,
-        *,
-        reference_cache: dict[int, discord.Message | None],
-    ) -> discord.Message | None:
-        reference = getattr(message, "reference", None)
-        if reference is None:
-            return None
-        message_id = getattr(reference, "message_id", None)
-        if message_id is None:
-            return None
-        try:
-            message_id_int = int(message_id)
-        except (TypeError, ValueError):
-            return None
-        if message_id_int in reference_cache:
-            return reference_cache[message_id_int]
-
-        resolved = getattr(reference, "resolved", None)
-        if isinstance(resolved, discord.Message):
-            reference_cache[message_id_int] = resolved
-            return resolved
-
-        guild = getattr(message, "guild", None)
-        channel_id = getattr(reference, "channel_id", None)
-        fetch_channel = None
-        if guild is not None and channel_id is not None:
-            try:
-                channel_id_int = int(channel_id)
-            except (TypeError, ValueError):
-                channel_id_int = None
-            if channel_id_int is not None:
-                fetch_channel = guild.get_channel_or_thread(channel_id_int)
-        if fetch_channel is None:
-            fetch_channel = message.channel
-
-        fetch_message = getattr(fetch_channel, "fetch_message", None)
-        if not callable(fetch_message):
-            reference_cache[message_id_int] = None
-            return None
-        try:
-            referenced = await fetch_message(message_id_int)
-        except Exception:
-            reference_cache[message_id_int] = None
-            return None
-        reference_cache[message_id_int] = referenced
-        return referenced
-
-    async def _collect_special_channel_history(
-        message: discord.Message,
-    ) -> list[tuple[str, str, list[str]]]:
-        limit = max(0, context.config.rag.history.special_channel_history_limit)
-        if limit <= 0:
-            return []
-        primary_messages: list[discord.Message] = []
-        seen_primary_ids: set[int] = set()
-
-        def _add_primary(candidate: discord.Message) -> None:
-            text = (candidate.content or "").strip()
-            if not text:
-                return
-            candidate_id = int(getattr(candidate, "id", 0))
-            if candidate_id <= 0 or candidate_id in seen_primary_ids:
-                return
-            seen_primary_ids.add(candidate_id)
-            primary_messages.append(candidate)
-
-        _add_primary(message)
-        try:
-            async for item in message.channel.history(limit=None, oldest_first=False):
-                _add_primary(item)
-                if len(primary_messages) >= limit:
-                    break
-        except Exception:
-            logger.exception("Failed to collect special-channel history.")
-
-        reference_cache: dict[int, discord.Message | None] = {}
-        all_messages: dict[int, discord.Message] = {
-            int(item.id): item for item in primary_messages
-        }
-        for root in primary_messages:
-            current = root
-            visited_chain_ids: set[int] = set()
-            while True:
-                referenced = await _resolve_referenced_message(
-                    current,
-                    reference_cache=reference_cache,
-                )
-                if referenced is None:
-                    break
-                referenced_id = int(getattr(referenced, "id", 0))
-                if referenced_id <= 0 or referenced_id in visited_chain_ids:
-                    break
-                visited_chain_ids.add(referenced_id)
-                if referenced_id not in all_messages and (referenced.content or "").strip():
-                    all_messages[referenced_id] = referenced
-                current = referenced
-
-        ordered = sorted(
-            all_messages.values(),
-            key=lambda item: (item.created_at, int(item.id)),
-        )
-        history: list[tuple[str, str, list[str]]] = []
-        for item in ordered:
-            text = (item.content or "").strip()
-            if not text:
-                continue
-            author = _question_author_from_message(item)
-            history.append((f"author: {author}\n{text}", "", []))
-        return history
-
-    async def _send_status(
-        channel: discord.abc.Messageable | None,
-        text: str,
-    ) -> None:
-        if channel is None:
-            logger.info(text)
-            return
-        await channel.send(text)
-
-    async def _run_build_index_job(
-        *,
-        channel: discord.abc.Messageable | None,
-        history_query: str | None = None,
-        announce_start: bool = True,
-    ) -> None:
-        nonlocal indexing_in_progress, indexing_task, indexing_started_at
-        indexing_in_progress = True
-        indexing_started_at = datetime.now(_JST)
-        indexing_cancel_event.clear()
-        if announce_start:
-            await _send_status(channel, "インデックス更新を開始します。")
-        try:
-            result = await asyncio.to_thread(
-                lambda: context.build_index.execute(
-                    BuildIndexRequest(
-                        refresh_sources=True,
-                        full_rebuild=False,
-                        allow_cancel=True,
-                        cancel_event=indexing_cancel_event,
-                    )
-                )
-            )
-            await _run_warmup(trigger="index_update", force=True)
-            await _send_status(
-                channel,
-                (
-                    "インデックス更新が完了しました。"
-                    f" loaded_sources={result.loaded_sources},"
-                    f" documents={result.documents}, chunks={result.chunks}"
-                ),
-            )
-        except asyncio.CancelledError:
-            await _send_status(channel, "インデックス更新を中止しました。")
-        except Exception as exc:
-            logger.exception("Index build failed")
-            await _send_status(channel, f"インデックス更新に失敗しました: {exc}")
-        finally:
-            indexing_in_progress = False
-            indexing_task = None
-            indexing_started_at = None
-
-    async def _send_interaction_response(
+    async def admin_action(
         interaction: discord.Interaction,
-        text: str,
-        *,
-        ephemeral: bool = False,
+        action: app_commands.Choice[str],
+        scope: str = "",
     ) -> None:
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=ephemeral)
+        if not _is_authorized(interaction):
+            await interaction.response.send_message("権限がありません。", ephemeral=True)
             return
-        await interaction.response.send_message(text, ephemeral=ephemeral)
+        if action.value not in {
+            "health",
+            "readiness",
+            "sync",
+            "eval",
+            "feature_flags",
+            "permissions",
+            "reindex",
+            "cost_report",
+        }:
+            await interaction.response.send_message("未対応の action です。", ephemeral=True)
+            return
 
-    async def _run_eval_job(
-        *,
-        channel: discord.abc.Messageable | None,
-    ) -> None:
-        nonlocal evaluating_task
-        evaluating_cancel_event.clear()
-        await _send_status(channel, "評価を開始します。")
-        try:
-            eval_file = context.config.app.eval_dir / "ragas.jsonl"
-            result = await asyncio.to_thread(
-                lambda: context.eval_ragas.execute(
-                    EvaluateRagasRequest(
-                        eval_file=eval_file,
-                        result_path=context.config.app.eval_dir / "result" / "result.json",
-                        cancel_event=evaluating_cancel_event,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if action.value == "health":
+            report = await asyncio.to_thread(
+                foundation_context.health.check,
+                actor_id=str(interaction.user.id),
+                actor_type="discord_user",
+            )
+            await interaction.followup.send(_format_health_report(report), ephemeral=True)
+            return
+        if action.value == "readiness":
+            readiness = await asyncio.to_thread(automation_context.readiness.report)
+            payload = readiness.as_dict()
+            summary = readiness.summary
+            filename = "kumc-agent-production-readiness.json"
+        elif action.value in {"sync", "reindex"}:
+            source_kinds = (scope.strip(),) if scope.strip() else tuple()
+            results = await asyncio.to_thread(
+                lambda: asyncio.run(
+                    ingestion_context.service.backfill_many(
+                        source_kinds=source_kinds,
+                        scope=BackfillScope(force=action.value == "reindex"),
                     )
                 )
             )
-            if bool(result.ragas_metadata.get("canceled")):
-                await _send_status(channel, "評価を中止しました。")
-                return
-            metric_text = ""
-            if result.ragas_metrics:
-                ordered_keys = (
-                    "answer_relevancy",
-                    "faithfulness",
-                    "context_precision",
-                    "context_recall",
-                )
-                parts: list[str] = []
-                for key in ordered_keys:
-                    if key in result.ragas_metrics:
-                        parts.append(f"{key}={result.ragas_metrics[key]:.3f}")
-                for key in sorted(result.ragas_metrics.keys()):
-                    if key in ordered_keys:
-                        continue
-                    parts.append(f"{key}={result.ragas_metrics[key]:.3f}")
-                if parts:
-                    metric_text = " metrics=" + ", ".join(parts)
-            detail_text = ""
-            failed_batches = int(result.ragas_metadata.get("failed_batches", 0) or 0)
-            failed_records = int(result.ragas_metadata.get("failed_records", 0) or 0)
-            if failed_batches > 0:
-                detail_text = f" failed_batches={failed_batches}, failed_records={failed_records}"
-            await _send_status(
-                channel,
-                (
-                    "評価が完了しました。"
-                    f" total={result.total}, exact_match={result.exact_match:.3f},"
-                    f" token_overlap={result.token_overlap:.3f}{metric_text}{detail_text}"
+            payload = {
+                "action": action.value,
+                "results": [result.__dict__ for result in results],
+            }
+            summary = f"{action.value} completed: {len(results)} source(s)"
+            filename = "kumc-agent-admin-sync.json"
+        elif action.value == "eval":
+            readiness = await asyncio.to_thread(automation_context.readiness.report)
+            payload = {
+                "action": "eval",
+                "mode": "local_harness",
+                "readiness": readiness.as_dict(),
+            }
+            summary = readiness.summary
+            filename = "kumc-agent-admin-eval.json"
+        elif action.value == "feature_flags":
+            payload = foundation_context.feature_flags.modes()
+            summary = "feature flags"
+            filename = "kumc-agent-feature-flags.json"
+        elif action.value == "permissions":
+            payload = {
+                "maintenance_command_author_ids": foundation_context.config.security.maintenance_command_author_ids,
+                "discord_guild_allow_list": foundation_context.config.security.discord_guild_allow_list,
+                "admin_configured": bool(
+                    foundation_context.config.security.maintenance_command_author_ids
+                ),
+                "guild_allow_list_configured": bool(
+                    foundation_context.config.security.discord_guild_allow_list
+                ),
+            }
+            summary = "permissions"
+            filename = "kumc-agent-permissions.json"
+        else:
+            payload = await asyncio.to_thread(automation_context.readiness.cost_report)
+            summary = "cost report"
+            filename = "kumc-agent-cost-report.json"
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(text) <= 1800:
+            await interaction.followup.send(f"```json\n{text}\n```", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                content=summary,
+                file=_format_markdown_attachment(
+                    content=text,
+                    filename=filename,
+                ),
+                ephemeral=True,
+            )
+
+    bot.tree.add_command(admin)
+
+    @bot.tree.command(name="ask", description="KUMC-Agent integrated question answering")
+    @app_commands.describe(
+        question="質問",
+        source="検索対象 source",
+        mode="回答モード",
+        depth="検索深度",
+    )
+    @app_commands.choices(
+        source=[
+            app_commands.Choice(name="all", value="all"),
+            app_commands.Choice(name="drive", value="drive"),
+            app_commands.Choice(name="discord", value="discord"),
+            app_commands.Choice(name="notion", value="notion"),
+            app_commands.Choice(name="hatena", value="hatena"),
+            app_commands.Choice(name="x", value="x"),
+            app_commands.Choice(name="crafters_colony", value="crafters_colony"),
+            app_commands.Choice(name="minecraft_wiki", value="minecraft_wiki"),
+            app_commands.Choice(name="image", value="image"),
+            app_commands.Choice(name="member", value="member"),
+            app_commands.Choice(name="task", value="task"),
+            app_commands.Choice(name="event", value="event"),
+        ],
+        mode=[
+            app_commands.Choice(name="answer", value="answer"),
+            app_commands.Choice(name="search_only", value="search_only"),
+            app_commands.Choice(name="fast", value="fast"),
+            app_commands.Choice(name="careful", value="careful"),
+        ],
+        depth=[
+            app_commands.Choice(name="light", value="light"),
+            app_commands.Choice(name="normal", value="normal"),
+            app_commands.Choice(name="deep", value="deep"),
+        ],
+    )
+    async def ask(
+        interaction: discord.Interaction,
+        question: str,
+        source: str = "all",
+        mode: str = "answer",
+        depth: str = "normal",
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if depth == "deep":
+            response = await asyncio.to_thread(
+                agentic_context.agentic_search.search,
+                AgenticSearchRequest(
+                    query=question,
+                    source_filter=source,
+                    access=_access_context(interaction),
                 ),
             )
-        except asyncio.CancelledError:
-            await _send_status(channel, "評価を中止しました。")
-        except Exception as exc:
-            logger.exception("Eval failed")
-            await _send_status(channel, f"評価に失敗しました: {exc}")
-        finally:
-            evaluating_task = None
-            evaluating_cancel_event.clear()
-
-    async def _run_chat(
-        *,
-        message: discord.Message,
-        query: str,
-        force_fast_mode: bool,
-        routing_history_override: list[tuple[str, str, list[str]]] | None,
-        generation_history_override: list[tuple[str, str, list[str]]] | None,
-        append_sources_to_response: bool,
-        force_disable_additional_memory: bool,
-        extra_mode_instruction: str | None,
-    ) -> None:
-        channel_id = int(message.channel.id)
-        cancel_event = threading.Event()
-        channel_cancel_events[channel_id] = cancel_event
-        context.vc.notify_rag_started()
-        try:
-            answer = await asyncio.to_thread(
-                lambda: context.chat_entry.execute(
-                    ChatEntryRequest(
-                        query=query,
-                        question_author=_question_author_from_message(message),
-                        history_scope=_history_scope_for_message(message),
-                        force_fast_mode=force_fast_mode,
-                        force_disable_additional_memory=force_disable_additional_memory,
-                        routing_history_override=routing_history_override,
-                        generation_history_override=generation_history_override,
-                        append_sources_to_response=append_sources_to_response,
-                        extra_mode_instruction=extra_mode_instruction,
-                    )
-                )
-            )
-            if cancel_event.is_set():
-                return
-            await message.channel.send(answer.text)
-            routing_result = answer.metadata.get("routing_decision")
-            if isinstance(routing_result, dict):
-                routing_payload = dict(routing_result)
-            else:
-                routing_payload = None
-            _append_answer_record(
-                message=message,
-                query=query,
-                routing_result=routing_payload,
-                answer=answer.text,
-            )
-            _append_answer_prompt_record(
-                message=message,
-                query=query,
-                routing_result=routing_payload,
-                answer=answer,
-            )
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.exception("Chat failed")
-            await message.channel.send(f"エラーが発生しました: {type(exc).__name__}: {exc}")
-        finally:
-            context.vc.notify_rag_finished()
-            channel_cancel_events.pop(channel_id, None)
-            channel_generation_tasks.pop(channel_id, None)
-
-    def _warmup_skip_reason() -> str | None:
-        if warmup_lock.locked():
-            return "warmup is running"
-        if indexing_in_progress or indexing_task is not None:
-            return "indexing is running"
-        if evaluating_task is not None:
-            return "evaluation is running"
-        if any(not task.done() for task in channel_generation_tasks.values()):
-            return "answer generation is running"
-        if context.vc.has_model_activity():
-            return "voice model processing is running"
-        return None
-
-    async def _run_warmup(*, trigger: str, force: bool = False) -> None:
-        if not force:
-            reason = _warmup_skip_reason()
-            if reason:
-                logger.info("Warmup skipped: trigger=%s reason=%s", trigger, reason)
-                return
-
-        if force:
-            await warmup_lock.acquire()
         else:
-            if warmup_lock.locked():
-                logger.info("Warmup skipped: trigger=%s reason=warmup is running", trigger)
-                return
-            await warmup_lock.acquire()
-        try:
-            result = await asyncio.to_thread(
-                lambda: context.warmup.execute(WarmupRequest(trigger=trigger))
+            response = await asyncio.to_thread(
+                retrieval_context.ask.ask,
+                RetrievalQuery(
+                    text=question,
+                    source_filter=source,
+                    mode=mode,
+                    depth=depth,
+                    access=_access_context(interaction),
+                ),
             )
-            logger.info(
-                "Warmup completed. trigger=%s completed=%s skipped=%s failed=%s",
-                trigger,
-                result.completed,
-                result.skipped,
-                result.failed,
-            )
-        except Exception:
-            logger.exception("Warmup failed. trigger=%s", trigger)
-        finally:
-            warmup_lock.release()
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_detail_attachment(content=response.detail_markdown)
+        await interaction.followup.send(**kwargs)
 
-    async def _periodic_warmup_loop() -> None:
-        interval_minutes = max(0, int(context.config.ops.warmup_interval_minutes))
-        if interval_minutes <= 0:
-            logger.info("Periodic warmup disabled.")
-            return
-        interval_seconds = interval_minutes * 60
-        logger.info("Periodic warmup scheduler started. interval_minutes=%s", interval_minutes)
-        while True:
-            await asyncio.sleep(interval_seconds)
-            await _run_warmup(trigger="periodic", force=False)
-
-    async def _auto_index_loop() -> None:
-        nonlocal auto_index_last_run, indexing_task
-        logger.info(
-            "Auto index scheduler started. enabled=%s time=%s weekdays=%s",
-            context.config.scheduler.auto_index_enabled,
-            context.config.scheduler.auto_index_time,
-            context.config.scheduler.auto_index_weekdays,
-        )
-        while True:
-            await asyncio.sleep(20)
-            if not context.config.scheduler.auto_index_enabled:
-                continue
-            now = datetime.now(_JST)
-            hhmm = now.strftime("%H:%M")
-            if hhmm != context.config.scheduler.auto_index_time:
-                continue
-            weekdays = context.config.scheduler.auto_index_weekdays
-            if weekdays and now.weekday() not in weekdays:
-                continue
-            if auto_index_last_run == now.date():
-                continue
-            auto_index_last_run = now.date()
-            if indexing_in_progress or indexing_task is not None:
-                logger.info("Auto index skipped: indexing already running.")
-                continue
-            if context.vc.has_active_session():
-                logger.info("Auto index skipped: VC participation is active.")
-                continue
-            indexing_task = asyncio.create_task(
-                _run_build_index_job(channel=None, history_query="auto_index")
-            )
-
-    @client.event
-    async def on_ready() -> None:
-        nonlocal auto_index_task, periodic_warmup_task
-        logger.info("Logged in as %s", client.user)
-        await context.vc.start()
-        await _run_warmup(trigger="startup", force=True)
-        if auto_index_task is None or auto_index_task.done():
-            auto_index_task = asyncio.create_task(_auto_index_loop())
-        if periodic_warmup_task is None or periodic_warmup_task.done():
-            periodic_warmup_task = asyncio.create_task(_periodic_warmup_loop())
-
-    @client.event
-    async def on_voice_state_update(
-        member: discord.Member,
-        before: discord.VoiceState,
-        after: discord.VoiceState,
+    @bot.tree.command(name="work", description="KUMC-Agent workflow operations")
+    @app_commands.describe(
+        type="Workflow type",
+        instruction="指示または本文",
+        target="対象 ID / 検索クエリ / 追加本文",
+        format="出力形式",
+    )
+    @app_commands.choices(
+        type=[
+            app_commands.Choice(name="meeting_prepare", value="meeting_prepare"),
+            app_commands.Choice(name="meeting_minutes_draft", value="meeting_minutes_draft"),
+            app_commands.Choice(name="task_extract", value="task_extract"),
+            app_commands.Choice(name="task_add", value="task_add"),
+            app_commands.Choice(name="task_list", value="task_list"),
+            app_commands.Choice(name="task_done", value="task_done"),
+            app_commands.Choice(name="event_add", value="event_add"),
+            app_commands.Choice(name="event_list", value="event_list"),
+            app_commands.Choice(name="event_brief", value="event_brief"),
+            app_commands.Choice(name="schedule_add", value="schedule_add"),
+            app_commands.Choice(name="schedule_list", value="schedule_list"),
+            app_commands.Choice(name="doc_draft", value="doc_draft"),
+            app_commands.Choice(name="x_draft", value="x_draft"),
+            app_commands.Choice(name="announcement_draft", value="announcement_draft"),
+            app_commands.Choice(name="mc_status", value="mc_status"),
+            app_commands.Choice(name="mc_request", value="mc_request"),
+            app_commands.Choice(name="image_search", value="image_search"),
+            app_commands.Choice(name="image_usage_request", value="image_usage_request"),
+            app_commands.Choice(name="member_search", value="member_search"),
+        ],
+        format=[
+            app_commands.Choice(name="compact", value="compact"),
+            app_commands.Choice(name="markdown", value="markdown"),
+        ],
+    )
+    async def work(
+        interaction: discord.Interaction,
+        type: app_commands.Choice[str],
+        instruction: str = "",
+        target: str = "",
+        format: app_commands.Choice[str] | None = None,
     ) -> None:
-        await context.vc.on_voice_state_update(member, before, after)
-
-    @client.event
-    async def on_interaction(interaction: discord.Interaction) -> None:
-        nonlocal indexing_task, evaluating_task
-        if interaction.type != discord.InteractionType.application_command:
-            return
-        if getattr(interaction.user, "bot", False):
-            return
-        data = interaction.data
-        if not isinstance(data, dict):
-            return
-
-        parsed = parse_interaction_command(
-            name=str(data.get("name") or ""),
-            options=data.get("options"),
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        response = await asyncio.to_thread(
+            workflow_context.workflow.run,
+            WorkRequest(
+                work_type=type.value,
+                instruction=instruction,
+                target=target,
+                output_format=(format.value if format else "markdown"),
+                access=_access_context(interaction),
+            ),
         )
-        if parsed.kind == "none":
-            return
-        if openclaw_enabled:
-            return
-
-        if parsed.kind == "build_index":
-            if not _is_maintenance_authorized_user(interaction.user):
-                await _send_interaction_response(
-                    interaction,
-                    "このコマンドを実行する権限がありません。",
-                    ephemeral=True,
-                )
-                return
-            if context.vc.has_active_session():
-                await _send_interaction_response(
-                    interaction,
-                    "VC参加中のため、新規のインデックス更新は開始できません。",
-                    ephemeral=True,
-                )
-                return
-            if indexing_in_progress or (indexing_task is not None and not indexing_task.done()):
-                await _send_interaction_response(
-                    interaction,
-                    "インデックス更新は既に実行中です。",
-                    ephemeral=True,
-                )
-                return
-            await _send_interaction_response(interaction, "インデックス更新を開始します。")
-            indexing_task = asyncio.create_task(
-                _run_build_index_job(
-                    channel=interaction.channel,
-                    history_query="/ai build-index",
-                    announce_start=False,
-                )
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-work-detail.md",
             )
-            return
+        await interaction.followup.send(**kwargs)
 
-        if parsed.kind == "eval":
-            if not _is_maintenance_authorized_user(interaction.user):
-                await _send_interaction_response(
-                    interaction,
-                    "このコマンドを実行する権限がありません。",
-                    ephemeral=True,
-                )
-                return
-            if evaluating_task is not None and not evaluating_task.done():
-                await _send_interaction_response(
-                    interaction,
-                    "評価は既に実行中です。",
-                    ephemeral=True,
-                )
-                return
-            await _send_interaction_response(interaction, "評価を開始します。")
-            evaluating_task = asyncio.create_task(_run_eval_job(channel=interaction.channel))
+    @bot.tree.command(name="approval", description="KUMC-Agent approval operations")
+    @app_commands.describe(
+        action="Approval action",
+        type="Approval target type",
+        target_id="Candidate ID",
+        comment="コメント",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="list", value="list"),
+            app_commands.Choice(name="show", value="show"),
+            app_commands.Choice(name="approve", value="approve"),
+            app_commands.Choice(name="reject", value="reject"),
+            app_commands.Choice(name="edit", value="edit"),
+        ],
+        type=[
+            app_commands.Choice(name="task", value="task"),
+            app_commands.Choice(name="event", value="event"),
+            app_commands.Choice(name="schedule", value="schedule"),
+            app_commands.Choice(name="announcement", value="announcement"),
+            app_commands.Choice(name="automation_rule", value="automation_rule"),
+            app_commands.Choice(name="asset_usage", value="asset_usage"),
+            app_commands.Choice(name="server_operation", value="server_operation"),
+            app_commands.Choice(name="finance_record", value="finance_record"),
+            app_commands.Choice(name="member_assignment", value="member_assignment"),
+            app_commands.Choice(name="other", value="other"),
+        ],
+    )
+    async def approval(
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        type: app_commands.Choice[str],
+        target_id: str = "",
+        comment: str = "",
+    ) -> None:
+        if action.value in {"show", "approve", "reject", "edit"} and not target_id:
+            await interaction.response.send_message("target_id が必要です。", ephemeral=True)
             return
-
-        if parsed.kind == "stop":
-            actions: list[str] = []
-            channel_id = getattr(interaction.channel, "id", None)
-            channel_id_int = int(channel_id) if channel_id is not None else -1
-            cancel_event = channel_cancel_events.get(channel_id_int)
-            answer_task = channel_generation_tasks.get(channel_id_int)
-            if answer_task and not answer_task.done() and cancel_event is not None:
-                cancel_event.set()
-                answer_task.cancel()
-                actions.append("回答生成を中止します。")
-            if indexing_task is not None and not indexing_task.done():
-                indexing_cancel_event.set()
-                indexing_task.cancel()
-                actions.append("インデックス更新を中止します。")
-            if evaluating_task is not None and not evaluating_task.done():
-                evaluating_cancel_event.set()
-                evaluating_task.cancel()
-                actions.append("評価を中止します。")
-            if not actions:
-                actions.append("停止対象の処理は実行中ではありません。")
-            await _send_interaction_response(interaction, "\n".join(actions))
-            return
-
-        if parsed.kind in {"join_vc", "quit_vc"}:
-            await _send_interaction_response(
-                interaction,
-                "この操作は通常メッセージの `/ai join` / `/ai quit` で実行してください。",
-                ephemeral=True,
-            )
-            return
-
-        if parsed.kind == "chat":
-            await _send_interaction_response(
-                interaction,
-                "質問は通常メッセージで `/ai <query>` を送信してください。",
-                ephemeral=True,
-            )
-            return
-
-    @client.event
-    async def on_message(message: discord.Message) -> None:
-        nonlocal indexing_task, evaluating_task
-        if message.author == client.user:
-            return
-        if getattr(message.author, "bot", False):
-            return
-
-        if context.vc.is_voice_chat_channel(message.channel):
-            await context.vc.capture_voice_chat_message(message)
-
-        content = (message.content or "").strip()
-        parsed = parse_command(
-            content=content,
-            prefix=command_prefix,
-            index_command_prefix=index_command_prefix,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        response = await asyncio.to_thread(
+            workflow_context.workflow.approval,
+            action=action.value,
+            target_type=type.value,
+            target_id=target_id,
+            comment=comment,
+            access=_access_context(interaction),
         )
-
-        if parsed.kind == "join_vc":
-            handled = await context.vc.maybe_join_from_command(message)
-            if not handled:
-                await message.channel.send("`/ai join` はVCのチャット欄でのみ有効です。")
-            return
-        if parsed.kind == "quit_vc":
-            handled = await context.vc.maybe_quit_from_command(message)
-            if not handled:
-                await message.channel.send("`/ai quit` はVCのチャット欄でのみ有効です。")
-            return
-        if openclaw_enabled and parsed.kind in {"build_index", "eval", "stop"}:
-            return
-
-        if parsed.kind == "build_index":
-            if not _is_maintenance_authorized(message):
-                await message.channel.send("このコマンドを実行する権限がありません。")
-                return
-            if context.vc.has_active_session():
-                await message.channel.send("VC参加中のため、新規のインデックス更新は開始できません。")
-                return
-            if indexing_in_progress or (indexing_task is not None and not indexing_task.done()):
-                await message.channel.send("インデックス更新は既に実行中です。")
-                return
-            indexing_task = asyncio.create_task(
-                _run_build_index_job(channel=message.channel, history_query=content)
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-approval-detail.md",
             )
-            return
+        await interaction.followup.send(**kwargs)
 
-        if parsed.kind == "eval":
-            if not _is_maintenance_authorized(message):
-                await message.channel.send("このコマンドを実行する権限がありません。")
-                return
-            if evaluating_task is not None and not evaluating_task.done():
-                await message.channel.send("評価は既に実行中です。")
-                return
-            evaluating_task = asyncio.create_task(_run_eval_job(channel=message.channel))
+    @bot.tree.command(name="automation", description="KUMC-Agent automation operations")
+    @app_commands.describe(
+        action="Automation action",
+        rule_id="Rule ID",
+        mode="New mode for set_mode",
+        trigger_key="Manual trigger key",
+        idempotency_key="Idempotency key",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="list", value="list"),
+            app_commands.Choice(name="show", value="show"),
+            app_commands.Choice(name="dry_run", value="dry_run"),
+            app_commands.Choice(name="run", value="run"),
+            app_commands.Choice(name="enable", value="enable"),
+            app_commands.Choice(name="disable", value="disable"),
+            app_commands.Choice(name="set_mode", value="set_mode"),
+        ],
+        mode=[
+            app_commands.Choice(name="dry_run", value="dry_run"),
+            app_commands.Choice(name="approval_required", value="approval_required"),
+            app_commands.Choice(name="auto_run", value="auto_run"),
+        ],
+    )
+    async def automation(
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        rule_id: str = "",
+        mode: app_commands.Choice[str] | None = None,
+        trigger_key: str = "manual",
+        idempotency_key: str = "",
+    ) -> None:
+        if not _is_authorized(interaction):
+            await interaction.response.send_message("権限がありません。", ephemeral=True)
             return
-
-        if parsed.kind == "stop":
-            actions: list[str] = []
-            channel_id = int(message.channel.id)
-            cancel_event = channel_cancel_events.get(channel_id)
-            answer_task = channel_generation_tasks.get(channel_id)
-            if answer_task and not answer_task.done() and cancel_event is not None:
-                cancel_event.set()
-                answer_task.cancel()
-                actions.append("回答生成を中止します。")
-            if indexing_task is not None and not indexing_task.done():
-                indexing_cancel_event.set()
-                indexing_task.cancel()
-                actions.append("インデックス更新を中止します。")
-            if evaluating_task is not None and not evaluating_task.done():
-                evaluating_cancel_event.set()
-                evaluating_task.cancel()
-                actions.append("評価を中止します。")
-            if not actions:
-                actions.append("停止対象の処理は実行中ではありません。")
-            await message.channel.send("\n".join(actions))
+        if action.value != "list" and not rule_id:
+            await interaction.response.send_message("rule_id が必要です。", ephemeral=True)
             return
-
-        query = parsed.payload if parsed.kind == "chat" else _extract_query_from_message(message)
-        explicit_fast = bool(parsed.force_fast_mode)
-        if not query:
-            return
-        if not explicit_fast:
-            query, explicit_fast = _strip_fast_prefix(query)
-        if not query:
-            return
-        if indexing_in_progress:
-            await message.channel.send(_indexing_blocked_message())
-            return
-        if (
-            context.config.app.max_input_characters > 0
-            and len(query) > context.config.app.max_input_characters
-        ):
-            await message.channel.send(
-                f"入力できる最大文字数を超えています。（{context.config.app.max_input_characters}）以下で入力してください。"
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        access = _access_context(interaction)
+        if action.value == "list":
+            response = await asyncio.to_thread(automation_context.automation.list_rules)
+        elif action.value == "show":
+            response = await asyncio.to_thread(
+                automation_context.automation.show,
+                rule_id=rule_id,
             )
-            return
-        channel_id = int(message.channel.id)
-        existing = channel_generation_tasks.get(channel_id)
-        if existing is not None and not existing.done():
-            await message.channel.send(
-                "回答生成は既に実行中です。中止する場合は /ai stop を実行してください。"
+        elif action.value == "enable":
+            response = await asyncio.to_thread(
+                automation_context.automation.enable,
+                rule_id=rule_id,
+                access=access,
             )
-            return
-
-        special_channel_mode = _is_special_channel_invocation(message)
-        routing_history_override: list[tuple[str, str, list[str]]] | None = None
-        generation_history_override: list[tuple[str, str, list[str]]] | None = None
-        force_disable_additional_memory = False
-        append_sources_to_response = True
-        extra_mode_instruction: str | None = None
-        if not special_channel_mode:
-            history = await _collect_special_channel_history(message)
-            routing_history_override = history
-            generation_history_override = history
-            force_disable_additional_memory = True
-            append_sources_to_response = False
-            extra_mode_instruction = context.config.rag.history.special_channel_custom_instruction
-            logger.info(
-                "Non-special channel mode override applied. channel=%s turns=%s",
-                getattr(message.channel, "name", ""),
-                len(history),
+        elif action.value == "disable":
+            response = await asyncio.to_thread(
+                automation_context.automation.disable,
+                rule_id=rule_id,
+                access=access,
             )
-
-        force_fast_mode = explicit_fast or context.vc.should_use_fast_model_for_query()
-        task = asyncio.create_task(
-            _run_chat(
-                message=message,
-                query=query,
-                force_fast_mode=force_fast_mode,
-                routing_history_override=routing_history_override,
-                generation_history_override=generation_history_override,
-                append_sources_to_response=append_sources_to_response,
-                force_disable_additional_memory=force_disable_additional_memory,
-                extra_mode_instruction=extra_mode_instruction,
+        elif action.value == "set_mode":
+            response = await asyncio.to_thread(
+                automation_context.automation.set_mode,
+                rule_id=rule_id,
+                mode=mode.value if mode else "dry_run",
+                access=access,
             )
-        )
-        channel_generation_tasks[channel_id] = task
+        elif action.value == "dry_run":
+            response = await asyncio.to_thread(
+                automation_context.automation.dry_run,
+                rule_id=rule_id,
+                trigger_key=trigger_key,
+                idempotency_key=idempotency_key,
+                access=access,
+            )
+        else:
+            response = await asyncio.to_thread(
+                automation_context.automation.run,
+                rule_id=rule_id,
+                trigger_key=trigger_key,
+                idempotency_key=idempotency_key,
+                access=access,
+            )
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-automation-detail.md",
+            )
+        await interaction.followup.send(**kwargs)
 
-    token = context.config.integrations.discord.bot_token
-    if not token:
-        raise RuntimeError("KUMC_DISCORD_BOT_TOKEN is not set.")
-    client.run(token, log_handler=None)
+    @bot.event
+    async def on_ready() -> None:
+        allowed_guilds = foundation_context.config.security.discord_guild_allow_list
+        if allowed_guilds:
+            for guild_id in allowed_guilds:
+                await bot.tree.sync(guild=discord.Object(id=int(guild_id)))
+        else:
+            await bot.tree.sync()
+        logger.info("Discord bot app ready. user=%s", bot.user)
+
+    return bot
 
 
-if __name__ == "__main__":
-    main()
+__all__ = ["create_bot"]

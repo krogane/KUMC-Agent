@@ -1,31 +1,37 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
+from kumc_agent.apps.agentic import build_agentic_app_context
+from kumc_agent.apps.automation import build_automation_app_context
 from kumc_agent.apps.foundation import build_foundation_app_context
+from kumc_agent.apps.ingestion import build_ingestion_app_context
+from kumc_agent.apps.retrieval import build_retrieval_app_context
+from kumc_agent.apps.workflow import build_workflow_app_context
+from kumc_agent.frontends.http.app import create_app as create_http_app
+
+
+@dataclass(frozen=True)
+class ApiAppContext:
+    foundation: object
+    retrieval: object
+    agentic: object
+    workflow: object
+    automation: object
+    ingestion: object
 
 
 def create_app(*, base_dir: Path | None = None):
-    try:
-        from fastapi import FastAPI, HTTPException
-    except ImportError as exc:  # pragma: no cover - depends on deployment env
-        raise RuntimeError("fastapi is required to run the API app.") from exc
-
-    context = build_foundation_app_context(base_dir=base_dir)
-    app = FastAPI(title="KUMC-Agent API", version="0.2.0")
-
-    @app.get("/health")
-    def health() -> dict[str, object]:
-        return context.health.check(actor_id="api", actor_type="service").as_dict()
-
-    @app.post("/admin/action/health")
-    def admin_health() -> dict[str, object]:
-        report = context.health.check(actor_id="api-admin", actor_type="service")
-        if report.status == "unhealthy":
-            raise HTTPException(status_code=503, detail=report.as_dict())
-        return report.as_dict()
-
-    return app
+    context = ApiAppContext(
+        foundation=build_foundation_app_context(base_dir=base_dir),
+        retrieval=build_retrieval_app_context(base_dir=base_dir),
+        agentic=build_agentic_app_context(base_dir=base_dir),
+        workflow=build_workflow_app_context(base_dir=base_dir),
+        automation=build_automation_app_context(base_dir=base_dir),
+        ingestion=build_ingestion_app_context(base_dir=base_dir),
+    )
+    return create_http_app(context)
 
 
 def main(*, host: str = "127.0.0.1", port: int = 8000, base_dir: Path | None = None) -> None:

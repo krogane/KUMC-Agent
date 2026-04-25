@@ -5,6 +5,12 @@ from datetime import datetime
 from typing import Any
 
 from kumc_agent.domain.models.minecraft import ServerOperation
+from kumc_agent.domain.models.operations import (
+    Asset,
+    AssetUsageRequest,
+    MemberProfile,
+    WorkflowCandidate,
+)
 from kumc_agent.domain.models.retrieval import AccessContext, Citation
 
 
@@ -58,6 +64,24 @@ class Event:
 
 
 @dataclass(frozen=True)
+class EventCandidate:
+    id: str
+    title: str
+    summary: str | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    place: str | None = None
+    related_source_ids: tuple[str, ...] = tuple()
+    evidence: tuple[Citation, ...] = tuple()
+    confidence: str = "low"
+    status: str = "proposed"
+    created_by: str = "agent"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Meeting:
     id: str
     title: str
@@ -82,6 +106,23 @@ class ScheduleEvent:
     place: str | None = None
     related_event_id: str | None = None
     status: str = "planned"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleCandidate:
+    id: str
+    title: str
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    place: str | None = None
+    related_event_id: str | None = None
+    evidence: tuple[Citation, ...] = tuple()
+    confidence: str = "low"
+    status: str = "proposed"
+    created_by: str = "agent"
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -115,6 +156,12 @@ class WorkResponse:
     text: str
     detail_markdown: str = ""
     task_candidates: tuple[TaskCandidate, ...] = tuple()
+    event_candidates: tuple[EventCandidate, ...] = tuple()
+    schedule_candidates: tuple[ScheduleCandidate, ...] = tuple()
+    workflow_candidates: tuple[WorkflowCandidate, ...] = tuple()
+    assets: tuple[Asset, ...] = tuple()
+    asset_usage_requests: tuple[AssetUsageRequest, ...] = tuple()
+    member_profiles: tuple[MemberProfile, ...] = tuple()
     tasks: tuple[Task, ...] = tuple()
     events: tuple[Event, ...] = tuple()
     schedules: tuple[ScheduleEvent, ...] = tuple()

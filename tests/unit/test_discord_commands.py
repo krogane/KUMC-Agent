@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 import sys
 import unittest
 from pathlib import Path
@@ -9,81 +11,37 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.frontends.discord.commands import (
-    parse_command,
-    parse_interaction_command,
-)
+from kumc_agent.frontends.discord.app import create_bot
 
 
-class DiscordCommandParseTests(unittest.TestCase):
-    def test_join_command(self) -> None:
-        parsed = parse_command(
-            content="/ai join",
-            prefix="/ai",
-            index_command_prefix="/ai build-index",
+def _context(**values: object) -> SimpleNamespace:
+    return SimpleNamespace(**values)
+
+
+class DiscordSlashCommandAdapterTests(unittest.TestCase):
+    def test_create_bot_registers_slash_commands(self) -> None:
+        config = _context(
+            security=_context(
+                maintenance_command_author_ids=tuple(),
+                discord_guild_allow_list=tuple(),
+            )
         )
-        self.assertEqual(parsed.kind, "join_vc")
-
-    def test_quit_command(self) -> None:
-        parsed = parse_command(
-            content="/ai quit",
-            prefix="/ai",
-            index_command_prefix="/ai build-index",
+        bot = create_bot(
+            foundation_context=_context(config=config),
+            retrieval_context=_context(),
+            agentic_context=_context(),
+            workflow_context=_context(),
+            automation_context=_context(),
+            ingestion_context=_context(),
         )
-        self.assertEqual(parsed.kind, "quit_vc")
-
-    def test_chat_command(self) -> None:
-        parsed = parse_command(
-            content="/ai KUMCとは",
-            prefix="/ai",
-            index_command_prefix="/ai build-index",
-        )
-        self.assertEqual(parsed.kind, "chat")
-        self.assertEqual(parsed.payload, "KUMCとは")
-
-    def test_chat_fast_command(self) -> None:
-        parsed = parse_command(
-            content="/ai fast KUMCとは",
-            prefix="/ai",
-            index_command_prefix="/ai build-index",
-        )
-        self.assertEqual(parsed.kind, "chat")
-        self.assertEqual(parsed.payload, "KUMCとは")
-        self.assertTrue(parsed.force_fast_mode)
-
-    def test_build_index_command(self) -> None:
-        parsed = parse_command(
-            content="/ai build-index",
-            prefix="/ai",
-            index_command_prefix="/ai build-index",
-        )
-        self.assertEqual(parsed.kind, "build_index")
-
-    def test_interaction_build_index_subcommand(self) -> None:
-        parsed = parse_interaction_command(
-            name="ai",
-            options=[
-                {
-                    "name": "build-index",
-                    "type": 1,
-                    "options": [],
-                }
-            ],
-        )
-        self.assertEqual(parsed.kind, "build_index")
-
-    def test_interaction_build_index_action_option(self) -> None:
-        parsed = parse_interaction_command(
-            name="ai",
-            options=[
-                {
-                    "name": "action",
-                    "type": 3,
-                    "value": "build-index",
-                }
-            ],
-        )
-        self.assertEqual(parsed.kind, "build_index")
+        try:
+            command_names = {command.name for command in bot.tree.get_commands()}
+            self.assertEqual(
+                command_names,
+                {"admin", "ask", "work", "approval", "automation"},
+            )
+        finally:
+            asyncio.run(bot.close())
 
 
 if __name__ == "__main__":

@@ -2,37 +2,108 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import asyncio
 
 from kumc_agent.apps.automation import build_automation_app_context
 from kumc_agent.apps.foundation import build_foundation_app_context
+from kumc_agent.apps.ingestion import build_ingestion_app_context
+from kumc_agent.apps.workflow import build_workflow_app_context
+from kumc_agent.domain.models.retrieval import AccessContext
+from kumc_agent.domain.models.source import BackfillScope
+from kumc_agent.domain.models.workflow import WorkRequest
 from kumc_agent.utils.logging import configure_logging, default_execution_log_path
 
 logger = logging.getLogger(__name__)
 
 
-def run_once(*, base_dir: Path | None = None) -> dict[str, object]:
+def run_once(
+    *,
+    base_dir: Path | None = None,
+    job_type: str = "worker.health",
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
     context = build_foundation_app_context(base_dir=base_dir)
     automation = build_automation_app_context(base_dir=base_dir)
-    job = context.jobs.start("worker.health")
+    job = context.jobs.start(job_type)
     try:
+        result = _dispatch_job(base_dir=base_dir, job_type=job_type, payload=payload or {})
         report = context.health.check(actor_id="worker", actor_type="service")
-        readiness = automation.readiness.report()
-        rules = automation.automation.seed_defaults()
         context.jobs.complete(
             job,
             metadata={
                 "health_status": report.status,
-                "readiness_status": readiness.status,
-                "automation_rules": len(rules),
+                "result": result,
             },
         )
         payload = report.as_dict()
-        payload["readiness_status"] = readiness.status
-        payload["automation_rules"] = len(rules)
+        payload["job_type"] = job_type
+        payload["result"] = result
         return payload
     except Exception as exc:
         context.jobs.fail(job, str(exc))
         raise
+
+
+def _dispatch_job(
+    *,
+    base_dir: Path | None,
+    job_type: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    if job_type == "worker.health":
+        automation = build_automation_app_context(base_dir=base_dir)
+        readiness = automation.readiness.report()
+        rules = automation.automation.seed_defaults()
+        return {
+            "readiness_status": readiness.status,
+            "automation_rules": len(rules),
+            "side_effects": "none",
+        }
+    if job_type == "ingest_backfill":
+        ingestion = build_ingestion_app_context(base_dir=base_dir)
+        source = str(payload.get("source") or "").strip()
+        results = asyncio.run(
+            ingestion.service.backfill_many(
+                source_kinds=(source,) if source else tuple(),
+                scope=BackfillScope(
+                    limit=int(payload["limit"]) if payload.get("limit") is not None else None,
+                    force=bool(payload.get("force", False)),
+                ),
+            )
+        )
+        return {"results": [result.__dict__ for result in results], "side_effects": "indexing_only"}
+    if job_type == "weekly_summary_draft":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type="announcement_draft",
+                instruction=str(payload.get("instruction") or "週次まとめ draft"),
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {"text": response.text, "metadata": response.metadata, "side_effects": "draft_only"}
+    if job_type == "task_due_reminder":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type="task_list",
+                instruction="status: todo",
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {"open_tasks": len(response.tasks), "side_effects": "none"}
+    if job_type == "workflow_prepare":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type=str(payload.get("work_type") or "meeting_prepare"),
+                instruction=str(payload.get("instruction") or ""),
+                target=str(payload.get("target") or ""),
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {"text": response.text, "metadata": response.metadata, "side_effects": "draft_or_candidate_only"}
+    return {"status": "skipped", "reason": f"unsupported job_type: {job_type}", "side_effects": "none"}
 
 
 def main(*, base_dir: Path | None = None) -> None:

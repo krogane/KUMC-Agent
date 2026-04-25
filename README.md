@@ -14,12 +14,12 @@ Announcement、Minecraft 支援、Automation / Production hardening を実装し
 実装正本は `src/kumc_agent` です。`src/kumc_agent/infra/legacy` は移行前コードの保持領域で、
 新規実装から直接依存しない方針です。
 
-- `apps`: Wave 1-7 の起動単位。`bot`、`api`、`worker`、foundation、retrieval、workflow、automation など。
+- `apps`: 本番プロセス入口と app context 構築。`bot`、`api`、`worker`、foundation、retrieval、workflow、automation など。
 - `domain`: 外部 SDK 非依存の dataclass / policy / port。
 - `features`: 機能単位の service。RAG、indexing、retrieval、ingestion、workflow、docgen、announcement、minecraft、automation など。
 - `infra`: 外部依存・永続化・repository・connector・migration 実装。
-- `frontends`: 既存互換の console / Discord / HTTP frontend。新しい運用入口は主に `apps/*`。
-- `usecases`: 既存 CLI / frontend 互換の orchestration。
+- `frontends`: Console / Discord / HTTP の protocol/UI adapter。context 構築は `apps` から注入します。
+- `usecases`: CLI / frontend から呼ばれる orchestration。
 - `runtime`: DI と runtime context。
 - `config`: YAML、`.env`、環境変数の読み込みと schema 化。
 
@@ -93,7 +93,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli --help
 
 ## Entrypoints
 
-### New App Entrypoints
+### App Entrypoints
 
 ```bash
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli bot
@@ -101,8 +101,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli api --host 127.0.0.1 --por
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker
 ```
 
-- `bot`: Discord slash-command 相当の app context を起動します。
-- `api`: Wave 1 API app を起動します。
+- `bot`: Discord slash-command bot を起動します。
+- `api`: API app を起動します。
 - `worker`: worker skeleton を 1 回実行します。
 
 ### Admin / DB
@@ -154,7 +154,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli automation --action set_mo
 
 `approval` は現在 `task` type のみです。外部投稿・Minecraft 実操作・完全自動実行は、誤操作防止のため dry-run / approval-first を基本にしています。
 
-### Legacy-Compatible Entrypoints
+### Local / Tool Entrypoints
 
 ```bash
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli repl
@@ -163,12 +163,9 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --query "KUMCの�
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index build
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index update
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli discord
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli http
 ```
 
-`discord` は既存 `/ai` 系の互換 frontend です。新しい slash-command app は `bot` を使います。
-`http` / `frontends.http.app` は互換用 stub のままです。実装済み API app は `api` を使います。
+`discord` / `http` 互換入口は削除済みです。Discord は `bot`、HTTP API は `api` を使います。
 
 ## Implemented Waves
 

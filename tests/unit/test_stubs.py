@@ -12,7 +12,23 @@ if str(SRC) not in sys.path:
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.vc.config import VCManagerConfig
 from kumc_agent.features.vc.service import VCService
-from kumc_agent.frontends.http.app import main as http_main
+from kumc_agent.frontends.http.app import create_app
+
+
+class _FakeHealthReport:
+    status = "healthy"
+
+    def as_dict(self) -> dict[str, object]:
+        return {"status": self.status}
+
+
+class _FakeHealth:
+    def check(self, *, actor_id: str, actor_type: str) -> _FakeHealthReport:
+        return _FakeHealthReport()
+
+
+class _FakeContext:
+    health = _FakeHealth()
 
 
 class StubTests(unittest.TestCase):
@@ -86,9 +102,14 @@ class StubTests(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             DocGenService().run()
 
-    def test_http_stub(self) -> None:
-        with self.assertRaises(NotImplementedError):
-            http_main()
+    def test_http_health_route(self) -> None:
+        from fastapi.testclient import TestClient
+
+        client = TestClient(create_app(_FakeContext()))
+        response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "healthy"})
 
 
 if __name__ == "__main__":

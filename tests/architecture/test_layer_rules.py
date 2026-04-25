@@ -31,6 +31,26 @@ class LayerRuleTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertNotIn("kumc_agent.infra", content, msg=f"Frontend imports infra: {path}")
 
+    def test_frontends_do_not_build_app_contexts(self) -> None:
+        frontends_dir = SRC / "kumc_agent" / "frontends"
+        forbidden = (
+            "build_runtime_context",
+            "build_foundation_app_context",
+            "build_retrieval_app_context",
+            "build_agentic_app_context",
+            "build_workflow_app_context",
+            "build_automation_app_context",
+            "build_ingestion_app_context",
+        )
+        for path in frontends_dir.rglob("*.py"):
+            content = path.read_text(encoding="utf-8")
+            for token in forbidden:
+                self.assertNotIn(
+                    token,
+                    content,
+                    msg=f"Frontend builds app/runtime context: {path}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

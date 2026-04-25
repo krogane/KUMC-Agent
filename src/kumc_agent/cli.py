@@ -7,8 +7,6 @@ import logging
 from pathlib import Path
 
 from kumc_agent.frontends.console.repl import run_repl
-from kumc_agent.frontends.discord.app import main as run_discord
-from kumc_agent.frontends.http.app import main as run_http
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.chat.entry import ChatEntryRequest
@@ -34,8 +32,6 @@ def _build_tool_rag_payload(answer: object) -> dict[str, object]:
             }
             for source in getattr(answer, "sources", [])
         ],
-        "routing_decision": metadata.get("routing_decision"),
-        "fast_mode": bool(metadata.get("fast_mode", False)),
         "metadata": metadata,
     }
 
@@ -54,6 +50,12 @@ def _workflow_response_payload(response: object) -> dict[str, object]:
         "text": getattr(response, "text", ""),
         "detail_markdown": getattr(response, "detail_markdown", ""),
         "task_candidates": _dump_items(getattr(response, "task_candidates", ())),
+        "event_candidates": _dump_items(getattr(response, "event_candidates", ())),
+        "schedule_candidates": _dump_items(getattr(response, "schedule_candidates", ())),
+        "workflow_candidates": _dump_items(getattr(response, "workflow_candidates", ())),
+        "assets": _dump_items(getattr(response, "assets", ())),
+        "asset_usage_requests": _dump_items(getattr(response, "asset_usage_requests", ())),
+        "member_profiles": _dump_items(getattr(response, "member_profiles", ())),
         "tasks": _dump_items(getattr(response, "tasks", ())),
         "events": _dump_items(getattr(response, "events", ())),
         "schedules": _dump_items(getattr(response, "schedules", ())),
@@ -133,15 +135,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ragas_parser.add_argument("--refresh-answer-cache", action="store_true")
     ragas_parser.add_argument("--disable-history-for-eval", action="store_true")
 
-    subparsers.add_parser("discord", help="Run Discord frontend")
-    subparsers.add_parser("http", help="Run HTTP stub frontend")
     subparsers.add_parser("bot", help="Run Wave 1 Discord slash-command bot")
 
     api_parser = subparsers.add_parser("api", help="Run Wave 1 API app")
     api_parser.add_argument("--host", default="127.0.0.1")
     api_parser.add_argument("--port", type=int, default=8000)
 
-    subparsers.add_parser("worker", help="Run Wave 1 worker skeleton once")
+    worker_parser = subparsers.add_parser("worker", help="Run worker job once")
+    worker_parser.add_argument("--job-type", default="worker.health")
+    worker_parser.add_argument("--payload-json", default="{}")
 
     admin_parser = subparsers.add_parser("admin", help="Admin actions")
     admin_parser.add_argument(
@@ -180,7 +182,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ask_parser = subparsers.add_parser("ask", help="Wave 3 integrated ask route")
     ask_parser.add_argument("--question", required=True)
-    ask_parser.add_argument("--source", default="all")
+    ask_parser.add_argument(
+        "--source",
+        default="all",
+        choices=(
+            "all",
+            "drive",
+            "discord",
+            "notion",
+            "hatena",
+            "x",
+            "crafters_colony",
+            "minecraft_wiki",
+            "image",
+            "member",
+            "task",
+            "event",
+        ),
+    )
     ask_parser.add_argument("--mode", default="answer", choices=("answer", "search_only", "fast", "careful"))
     ask_parser.add_argument("--depth", default="normal", choices=("light", "normal", "deep"))
     ask_parser.add_argument("--user-id", default="")
@@ -209,6 +228,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "announcement_draft",
             "mc_status",
             "mc_request",
+            "image_search",
+            "image_usage_request",
+            "member_search",
         ),
     )
     work_parser.add_argument("--instruction", default="")
@@ -220,7 +242,22 @@ def _build_parser() -> argparse.ArgumentParser:
     work_parser.add_argument("--admin", action="store_true")
 
     approval_parser = subparsers.add_parser("approval", help="Wave 4 approval operations")
-    approval_parser.add_argument("--type", default="task", choices=("task",))
+    approval_parser.add_argument(
+        "--type",
+        default="task",
+        choices=(
+            "task",
+            "event",
+            "schedule",
+            "announcement",
+            "automation_rule",
+            "asset_usage",
+            "server_operation",
+            "finance_record",
+            "member_assignment",
+            "other",
+        ),
+    )
     approval_parser.add_argument("--action", required=True, choices=("list", "show", "approve", "reject", "edit"))
     approval_parser.add_argument("--target-id", default="")
     approval_parser.add_argument("--comment", default="")
@@ -255,14 +292,6 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.command == "discord":
-        run_discord()
-        return
-
-    if args.command == "http":
-        run_http()
-        return
-
     if args.command == "bot":
         from kumc_agent.apps.bot.app import main as run_bot
 
@@ -276,9 +305,13 @@ def main() -> None:
         return
 
     if args.command == "worker":
-        from kumc_agent.apps.worker.app import main as run_worker
+        from kumc_agent.apps.worker.app import run_once
 
-        run_worker()
+        result = run_once(
+            job_type=args.job_type,
+            payload=json.loads(args.payload_json or "{}"),
+        )
+        print(json.dumps(result, ensure_ascii=False, default=str))
         return
 
     if args.command == "admin":

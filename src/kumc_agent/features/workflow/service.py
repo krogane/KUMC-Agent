@@ -10,11 +10,18 @@ from uuid import uuid4
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.agentic import AgenticSearchRequest
 from kumc_agent.domain.models.docgen import DocGenRequest
+from kumc_agent.domain.models.operations import (
+    AssetUsageRequest,
+    WorkflowCandidate,
+    WorkflowRun,
+)
 from kumc_agent.domain.models.retrieval import AccessContext, Citation, RetrievalQuery
 from kumc_agent.domain.models.workflow import (
     ApprovalRecord,
     Event,
+    EventCandidate,
     Meeting,
+    ScheduleCandidate,
     ScheduleEvent,
     Task,
     TaskCandidate,
@@ -29,6 +36,7 @@ from kumc_agent.features.agentic import AgenticSearchService
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.minecraft import MinecraftSupportService
 from kumc_agent.infra.audit.repository import AuditLogRepository
+from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.infra.workflow.repository import WorkflowRepository
 from kumc_agent.utils.hashing import stable_hash
 
@@ -64,6 +72,7 @@ class WorkflowService:
         docgen: DocGenService | None = None,
         announcement: AnnouncementDraftService | None = None,
         minecraft: MinecraftSupportService | None = None,
+        operations: OperationsRepository | None = None,
     ) -> None:
         self.repository = repository
         self.ask_service = ask_service
@@ -72,8 +81,34 @@ class WorkflowService:
         self.docgen = docgen
         self.announcement = announcement
         self.minecraft = minecraft
+        self.operations = operations
 
     def run(self, request: WorkRequest) -> WorkResponse:
+        run_record = self._start_workflow_run(request)
+        try:
+            response = self._dispatch(request)
+        except Exception as exc:
+            self._finish_workflow_run(run_record, status="failed", error=str(exc))
+            raise
+        self._finish_workflow_run(
+            run_record,
+            status=_workflow_response_status(response),
+            metadata={
+                "task_candidates": len(response.task_candidates),
+                "event_candidates": len(response.event_candidates),
+                "schedule_candidates": len(response.schedule_candidates),
+                "workflow_candidates": len(response.workflow_candidates),
+                "assets": len(response.assets),
+                "asset_usage_requests": len(response.asset_usage_requests),
+                "member_profiles": len(response.member_profiles),
+                "events": len(response.events),
+                "schedules": len(response.schedules),
+                "server_operations": len(response.server_operations),
+            },
+        )
+        return response
+
+    def _dispatch(self, request: WorkRequest) -> WorkResponse:
         work_type = request.work_type.strip().lower()
         if work_type == "meeting_prepare":
             return self.meeting_prepare(request)
@@ -107,6 +142,12 @@ class WorkflowService:
             return self.mc_status(request)
         if work_type == "mc_request":
             return self.mc_request(request)
+        if work_type == "image_search":
+            return self.image_search(request)
+        if work_type == "image_usage_request":
+            return self.image_usage_request(request)
+        if work_type == "member_search":
+            return self.member_search(request)
         raise ValueError(f"Unsupported work type: {request.work_type}")
 
     def meeting_prepare(self, request: WorkRequest) -> WorkResponse:
@@ -296,12 +337,29 @@ class WorkflowService:
 
     def event_add(self, request: WorkRequest) -> WorkResponse:
         event = self._event_from_text(self._source_text(request))
-        stored = self.repository.save_event(event)
-        self._audit("workflow.event_add", request.access, "succeeded", stored.id)
+        candidate = self.repository.save_event_candidate(
+            EventCandidate(
+                id=stable_hash(f"event-candidate:{event.title}:{event.starts_at}:{event.place}")[:32],
+                title=event.title,
+                summary=event.summary,
+                starts_at=event.starts_at,
+                ends_at=event.ends_at,
+                place=event.place,
+                related_source_ids=event.related_source_ids,
+                confidence="high" if event.starts_at and event.place else "medium",
+                status="proposed",
+                created_by="user",
+                metadata={
+                    **event.metadata,
+                    "created_by_user_id": request.access.user_id,
+                },
+            )
+        )
+        self._audit("workflow.event_add", request.access, "proposed", candidate.id)
         return WorkResponse(
-            text=f"Event を登録しました: {stored.title}",
-            detail_markdown=self._format_events([stored]),
-            events=(stored,),
+            text=f"EventCandidate を作成しました。承認されるまで Event 正本には入りません: {candidate.title}",
+            detail_markdown=self._format_event_candidates([candidate]),
+            event_candidates=(candidate,),
         )
 
     def event_list(self, request: WorkRequest) -> WorkResponse:
@@ -348,12 +406,30 @@ class WorkflowService:
 
     def schedule_add(self, request: WorkRequest) -> WorkResponse:
         schedule = self._schedule_from_text(self._source_text(request))
-        stored = self.repository.save_schedule(schedule)
-        self._audit("workflow.schedule_add", request.access, "succeeded", stored.id)
+        candidate = self.repository.save_schedule_candidate(
+            ScheduleCandidate(
+                id=stable_hash(
+                    f"schedule-candidate:{schedule.title}:{schedule.starts_at}:{schedule.place}:{schedule.related_event_id}"
+                )[:32],
+                title=schedule.title,
+                starts_at=schedule.starts_at,
+                ends_at=schedule.ends_at,
+                place=schedule.place,
+                related_event_id=schedule.related_event_id,
+                confidence="high" if schedule.starts_at and schedule.place else "medium",
+                status="proposed",
+                created_by="user",
+                metadata={
+                    **schedule.metadata,
+                    "created_by_user_id": request.access.user_id,
+                },
+            )
+        )
+        self._audit("workflow.schedule_add", request.access, "proposed", candidate.id)
         return WorkResponse(
-            text=f"Schedule を登録しました: {stored.title}",
-            detail_markdown=self._format_schedules([stored]),
-            schedules=(stored,),
+            text=f"ScheduleCandidate を作成しました。承認されるまで Schedule 正本には入りません: {candidate.title}",
+            detail_markdown=self._format_schedule_candidates([candidate]),
+            schedule_candidates=(candidate,),
         )
 
     def schedule_list(self, request: WorkRequest) -> WorkResponse:
@@ -489,6 +565,106 @@ class WorkflowService:
             },
         )
 
+    def image_search(self, request: WorkRequest) -> WorkResponse:
+        query = (request.target or request.instruction).strip()
+        if self.operations is None:
+            return WorkResponse(
+                text="画像検索 repository は未設定です。",
+                detail_markdown="Asset repository is not configured.",
+                metadata={"route": "image_search", "configured": False},
+            )
+        assets = tuple(self.operations.list_assets(query=query))
+        detail = self._format_assets(list(assets))
+        if not assets:
+            detail = "\n".join(
+                [
+                    "# Image Search",
+                    "",
+                    "該当する Asset は登録されていません。",
+                    "外部画像を再利用可能とは判断していません。",
+                ]
+            )
+        return WorkResponse(
+            text=f"画像候補は {len(assets)} 件です。利用する場合は image_usage_request で承認依頼を作成してください。",
+            detail_markdown=detail,
+            assets=assets,
+            metadata={"route": "image_search", "query": query},
+        )
+
+    def image_usage_request(self, request: WorkRequest) -> WorkResponse:
+        if self.operations is None:
+            return WorkResponse(
+                text="画像利用申請 repository は未設定です。",
+                detail_markdown="Asset usage repository is not configured.",
+                metadata={"route": "image_usage_request", "configured": False},
+            )
+        asset_id = request.target.strip() or _extract_labeled_value(
+            request.instruction,
+            ("asset_id", "asset", "画像ID"),
+        ) or ""
+        asset = self.operations.get_asset(asset_id) if asset_id else None
+        purpose = _extract_labeled_value(request.instruction, ("purpose", "目的", "用途")) or request.instruction
+        medium = _extract_labeled_value(request.instruction, ("medium", "媒体", "掲載先")) or ""
+        usage = self.operations.save_asset_usage_request(
+            AssetUsageRequest(
+                id=stable_hash(f"asset-usage:{asset_id}:{purpose}:{medium}:{request.access.user_id}")[:32],
+                asset_id=asset_id,
+                purpose=purpose.strip(),
+                medium=medium.strip(),
+                requested_by=request.access.user_id,
+                status="proposed",
+                needs_owner_check=True,
+                needs_people_check=True if asset is None else bool(asset.contains_people),
+                payload={"instruction": request.instruction, "target": request.target},
+                metadata={
+                    "asset_found": asset is not None,
+                    "rights_status": asset.rights_status if asset else "unknown",
+                },
+            )
+        )
+        candidate = self.operations.save_workflow_candidate(
+            WorkflowCandidate(
+                id=stable_hash(f"workflow-candidate:asset_usage:{usage.id}")[:32],
+                candidate_type="asset_usage",
+                title=f"Asset usage request: {usage.asset_id or 'unresolved asset'}",
+                payload=asdict(usage),
+                confidence="medium" if asset else "low",
+                status="proposed",
+                created_by=request.access.user_id or "agent",
+                metadata={"target_type": "asset_usage", "target_id": usage.id},
+            )
+        )
+        return WorkResponse(
+            text=f"AssetUsageRequest を作成しました。承認前に外部公開可能とは判断しません: {usage.id}",
+            detail_markdown=self._format_asset_usage_requests([usage]),
+            workflow_candidates=(candidate,),
+            asset_usage_requests=(usage,),
+            assets=(asset,) if asset else tuple(),
+            metadata={"route": "image_usage_request", "approval_required": True},
+        )
+
+    def member_search(self, request: WorkRequest) -> WorkResponse:
+        if not _can_search_members(request.access):
+            return WorkResponse(
+                text="権限がありません。",
+                detail_markdown="member_search requires organizer or admin. 対象情報の有無は表示しません。",
+                metadata={"route": "member_search", "authorized": False},
+            )
+        if self.operations is None:
+            return WorkResponse(
+                text="メンバー検索 repository は未設定です。",
+                detail_markdown="Member profile repository is not configured.",
+                metadata={"route": "member_search", "configured": False},
+            )
+        query = (request.target or request.instruction).strip()
+        profiles = tuple(self.operations.search_member_profiles(query=query))
+        return WorkResponse(
+            text=f"条件に合うメンバー候補は {len(profiles)} 件です。担当決定には本人または運営確認が必要です。",
+            detail_markdown=self._format_member_profiles(list(profiles)),
+            member_profiles=profiles,
+            metadata={"route": "member_search", "query": query},
+        )
+
     def approval(
         self,
         *,
@@ -500,8 +676,38 @@ class WorkflowService:
     ) -> WorkResponse:
         normalized_action = action.strip().lower()
         normalized_type = target_type.strip().lower() or "task"
+        if normalized_type == "event":
+            return self._event_approval(
+                action=normalized_action,
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+        if normalized_type == "schedule":
+            return self._schedule_approval(
+                action=normalized_action,
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+        if normalized_type in {
+            "announcement",
+            "automation_rule",
+            "asset_usage",
+            "server_operation",
+            "finance_record",
+            "member_assignment",
+            "other",
+        }:
+            return self._generic_approval(
+                action=normalized_action,
+                target_type=normalized_type,
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
         if normalized_type != "task":
-            raise ValueError("Wave 4 supports task approvals only.")
+            raise ValueError("Unsupported approval target type.")
         if normalized_action == "list":
             candidates = self.repository.list_task_candidates(status="proposed")
             return WorkResponse(
@@ -582,6 +788,439 @@ class WorkflowService:
                 approvals=(record,),
             )
         raise ValueError(f"Unsupported approval action: {action}")
+
+    def _event_approval(
+        self,
+        *,
+        action: str,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> WorkResponse:
+        if action == "list":
+            candidates = self.repository.list_event_candidates(status="proposed")
+            return WorkResponse(
+                text=f"承認待ち EventCandidate は {len(candidates)} 件です。",
+                detail_markdown=self._format_event_candidates(candidates),
+                event_candidates=tuple(candidates),
+            )
+        if action == "show":
+            candidate = self.repository.get_event_candidate(target_id) if target_id else None
+            event = self.repository.get_event(target_id) if target_id else None
+            approvals = self.repository.list_approvals(target_type="event", target_id=target_id)
+            if candidate is None and event is None:
+                raise KeyError(target_id)
+            details = []
+            if candidate is not None:
+                details.append(self._format_event_candidates([candidate]))
+            if event is not None:
+                details.append(self._format_events([event]))
+            if approvals:
+                details.append(self._format_approvals(approvals))
+            return WorkResponse(
+                text=f"event approval target を表示します: {target_id}",
+                detail_markdown="\n\n".join(details),
+                event_candidates=(candidate,) if candidate else tuple(),
+                events=(event,) if event else tuple(),
+                approvals=tuple(approvals),
+            )
+        if action == "edit":
+            candidate, record = self._edit_event_candidate(
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+            self._audit("workflow.approval.event.edit", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"EventCandidate を編集しました: {candidate.title}",
+                detail_markdown=self._format_event_candidates([candidate]),
+                event_candidates=(candidate,),
+                approvals=(record,),
+            )
+        if action == "approve":
+            event, record = self._approve_event_candidate(
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+            self._audit("workflow.approval.event.approve", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"EventCandidate を承認し Event 正本に登録しました: {event.title}",
+                detail_markdown=self._format_events([event]),
+                events=(event,),
+                approvals=(record,),
+            )
+        if action == "reject":
+            candidate = self.repository.update_event_candidate_status(
+                candidate_id=target_id,
+                status="rejected",
+                metadata={"rejected_by": access.user_id, "rejection_comment": comment},
+            )
+            record = self.repository.save_approval(
+                ApprovalRecord(
+                    id=str(uuid4()),
+                    target_type="event",
+                    target_id=target_id,
+                    action="reject",
+                    actor_id=access.user_id,
+                    comment=comment,
+                    before={},
+                    after=asdict(candidate),
+                    evidence=candidate.evidence,
+                )
+            )
+            self._audit("workflow.approval.event.reject", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"EventCandidate を却下しました: {candidate.title}",
+                detail_markdown=self._format_event_candidates([candidate]),
+                event_candidates=(candidate,),
+                approvals=(record,),
+            )
+        raise ValueError(f"Unsupported event approval action: {action}")
+
+    def _schedule_approval(
+        self,
+        *,
+        action: str,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> WorkResponse:
+        if action == "list":
+            candidates = self.repository.list_schedule_candidates(status="proposed")
+            return WorkResponse(
+                text=f"承認待ち ScheduleCandidate は {len(candidates)} 件です。",
+                detail_markdown=self._format_schedule_candidates(candidates),
+                schedule_candidates=tuple(candidates),
+            )
+        if action == "show":
+            candidate = self.repository.get_schedule_candidate(target_id) if target_id else None
+            schedule = self.repository.get_schedule(target_id) if target_id else None
+            approvals = self.repository.list_approvals(target_type="schedule", target_id=target_id)
+            if candidate is None and schedule is None:
+                raise KeyError(target_id)
+            details = []
+            if candidate is not None:
+                details.append(self._format_schedule_candidates([candidate]))
+            if schedule is not None:
+                details.append(self._format_schedules([schedule]))
+            if approvals:
+                details.append(self._format_approvals(approvals))
+            return WorkResponse(
+                text=f"schedule approval target を表示します: {target_id}",
+                detail_markdown="\n\n".join(details),
+                schedule_candidates=(candidate,) if candidate else tuple(),
+                schedules=(schedule,) if schedule else tuple(),
+                approvals=tuple(approvals),
+            )
+        if action == "edit":
+            candidate, record = self._edit_schedule_candidate(
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+            self._audit("workflow.approval.schedule.edit", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"ScheduleCandidate を編集しました: {candidate.title}",
+                detail_markdown=self._format_schedule_candidates([candidate]),
+                schedule_candidates=(candidate,),
+                approvals=(record,),
+            )
+        if action == "approve":
+            schedule, record = self._approve_schedule_candidate(
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
+            self._audit("workflow.approval.schedule.approve", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"ScheduleCandidate を承認し Schedule 正本に登録しました: {schedule.title}",
+                detail_markdown=self._format_schedules([schedule]),
+                schedules=(schedule,),
+                approvals=(record,),
+            )
+        if action == "reject":
+            candidate = self.repository.update_schedule_candidate_status(
+                candidate_id=target_id,
+                status="rejected",
+                metadata={"rejected_by": access.user_id, "rejection_comment": comment},
+            )
+            record = self.repository.save_approval(
+                ApprovalRecord(
+                    id=str(uuid4()),
+                    target_type="schedule",
+                    target_id=target_id,
+                    action="reject",
+                    actor_id=access.user_id,
+                    comment=comment,
+                    before={},
+                    after=asdict(candidate),
+                    evidence=candidate.evidence,
+                )
+            )
+            self._audit("workflow.approval.schedule.reject", access, "succeeded", target_id)
+            return WorkResponse(
+                text=f"ScheduleCandidate を却下しました: {candidate.title}",
+                detail_markdown=self._format_schedule_candidates([candidate]),
+                schedule_candidates=(candidate,),
+                approvals=(record,),
+            )
+        raise ValueError(f"Unsupported schedule approval action: {action}")
+
+    def _generic_approval(
+        self,
+        *,
+        action: str,
+        target_type: str,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> WorkResponse:
+        approvals = self.repository.list_approvals(
+            target_type=target_type,
+            target_id=target_id or None,
+        )
+        candidates = (
+            self.operations.list_workflow_candidates(
+                candidate_type=target_type,
+                status="proposed",
+            )
+            if self.operations and action == "list"
+            else []
+        )
+        if action == "list":
+            return WorkResponse(
+                text=f"承認待ち {target_type} candidate は {len(candidates)} 件です。",
+                detail_markdown="\n\n".join(
+                    [
+                        self._format_workflow_candidates(candidates),
+                        self._format_approvals(approvals),
+                    ]
+                ),
+                workflow_candidates=tuple(candidates),
+                approvals=tuple(approvals),
+                metadata={"target_type": target_type, "generic_approval": True},
+            )
+        if action == "show":
+            return WorkResponse(
+                text=f"{target_type} approval target を表示します: {target_id}",
+                detail_markdown=self._format_approvals(approvals),
+                approvals=tuple(approvals),
+                metadata={"target_type": target_type, "target_id": target_id},
+            )
+        if action in {"approve", "reject", "edit"}:
+            status = "approved" if action == "approve" else "rejected" if action == "reject" else "edited"
+            record = self.repository.save_approval(
+                ApprovalRecord(
+                    id=str(uuid4()),
+                    target_type=target_type,
+                    target_id=target_id,
+                    action=action,
+                    actor_id=access.user_id,
+                    comment=comment,
+                    before={},
+                    after={
+                        "status": status,
+                        "side_effects": "none",
+                        "note": "generic approval record only; no external action executed",
+                    },
+                )
+            )
+            self._audit(f"workflow.approval.{target_type}.{action}", access, "recorded", target_id)
+            return WorkResponse(
+                text=f"{target_type} approval record を保存しました。外部副作用は実行していません: {action}",
+                detail_markdown=self._format_approvals([record]),
+                approvals=(record,),
+                metadata={"target_type": target_type, "side_effects": "none"},
+            )
+        raise ValueError(f"Unsupported generic approval action: {action}")
+
+    def _edit_event_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[EventCandidate, ApprovalRecord]:
+        candidate = self.repository.get_event_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventCandidate is not editable: {candidate.status}")
+        title = _extract_labeled_value(comment, ("イベント", "event", "title", "件名", "名前"))
+        summary = _extract_labeled_value(comment, ("summary", "概要", "説明", "本文"))
+        place = _extract_labeled_value(comment, ("場所", "会場", "place"))
+        starts_at = _extract_datetime(comment) or candidate.starts_at
+        edited = self.repository.save_event_candidate(
+            replace(
+                candidate,
+                title=_clean_title(title) if title else candidate.title,
+                summary=summary or candidate.summary,
+                starts_at=starts_at,
+                place=place or candidate.place,
+                metadata={
+                    **candidate.metadata,
+                    "edited_by": access.user_id,
+                    "edit_comment": comment,
+                },
+            )
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="event",
+                target_id=target_id,
+                action="edit",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after=asdict(edited),
+                evidence=edited.evidence,
+            )
+        )
+        return edited, record
+
+    def _approve_event_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[Event, ApprovalRecord]:
+        candidate = self.repository.get_event_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventCandidate is not approvable: {candidate.status}")
+        event = self.repository.save_event(
+            Event(
+                id=stable_hash(f"event:{candidate.id}")[:32],
+                title=candidate.title,
+                summary=candidate.summary,
+                starts_at=candidate.starts_at,
+                ends_at=candidate.ends_at,
+                place=candidate.place,
+                status="planning",
+                related_source_ids=candidate.related_source_ids,
+                metadata={
+                    **candidate.metadata,
+                    "approved_by": access.user_id,
+                    "source_candidate_id": candidate.id,
+                },
+            )
+        )
+        merged = self.repository.update_event_candidate_status(
+            candidate_id=candidate.id,
+            status="merged",
+            metadata={"merged_event_id": event.id, "approved_by": access.user_id},
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="event",
+                target_id=candidate.id,
+                action="approve",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after={"candidate": asdict(merged), "event": asdict(event)},
+                evidence=candidate.evidence,
+            )
+        )
+        return event, record
+
+    def _edit_schedule_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[ScheduleCandidate, ApprovalRecord]:
+        candidate = self.repository.get_schedule_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"ScheduleCandidate is not editable: {candidate.status}")
+        title = _extract_labeled_value(comment, ("予定", "schedule", "title", "件名", "名前"))
+        place = _extract_labeled_value(comment, ("場所", "会場", "place"))
+        related_event_id = _extract_labeled_value(comment, ("event_id", "イベントID"))
+        starts_at = _extract_datetime(comment) or candidate.starts_at
+        edited = self.repository.save_schedule_candidate(
+            replace(
+                candidate,
+                title=_clean_title(title) if title else candidate.title,
+                starts_at=starts_at,
+                place=place or candidate.place,
+                related_event_id=related_event_id or candidate.related_event_id,
+                metadata={
+                    **candidate.metadata,
+                    "edited_by": access.user_id,
+                    "edit_comment": comment,
+                },
+            )
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="schedule",
+                target_id=target_id,
+                action="edit",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after=asdict(edited),
+                evidence=edited.evidence,
+            )
+        )
+        return edited, record
+
+    def _approve_schedule_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[ScheduleEvent, ApprovalRecord]:
+        candidate = self.repository.get_schedule_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"ScheduleCandidate is not approvable: {candidate.status}")
+        schedule = self.repository.save_schedule(
+            ScheduleEvent(
+                id=stable_hash(f"schedule:{candidate.id}")[:32],
+                title=candidate.title,
+                starts_at=candidate.starts_at,
+                ends_at=candidate.ends_at,
+                place=candidate.place,
+                related_event_id=candidate.related_event_id,
+                status="planned",
+                metadata={
+                    **candidate.metadata,
+                    "approved_by": access.user_id,
+                    "source_candidate_id": candidate.id,
+                },
+            )
+        )
+        merged = self.repository.update_schedule_candidate_status(
+            candidate_id=candidate.id,
+            status="merged",
+            metadata={"merged_schedule_id": schedule.id, "approved_by": access.user_id},
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="schedule",
+                target_id=candidate.id,
+                action="approve",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after={"candidate": asdict(merged), "schedule": asdict(schedule)},
+                evidence=candidate.evidence,
+            )
+        )
+        return schedule, record
 
     def _edit_task_candidate(
         self,
@@ -938,10 +1577,117 @@ class WorkflowService:
             return "Event はありません。"
         return "\n".join(["# Event", *[_event_line(event) for event in events]])
 
+    def _format_event_candidates(self, candidates: list[EventCandidate]) -> str:
+        if not candidates:
+            return "EventCandidate はありません。"
+        lines = ["# EventCandidate"]
+        for candidate in candidates:
+            starts = candidate.starts_at.isoformat() if candidate.starts_at else "未定"
+            place = candidate.place or "未定"
+            lines.append(
+                f"- `{candidate.id}` {candidate.title} / 日時: {starts} / 場所: {place} / status: {candidate.status} / confidence: {candidate.confidence}"
+            )
+        return "\n".join(lines)
+
     def _format_schedules(self, schedules: list[ScheduleEvent]) -> str:
         if not schedules:
             return "Schedule はありません。"
         return "\n".join(["# Schedule", *[_schedule_line(schedule) for schedule in schedules]])
+
+    def _format_schedule_candidates(self, candidates: list[ScheduleCandidate]) -> str:
+        if not candidates:
+            return "ScheduleCandidate はありません。"
+        lines = ["# ScheduleCandidate"]
+        for candidate in candidates:
+            starts = candidate.starts_at.isoformat() if candidate.starts_at else "未定"
+            place = candidate.place or "未定"
+            related = candidate.related_event_id or "未定"
+            lines.append(
+                f"- `{candidate.id}` {candidate.title} / 日時: {starts} / 場所: {place} / event: {related} / status: {candidate.status} / confidence: {candidate.confidence}"
+            )
+        return "\n".join(lines)
+
+    def _format_workflow_candidates(self, candidates: list[WorkflowCandidate]) -> str:
+        if not candidates:
+            return "WorkflowCandidate はありません。"
+        lines = ["# WorkflowCandidate"]
+        for candidate in candidates:
+            lines.append(
+                f"- `{candidate.id}` {candidate.title} / type: {candidate.candidate_type} / status: {candidate.status} / confidence: {candidate.confidence}"
+            )
+        return "\n".join(lines)
+
+    def _format_assets(self, assets: list[object]) -> str:
+        if not assets:
+            return "Asset はありません。"
+        lines = ["# Asset"]
+        for asset in assets:
+            lines.append(
+                f"- `{asset.id}` {asset.title or asset.uri or 'untitled'} / source: {asset.source_kind} / rights: {asset.rights_status} / people: {asset.contains_people}"
+            )
+        return "\n".join(lines)
+
+    def _format_asset_usage_requests(self, requests: list[AssetUsageRequest]) -> str:
+        if not requests:
+            return "AssetUsageRequest はありません。"
+        lines = ["# AssetUsageRequest"]
+        for request in requests:
+            lines.append(
+                f"- `{request.id}` asset={request.asset_id or '未指定'} / medium={request.medium or '未定'} / status={request.status} / owner_check={request.needs_owner_check} / people_check={request.needs_people_check}"
+            )
+        return "\n".join(lines)
+
+    def _format_member_profiles(self, profiles: list[object]) -> str:
+        if not profiles:
+            return "MemberProfile はありません。"
+        lines = ["# MemberProfile"]
+        for profile in profiles:
+            skills = ", ".join(profile.skills) if profile.skills else "未登録"
+            roles = ", ".join(profile.roles) if profile.roles else "未登録"
+            lines.append(
+                f"- `{profile.id}` {profile.display_name or profile.discord_user_id or 'unnamed'} / roles: {roles} / skills: {skills}"
+            )
+        lines.append("")
+        lines.append("担当決定には本人または運営確認が必要です。")
+        return "\n".join(lines)
+
+    def _start_workflow_run(self, request: WorkRequest) -> WorkflowRun | None:
+        if self.operations is None:
+            return None
+        return self.operations.save_workflow_run(
+            WorkflowRun(
+                workflow_id=request.work_type.strip().lower() or "unknown",
+                trigger="manual",
+                actor_user_id=request.access.user_id,
+                guild_id=request.access.guild_id,
+                input={
+                    "work_type": request.work_type,
+                    "instruction": request.instruction,
+                    "target": request.target,
+                    "output_format": request.output_format,
+                },
+                status="running",
+            )
+        )
+
+    def _finish_workflow_run(
+        self,
+        run: WorkflowRun | None,
+        *,
+        status: str,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.operations is None or run is None:
+            return
+        self.operations.save_workflow_run(
+            replace(
+                run,
+                status=status,
+                error=error,
+                metadata={**run.metadata, **(metadata or {})},
+            )
+        )
 
     def _audit(
         self,
@@ -999,6 +1745,19 @@ def _extract_assignee(line: str) -> str | None:
         return match.group(1).lstrip("@")
     match = re.search(r"@([A-Za-z0-9_.\-]+)", line)
     return match.group(1) if match else None
+
+
+def _can_search_members(access: AccessContext) -> bool:
+    roles = {role.lower() for role in access.role_ids}
+    return access.is_admin or "admin" in roles or "organizer" in roles
+
+
+def _workflow_response_status(response: WorkResponse) -> str:
+    if response.server_operations or response.task_candidates or response.event_candidates or response.schedule_candidates:
+        return "waiting_approval"
+    if response.asset_usage_requests or response.workflow_candidates:
+        return "waiting_approval"
+    return "succeeded"
 
 
 def _extract_datetime(text: str) -> datetime | None:

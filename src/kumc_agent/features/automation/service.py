@@ -13,11 +13,13 @@ from kumc_agent.domain.models.automation import (
     ConditionSpec,
     TriggerSpec,
 )
+from kumc_agent.domain.models.operations import ActionRun
 from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.features.foundation.feature_flags import FeatureFlagService
 from kumc_agent.features.foundation.tracing import current_trace_id
 from kumc_agent.infra.audit.repository import AuditLogRepository
 from kumc_agent.infra.automation import AutomationRepository
+from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.utils.hashing import stable_hash
 
 _VALID_MODES = {"dry_run", "approval_required", "auto_run"}
@@ -43,10 +45,12 @@ class AutomationService:
         repository: AutomationRepository,
         feature_flags: FeatureFlagService,
         audit_log: AuditLogRepository | None = None,
+        operations: OperationsRepository | None = None,
     ) -> None:
         self.repository = repository
         self.feature_flags = feature_flags
         self.audit_log = audit_log
+        self.operations = operations
 
     def seed_defaults(self) -> tuple[AutomationRule, ...]:
         if self.repository.list_rules():
@@ -197,6 +201,13 @@ class AutomationService:
         warnings = list(self._mode_warnings(rule, mode))
         status = self._resolve_run_status(rule, mode, warnings)
         action_plan = tuple(self._plan_action(action, status=status) for action in rule.actions)
+        executor_results = self._execute_allowed_actions(
+            rule=rule,
+            actions=rule.actions,
+            status=status,
+            access=access,
+            idempotency_key=resolved_key,
+        )
         run = self.repository.save_run(
             AutomationRun(
                 rule_id=rule.id,
@@ -210,6 +221,7 @@ class AutomationService:
                     "enabled": rule.enabled,
                     "requested_by": access.user_id,
                     "side_effects": "none",
+                    "executor_results": executor_results,
                 },
             )
         )
@@ -277,6 +289,53 @@ class AutomationService:
             "execution": status,
             "side_effects": "none",
         }
+
+    def _execute_allowed_actions(
+        self,
+        *,
+        rule: AutomationRule,
+        actions: tuple[ActionSpecRef, ...],
+        status: str,
+        access: AccessContext,
+        idempotency_key: str,
+    ) -> list[dict[str, object]]:
+        results: list[dict[str, object]] = []
+        for index, action in enumerate(actions):
+            allowed = (
+                status == "executed_equivalent"
+                and action.action_type in _AUTO_RUN_ALLOWLIST
+                and action.risk_level.lower() not in _HIGH_RISKS
+                and not action.approval_required
+            )
+            action_status = "executed_internal" if allowed else status
+            result = {
+                "action_type": action.action_type,
+                "target": action.target,
+                "status": action_status,
+                "side_effects": "none",
+            }
+            results.append(result)
+            if self.operations is not None:
+                self.operations.save_action_run(
+                    ActionRun(
+                        id=stable_hash(f"action-run:{idempotency_key}:{index}")[:32],
+                        action_type=action.action_type,
+                        target=action.target,
+                        actor_user_id=access.user_id,
+                        status=action_status,
+                        risk_level=action.risk_level,
+                        idempotency_key=f"{idempotency_key}:{index}",
+                        request_payload={
+                            "rule_id": rule.id,
+                            "payload": dict(action.payload),
+                            "automation_status": status,
+                        },
+                        result_payload=result,
+                        trace_id=current_trace_id(),
+                        metadata={"external_side_effects": "none"},
+                    )
+                )
+        return results
 
     def _require_rule(self, rule_id: str) -> AutomationRule:
         if not self.repository.list_rules():

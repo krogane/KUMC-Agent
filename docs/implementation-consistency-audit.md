@@ -8,7 +8,7 @@ This audit compares the current codebase with the implemented Wave 1-7 surface a
 
 - Reviewed `README.md`, `docs/kumc-agent-redesign-v4.md`, `src/kumc_agent`, and `tests`.
 - Checked static imports from `src/kumc_agent` and `tests`.
-- Treated code as removable only when it was unreachable from current CLI/API/tests, not a legacy compatibility entrypoint, and not part of `infra/legacy`.
+- Treated code as removable when it was unreachable from current CLI/API/tests, or when a legacy compatibility entrypoint had been superseded by the unified `bot` / `api` app entrypoints.
 
 ## Updated Documentation
 
@@ -16,7 +16,7 @@ This audit compares the current codebase with the implemented Wave 1-7 surface a
 - `docs/current-system-detailed-design.md` was marked as pre-Wave-1-7 design material so it is not mistaken for the current runtime surface.
 - The old statement that HTTP and DocGen are globally stub-only was corrected:
   - `kumc_agent.cli api` is the implemented API app entrypoint.
-  - `kumc_agent.cli http` / `frontends.http.app` remains a compatibility stub.
+  - `frontends.http.app` is the HTTP route adapter used by `apps/api`.
   - request-based `DocGenService.run(request)` is implemented, while parameterless `DocGenService().run()` still raises `NotImplementedError` for compatibility with existing stub tests.
 
 ## Removed Dead Code
@@ -49,39 +49,25 @@ Deletion rationale:
 - `infra/storage/sqlite.py` was not wired. Current Wave persistence uses file repositories and optional PostgreSQL repositories.
 - `usecases/docgen/run.py` was bypassed by the Wave 5 workflow path, which calls `features.docgen.service.DocGenService`.
 
+## Unified App Entrypoints
+
+The runtime surface is unified around the app entrypoints:
+
+- `kumc_agent.cli bot`: Discord slash-command process.
+- `kumc_agent.cli api`: HTTP API process.
+- `kumc_agent.cli worker`: worker process.
+
+The old `discord` and `http` CLI entrypoints were removed. `frontends.discord` and `frontends.http` remain as protocol adapters that receive contexts from `apps/*`; they no longer build runtime/app contexts themselves.
+
 ## Compatibility Surfaces Kept
 
-The following files look stub-like or old, but were not deleted because they are still reachable or tested:
+The following old behavior is still intentionally kept:
 
-- `src/kumc_agent/frontends/http/app.py`
-  - Kept because `kumc_agent.cli http` imports it and `tests/unit/test_stubs.py` asserts the compatibility stub behavior.
-  - The implemented API app is `src/kumc_agent/apps/api/app.py`.
-- `src/kumc_agent/frontends/discord/*`
-  - Kept because `kumc_agent.cli discord`, legacy `/ai` commands, and `tests/unit/test_discord_commands.py` still use it.
-  - The Wave app entrypoint is `kumc_agent.cli bot`.
 - `DocGenService().run()` without a request
   - Kept raising `NotImplementedError` because an existing unit test checks the parameterless call.
   - `DocGenService().run(DocGenRequest(...))` is implemented and covered by Wave 5 tests.
 
 ## Unclear Or Inconsistent Specifications
-
-### Dual API Entrypoints
-
-There are two HTTP-related surfaces:
-
-- `kumc_agent.cli api`: implemented Wave 1 API app.
-- `kumc_agent.cli http`: compatibility stub.
-
-This is intentional for compatibility, but the command naming is easy to misread. The README now directs new usage to `api`. A later cleanup can remove `http` only after tests and external scripts no longer depend on it.
-
-### Dual Discord Entrypoints
-
-There are two Discord surfaces:
-
-- `kumc_agent.cli bot`: Wave slash-command app context.
-- `kumc_agent.cli discord`: legacy-compatible `/ai` frontend.
-
-The split is useful during migration, but it should be treated as temporary. Operational docs should name which process is deployed in production.
 
 ### DocGen Stub Naming
 
@@ -89,17 +75,21 @@ The split is useful during migration, but it should be treated as temporary. Ope
 
 ### Admin Versus Legacy CLI Commands
 
-Several functions now have two command paths:
+Several functions have both local/legacy CLI paths and newer operational paths:
 
 - `index build/update` and `admin --action sync/reindex`
 - `eval ragas` and `admin --action eval`
 - `chat/tool rag` and `ask`
 
-This keeps existing scripts working, but can confuse operators. New production operation should prefer `admin`, `ask`, and app entrypoints. Legacy-compatible commands should remain until migration consumers are known.
+This keeps existing scripts working, but can confuse operators. New production operation should prefer `admin`, `ask`, and app entrypoints.
 
 ### Approval Type Scope
 
-`approval --type` currently accepts only `task`. The redesign includes broader approval concepts for announcements, external posting, automation, and Minecraft operations. Current code routes those as draft / dry-run first, but approval object coverage is not yet uniform.
+`approval --type` now accepts `task`, `event`, `schedule`, and future approval target types such as `announcement`, `automation_rule`, `asset_usage`, `server_operation`, `finance_record`, `member_assignment`, and `other`. `task` / `event` / `schedule` can be merged into 正本. Future target types currently record a safe no-side-effect approval record; executor-specific merge/apply behavior is still intentionally deferred.
+
+### Asset And Member Workflow Scope
+
+`image_search`, `image_usage_request`, and `member_search` now exist as safe minimum workflows. They rely on local/PostgreSQL repositories and do not yet include real image vector indexing, automated OCR/caption ingestion, profile synchronization, or external publishing.
 
 ### Automation Auto-Run Safety
 
@@ -135,18 +125,16 @@ Targeted Wave tests run without network. Full `unittest discover tests/unit` sti
 
 These are not safe to complete purely in code:
 
-- Confirm which Discord process should be deployed: `bot` or legacy-compatible `discord`.
 - Provision PostgreSQL and run `kumc_agent.cli db migrate`.
 - Configure Discord application commands and bot token.
 - Configure Google Drive / Notion / X / Minecraft / S3 credentials.
 - Decide the policy for external content reuse before enabling announcement publication from scraped sources.
 - Validate Minecraft operations on a staging server before enabling non-dry-run actions.
-- Decide when compatibility commands (`http`, `discord`, legacy `index/eval/chat`) can be removed.
+- Decide when local compatibility commands such as `index/eval/chat` can be removed or hidden.
 
 ## Follow-Up Recommendations
 
-- Rename or hide `http` once no deployment script depends on it.
 - Add an explicit integration-test marker or test naming convention for network/model-dependent tests.
 - Promote JSONL repositories to PostgreSQL for production workloads.
 - Extend approval records beyond `task` before enabling external side effects.
-- Add a deployment document that chooses one production entrypoint per process.
+- Add a deployment document for the unified `bot` / `api` / `worker` processes.
