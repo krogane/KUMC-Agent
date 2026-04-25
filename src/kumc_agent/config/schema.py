@@ -87,6 +87,44 @@ class SchedulerSection:
 
 
 @dataclass(frozen=True)
+class DatabaseSection:
+    url: str
+    connect_timeout_seconds: float
+    application_name: str
+
+
+@dataclass(frozen=True)
+class RedisSection:
+    url: str
+    socket_timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class ObjectStorageSection:
+    endpoint_url: str
+    bucket: str
+    region: str
+    access_key_id: str
+    secret_access_key: str
+    prefix: str
+    use_ssl: bool
+
+
+@dataclass(frozen=True)
+class MigrationSection:
+    directory: Path
+    table_name: str
+
+
+@dataclass(frozen=True)
+class InfrastructureSection:
+    database: DatabaseSection
+    redis: RedisSection
+    object_storage: ObjectStorageSection
+    migrations: MigrationSection
+
+
+@dataclass(frozen=True)
 class RetrievalSection:
     top_k: int
     dense_top_k: int
@@ -115,6 +153,19 @@ class SourcesSection:
     crafters_colony: bool
     x: bool
     notion: bool
+    minecraft_wiki: bool
+
+
+@dataclass(frozen=True)
+class RiskFeatureFlagsSection:
+    action_execution: str
+    external_posting: str
+    minecraft_server_ops: str
+    accounting_finalize: str
+    auto_reply: str
+    automation_auto_run: str
+    vc_recording: str
+    image_generation: str
 
 
 @dataclass(frozen=True)
@@ -129,6 +180,7 @@ class FeatureSection:
     recency_mode: str
     sources: SourcesSection
     retrieval: RetrievalSection
+    risk_flags: RiskFeatureFlagsSection
 
 
 @dataclass(frozen=True)
@@ -192,6 +244,7 @@ class RagGenerationSection:
     rag: RagGenerationProfileSection
     no_rag: RagGenerationProfileSection
     refusal: RagGenerationProfileSection
+    idea_generation: RagGenerationProfileSection
 
 
 @dataclass(frozen=True)
@@ -363,12 +416,21 @@ class IntegrationNotionSection:
 
 
 @dataclass(frozen=True)
+class IntegrationMinecraftWikiSection:
+    page_titles: list[str]
+    api_url: str
+    page_url_base: str
+    max_pages: int
+
+
+@dataclass(frozen=True)
 class IntegrationSection:
     discord: IntegrationDiscordSection
     openclaw: IntegrationOpenClawSection
     drive: IntegrationDriveSection
     crafters_colony: IntegrationCraftersColonySection
     notion: IntegrationNotionSection
+    minecraft_wiki: IntegrationMinecraftWikiSection
     openai_api_key: str
     gemini_api_key: str
     gemini_requests_per_minute: int
@@ -435,6 +497,7 @@ class RuntimeConfig:
     providers: ProviderSection
     security: SecuritySection
     scheduler: SchedulerSection
+    infrastructure: InfrastructureSection
     features: FeatureSection
     rag: RagSection
     indexing: IndexingSection

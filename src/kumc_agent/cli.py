@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -36,6 +37,51 @@ def _build_tool_rag_payload(answer: object) -> dict[str, object]:
         "routing_decision": metadata.get("routing_decision"),
         "fast_mode": bool(metadata.get("fast_mode", False)),
         "metadata": metadata,
+    }
+
+
+def _workflow_response_payload(response: object) -> dict[str, object]:
+    def _dump_items(items: object) -> list[dict[str, object]]:
+        return [
+            {
+                key: value.isoformat() if hasattr(value, "isoformat") else value
+                for key, value in getattr(item, "__dict__", {}).items()
+            }
+            for item in items or []
+        ]
+
+    return {
+        "text": getattr(response, "text", ""),
+        "detail_markdown": getattr(response, "detail_markdown", ""),
+        "task_candidates": _dump_items(getattr(response, "task_candidates", ())),
+        "tasks": _dump_items(getattr(response, "tasks", ())),
+        "events": _dump_items(getattr(response, "events", ())),
+        "schedules": _dump_items(getattr(response, "schedules", ())),
+        "meetings": _dump_items(getattr(response, "meetings", ())),
+        "approvals": _dump_items(getattr(response, "approvals", ())),
+        "server_operations": _dump_items(getattr(response, "server_operations", ())),
+        "warnings": list(getattr(response, "warnings", ())),
+        "metadata": dict(getattr(response, "metadata", {}) or {}),
+    }
+
+
+def _automation_response_payload(response: object) -> dict[str, object]:
+    def _dump_items(items: object) -> list[dict[str, object]]:
+        return [
+            {
+                key: value.isoformat() if hasattr(value, "isoformat") else value
+                for key, value in getattr(item, "__dict__", {}).items()
+            }
+            for item in items or []
+        ]
+
+    return {
+        "text": getattr(response, "text", ""),
+        "detail_markdown": getattr(response, "detail_markdown", ""),
+        "rules": _dump_items(getattr(response, "rules", ())),
+        "runs": _dump_items(getattr(response, "runs", ())),
+        "warnings": list(getattr(response, "warnings", ())),
+        "metadata": dict(getattr(response, "metadata", {}) or {}),
     }
 
 
@@ -89,6 +135,118 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("discord", help="Run Discord frontend")
     subparsers.add_parser("http", help="Run HTTP stub frontend")
+    subparsers.add_parser("bot", help="Run Wave 1 Discord slash-command bot")
+
+    api_parser = subparsers.add_parser("api", help="Run Wave 1 API app")
+    api_parser.add_argument("--host", default="127.0.0.1")
+    api_parser.add_argument("--port", type=int, default=8000)
+
+    subparsers.add_parser("worker", help="Run Wave 1 worker skeleton once")
+
+    admin_parser = subparsers.add_parser("admin", help="Admin actions")
+    admin_parser.add_argument(
+        "--action",
+        choices=(
+            "health",
+            "readiness",
+            "sync",
+            "eval",
+            "feature_flags",
+            "permissions",
+            "reindex",
+            "cost_report",
+        ),
+        required=True,
+    )
+    admin_parser.add_argument("--scope", default="")
+    admin_parser.add_argument("--limit", type=int, default=None)
+    admin_parser.add_argument("--force", action="store_true")
+
+    db_parser = subparsers.add_parser("db", help="Database operations")
+    db_sub = db_parser.add_subparsers(dest="db_command", required=True)
+    db_sub.add_parser("migrate", help="Apply PostgreSQL migrations")
+
+    ingest_parser = subparsers.add_parser("ingest", help="Wave 2 ingestion operations")
+    ingest_sub = ingest_parser.add_subparsers(dest="ingest_command", required=True)
+    backfill_parser = ingest_sub.add_parser("backfill")
+    backfill_parser.add_argument(
+        "--source",
+        action="append",
+        default=None,
+        help="Source connector to backfill. Use multiple times or omit for all enabled.",
+    )
+    backfill_parser.add_argument("--limit", type=int, default=None)
+    backfill_parser.add_argument("--force", action="store_true")
+
+    ask_parser = subparsers.add_parser("ask", help="Wave 3 integrated ask route")
+    ask_parser.add_argument("--question", required=True)
+    ask_parser.add_argument("--source", default="all")
+    ask_parser.add_argument("--mode", default="answer", choices=("answer", "search_only", "fast", "careful"))
+    ask_parser.add_argument("--depth", default="normal", choices=("light", "normal", "deep"))
+    ask_parser.add_argument("--user-id", default="")
+    ask_parser.add_argument("--guild-id", default="")
+    ask_parser.add_argument("--role-id", action="append", default=None)
+    ask_parser.add_argument("--admin", action="store_true")
+
+    work_parser = subparsers.add_parser("work", help="Wave 4 workflow operations")
+    work_parser.add_argument(
+        "--type",
+        required=True,
+        choices=(
+            "meeting_prepare",
+            "meeting_minutes_draft",
+            "task_extract",
+            "task_add",
+            "task_list",
+            "task_done",
+            "event_add",
+            "event_list",
+            "event_brief",
+            "schedule_add",
+            "schedule_list",
+            "doc_draft",
+            "x_draft",
+            "announcement_draft",
+            "mc_status",
+            "mc_request",
+        ),
+    )
+    work_parser.add_argument("--instruction", default="")
+    work_parser.add_argument("--target", default="")
+    work_parser.add_argument("--format", default="markdown", choices=("compact", "markdown"))
+    work_parser.add_argument("--user-id", default="")
+    work_parser.add_argument("--guild-id", default="")
+    work_parser.add_argument("--role-id", action="append", default=None)
+    work_parser.add_argument("--admin", action="store_true")
+
+    approval_parser = subparsers.add_parser("approval", help="Wave 4 approval operations")
+    approval_parser.add_argument("--type", default="task", choices=("task",))
+    approval_parser.add_argument("--action", required=True, choices=("list", "show", "approve", "reject", "edit"))
+    approval_parser.add_argument("--target-id", default="")
+    approval_parser.add_argument("--comment", default="")
+    approval_parser.add_argument("--user-id", default="")
+    approval_parser.add_argument("--guild-id", default="")
+    approval_parser.add_argument("--role-id", action="append", default=None)
+    approval_parser.add_argument("--admin", action="store_true")
+
+    automation_parser = subparsers.add_parser("automation", help="Wave 7 automation operations")
+    automation_parser.add_argument(
+        "--action",
+        required=True,
+        choices=("list", "show", "dry_run", "run", "enable", "disable", "set_mode"),
+    )
+    automation_parser.add_argument("--rule-id", default="")
+    automation_parser.add_argument(
+        "--mode",
+        default="dry_run",
+        choices=("dry_run", "approval_required", "auto_run"),
+    )
+    automation_parser.add_argument("--trigger-key", default="manual")
+    automation_parser.add_argument("--idempotency-key", default="")
+    automation_parser.add_argument("--user-id", default="")
+    automation_parser.add_argument("--guild-id", default="")
+    automation_parser.add_argument("--role-id", action="append", default=None)
+    automation_parser.add_argument("--admin", action="store_true")
 
     return parser
 
@@ -103,6 +261,298 @@ def main() -> None:
 
     if args.command == "http":
         run_http()
+        return
+
+    if args.command == "bot":
+        from kumc_agent.apps.bot.app import main as run_bot
+
+        run_bot()
+        return
+
+    if args.command == "api":
+        from kumc_agent.apps.api.app import main as run_api
+
+        run_api(host=args.host, port=args.port)
+        return
+
+    if args.command == "worker":
+        from kumc_agent.apps.worker.app import main as run_worker
+
+        run_worker()
+        return
+
+    if args.command == "admin":
+        from kumc_agent.apps.foundation import build_foundation_app_context
+
+        foundation = build_foundation_app_context()
+        configure_logging(
+            foundation.config.app.log_level,
+            file_path=default_execution_log_path(base_dir=foundation.config.base_dir),
+        )
+        if args.action == "health":
+            report = foundation.health.check(actor_id="cli", actor_type="service")
+            print(json.dumps(report.as_dict(), ensure_ascii=False))
+            return
+        if args.action == "readiness":
+            from kumc_agent.apps.automation import build_automation_app_context
+
+            automation = build_automation_app_context(seed_defaults=False)
+            report = automation.readiness.report()
+            print(json.dumps(report.as_dict(), ensure_ascii=False))
+            return
+        if args.action in {"sync", "reindex"}:
+            from kumc_agent.apps.ingestion import build_ingestion_app_context
+            from kumc_agent.domain.models.source import BackfillScope
+
+            ingestion = build_ingestion_app_context()
+            source_kinds = (args.scope,) if args.scope else tuple()
+            results = asyncio.run(
+                ingestion.service.backfill_many(
+                    source_kinds=source_kinds,
+                    scope=BackfillScope(
+                        limit=args.limit,
+                        force=bool(args.force or args.action == "reindex"),
+                    ),
+                )
+            )
+            print(
+                json.dumps(
+                    {
+                        "action": args.action,
+                        "results": [result.__dict__ for result in results],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        if args.action == "eval":
+            from kumc_agent.apps.automation import build_automation_app_context
+
+            automation = build_automation_app_context(seed_defaults=False)
+            report = automation.readiness.report()
+            print(
+                json.dumps(
+                    {
+                        "action": "eval",
+                        "mode": "local_harness",
+                        "readiness": report.as_dict(),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        if args.action == "feature_flags":
+            print(json.dumps(foundation.feature_flags.modes(), ensure_ascii=False))
+            return
+        if args.action == "permissions":
+            print(
+                json.dumps(
+                    {
+                        "maintenance_command_author_ids": foundation.config.security.maintenance_command_author_ids,
+                        "discord_guild_allow_list": foundation.config.security.discord_guild_allow_list,
+                        "admin_configured": bool(foundation.config.security.maintenance_command_author_ids),
+                        "guild_allow_list_configured": bool(foundation.config.security.discord_guild_allow_list),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        if args.action == "cost_report":
+            from kumc_agent.apps.automation import build_automation_app_context
+
+            automation = build_automation_app_context(seed_defaults=False)
+            print(json.dumps(automation.readiness.cost_report(), ensure_ascii=False))
+            return
+
+    if args.command == "db":
+        from kumc_agent.apps.foundation import build_foundation_app_context
+
+        foundation = build_foundation_app_context()
+        configure_logging(
+            foundation.config.app.log_level,
+            file_path=default_execution_log_path(base_dir=foundation.config.base_dir),
+        )
+        if args.db_command == "migrate":
+            result = foundation.migrations.apply()
+            print(
+                json.dumps(
+                    {
+                        "applied": list(result.applied),
+                        "skipped": list(result.skipped),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+
+    if args.command == "ingest":
+        from kumc_agent.apps.ingestion import build_ingestion_app_context
+        from kumc_agent.domain.models.source import BackfillScope
+
+        ingestion = build_ingestion_app_context()
+        if args.ingest_command == "backfill":
+            results = asyncio.run(
+                ingestion.service.backfill_many(
+                    source_kinds=tuple(args.source or ()),
+                    scope=BackfillScope(limit=args.limit, force=bool(args.force)),
+                )
+            )
+            print(
+                json.dumps(
+                    [result.__dict__ for result in results],
+                    ensure_ascii=False,
+                )
+            )
+            return
+
+    if args.command == "ask":
+        if args.depth == "deep":
+            from kumc_agent.apps.agentic import build_agentic_app_context
+            from kumc_agent.domain.models.agentic import AgenticSearchRequest
+            from kumc_agent.domain.models.retrieval import AccessContext
+
+            agentic = build_agentic_app_context()
+            response = agentic.agentic_search.search(
+                AgenticSearchRequest(
+                    query=args.question,
+                    source_filter=args.source,
+                    access=AccessContext(
+                        user_id=args.user_id,
+                        guild_id=args.guild_id,
+                        role_ids=tuple(args.role_id or ()),
+                        is_admin=bool(args.admin),
+                    ),
+                )
+            )
+            print(
+                json.dumps(
+                    {
+                        "text": response.text,
+                        "detail_markdown": response.detail_markdown,
+                        "confidence": response.confidence,
+                        "warnings": list(response.warnings),
+                        "citations": [citation.__dict__ for citation in response.citations],
+                        "agent_run_id": response.run.id,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        from kumc_agent.apps.retrieval import build_retrieval_app_context
+        from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
+
+        retrieval = build_retrieval_app_context()
+        response = retrieval.ask.ask(
+            RetrievalQuery(
+                text=args.question,
+                source_filter=args.source,
+                mode=args.mode,
+                depth=args.depth,
+                access=AccessContext(
+                    user_id=args.user_id,
+                    guild_id=args.guild_id,
+                    role_ids=tuple(args.role_id or ()),
+                    is_admin=bool(args.admin),
+                ),
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "text": response.text,
+                    "detail_markdown": response.detail_markdown,
+                    "confidence": response.confidence,
+                    "warnings": list(response.warnings),
+                    "citations": [citation.__dict__ for citation in response.citations],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if args.command == "work":
+        from kumc_agent.apps.workflow import build_workflow_app_context
+        from kumc_agent.domain.models.retrieval import AccessContext
+        from kumc_agent.domain.models.workflow import WorkRequest
+
+        workflow = build_workflow_app_context()
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type=args.type,
+                instruction=args.instruction,
+                target=args.target,
+                output_format=args.format,
+                access=AccessContext(
+                    user_id=args.user_id,
+                    guild_id=args.guild_id,
+                    role_ids=tuple(args.role_id or ()),
+                    is_admin=bool(args.admin),
+                ),
+            )
+        )
+        print(json.dumps(_workflow_response_payload(response), ensure_ascii=False, default=str))
+        return
+
+    if args.command == "approval":
+        from kumc_agent.apps.workflow import build_workflow_app_context
+        from kumc_agent.domain.models.retrieval import AccessContext
+
+        workflow = build_workflow_app_context()
+        response = workflow.workflow.approval(
+            action=args.action,
+            target_type=args.type,
+            target_id=args.target_id,
+            comment=args.comment,
+            access=AccessContext(
+                user_id=args.user_id,
+                guild_id=args.guild_id,
+                role_ids=tuple(args.role_id or ()),
+                is_admin=bool(args.admin),
+            ),
+        )
+        print(json.dumps(_workflow_response_payload(response), ensure_ascii=False, default=str))
+        return
+
+    if args.command == "automation":
+        from kumc_agent.apps.automation import build_automation_app_context
+        from kumc_agent.domain.models.retrieval import AccessContext
+
+        automation = build_automation_app_context()
+        access = AccessContext(
+            user_id=args.user_id,
+            guild_id=args.guild_id,
+            role_ids=tuple(args.role_id or ()),
+            is_admin=bool(args.admin),
+        )
+        if args.action == "list":
+            response = automation.automation.list_rules()
+        elif args.action == "show":
+            response = automation.automation.show(rule_id=args.rule_id)
+        elif args.action == "enable":
+            response = automation.automation.enable(rule_id=args.rule_id, access=access)
+        elif args.action == "disable":
+            response = automation.automation.disable(rule_id=args.rule_id, access=access)
+        elif args.action == "set_mode":
+            response = automation.automation.set_mode(
+                rule_id=args.rule_id,
+                mode=args.mode,
+                access=access,
+            )
+        elif args.action == "dry_run":
+            response = automation.automation.dry_run(
+                rule_id=args.rule_id,
+                trigger_key=args.trigger_key,
+                idempotency_key=args.idempotency_key,
+                access=access,
+            )
+        else:
+            response = automation.automation.run(
+                rule_id=args.rule_id,
+                trigger_key=args.trigger_key,
+                idempotency_key=args.idempotency_key,
+                access=access,
+            )
+        print(json.dumps(_automation_response_payload(response), ensure_ascii=False, default=str))
         return
 
     context = build_runtime_context()

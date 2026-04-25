@@ -15,9 +15,11 @@ from kumc_agent.config.env_map import ENV_BINDINGS
 from kumc_agent.config.merge import MergeError, deep_merge
 from kumc_agent.config.schema import (
     AppSection,
+    DatabaseSection,
     EmbeddingSection,
     FeatureSection,
     FunctionCallSection,
+    InfrastructureSection,
     RagGenerationProfileSection,
     RagGenerationSection,
     IndexingChunkingSection,
@@ -27,11 +29,14 @@ from kumc_agent.config.schema import (
     IntegrationCraftersColonySection,
     IntegrationDiscordSection,
     IntegrationDriveSection,
+    IntegrationMinecraftWikiSection,
     IntegrationNotionSection,
     IntegrationOpenClawSection,
     IntegrationSection,
     LLMSection,
+    MigrationSection,
     ModelSection,
+    ObjectStorageSection,
     OpsRagasMetricsSection,
     OpsSection,
     ProviderSection,
@@ -47,6 +52,8 @@ from kumc_agent.config.schema import (
     SchedulerSection,
     SecuritySection,
     SourcesSection,
+    RedisSection,
+    RiskFeatureFlagsSection,
     VCSection,
 )
 
@@ -284,6 +291,73 @@ def _resolve_experiment_path(base_dir: Path, profile: str) -> Path:
 
 def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     updated = dict(config)
+    infrastructure = updated.get("infrastructure")
+    if not isinstance(infrastructure, dict):
+        infrastructure = {}
+        updated["infrastructure"] = infrastructure
+    database = infrastructure.get("database")
+    if not isinstance(database, dict):
+        database = {}
+        infrastructure["database"] = database
+    database.setdefault("url", "")
+    database.setdefault("connect_timeout_seconds", 3.0)
+    database.setdefault("application_name", "kumc-agent")
+    redis = infrastructure.get("redis")
+    if not isinstance(redis, dict):
+        redis = {}
+        infrastructure["redis"] = redis
+    redis.setdefault("url", "")
+    redis.setdefault("socket_timeout_seconds", 3.0)
+    object_storage = infrastructure.get("object_storage")
+    if not isinstance(object_storage, dict):
+        object_storage = {}
+        infrastructure["object_storage"] = object_storage
+    object_storage.setdefault("endpoint_url", "")
+    object_storage.setdefault("bucket", "")
+    object_storage.setdefault("region", "ap-northeast-1")
+    object_storage.setdefault("access_key_id", "")
+    object_storage.setdefault("secret_access_key", "")
+    object_storage.setdefault("prefix", "kumc-agent")
+    object_storage.setdefault("use_ssl", True)
+    migrations = infrastructure.get("migrations")
+    if not isinstance(migrations, dict):
+        migrations = {}
+        infrastructure["migrations"] = migrations
+    migrations.setdefault("directory", "infrastructure/migrations")
+    migrations.setdefault("table_name", "schema_migrations")
+
+    features = updated.get("features")
+    if not isinstance(features, dict):
+        features = {}
+        updated["features"] = features
+    risk_flags = features.get("risk_flags")
+    if not isinstance(risk_flags, dict):
+        risk_flags = {}
+        features["risk_flags"] = risk_flags
+    risk_flags.setdefault("action_execution", "approval_required")
+    risk_flags.setdefault("external_posting", "approval_required")
+    risk_flags.setdefault("minecraft_server_ops", "approval_required")
+    risk_flags.setdefault("accounting_finalize", "approval_required")
+    risk_flags.setdefault("auto_reply", "approval_required")
+    risk_flags.setdefault("automation_auto_run", "disabled")
+    risk_flags.setdefault("vc_recording", "disabled")
+    risk_flags.setdefault("image_generation", "approval_required")
+
+    rag = updated.get("rag")
+    if not isinstance(rag, dict):
+        rag = {}
+        updated["rag"] = rag
+    generation = rag.get("generation")
+    if not isinstance(generation, dict):
+        generation = {}
+        rag["generation"] = generation
+    idea_generation = generation.get("idea_generation")
+    if not isinstance(idea_generation, dict):
+        idea_generation = {}
+        generation["idea_generation"] = idea_generation
+    idea_generation.setdefault("prompt_name", "answer_idea")
+    idea_generation.setdefault("temperature", 0.0)
+
     integrations = updated.get("integrations")
     if not isinstance(integrations, dict):
         integrations = {}
@@ -299,6 +373,14 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     openclaw.setdefault("lite_agent", "")
     openclaw.setdefault("lite_model", "")
     openclaw.setdefault("config_dir", "configs/openclaw")
+    minecraft_wiki = integrations.get("minecraft_wiki")
+    if not isinstance(minecraft_wiki, dict):
+        minecraft_wiki = {}
+        integrations["minecraft_wiki"] = minecraft_wiki
+    minecraft_wiki.setdefault("page_titles", [])
+    minecraft_wiki.setdefault("api_url", "https://minecraft.wiki/api.php")
+    minecraft_wiki.setdefault("page_url_base", "https://minecraft.wiki/w/")
+    minecraft_wiki.setdefault("max_pages", 20)
     return updated
 
 
@@ -348,6 +430,7 @@ def _to_runtime_config(
     providers = merged["providers"]
     security = merged["security"]
     scheduler = merged["scheduler"]
+    infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
     rag = merged.get("rag", {})
     indexing = merged.get("indexing", {})
@@ -363,16 +446,39 @@ def _to_runtime_config(
     rag_generation_rag = rag_generation.get("rag", {})
     rag_generation_no_rag = rag_generation.get("no_rag", {})
     rag_generation_refusal = rag_generation.get("refusal", {})
+    rag_generation_idea = rag_generation.get("idea_generation", {})
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
     ops_ragas_metrics = ops.get("ragas_metrics", {})
+    database = infrastructure.get("database", {})
+    redis = infrastructure.get("redis", {})
+    object_storage = infrastructure.get("object_storage", {})
+    migrations = infrastructure.get("migrations", {})
     notion = integrations.get("notion", {})
     if not isinstance(notion, dict):
         notion = {}
     notion_database_ids_raw = notion.get("database_ids", [])
     if not isinstance(notion_database_ids_raw, list):
         notion_database_ids_raw = []
+    minecraft_wiki = integrations.get("minecraft_wiki", {})
+    if not isinstance(minecraft_wiki, dict):
+        minecraft_wiki = {}
+    minecraft_page_titles_raw = minecraft_wiki.get("page_titles", [])
+    if isinstance(minecraft_page_titles_raw, str):
+        minecraft_page_titles = [
+            part.strip()
+            for part in minecraft_page_titles_raw.split(",")
+            if part.strip()
+        ]
+    elif isinstance(minecraft_page_titles_raw, list):
+        minecraft_page_titles = [
+            str(part).strip()
+            for part in minecraft_page_titles_raw
+            if str(part).strip()
+        ]
+    else:
+        minecraft_page_titles = []
 
     special_channel_names_raw = rag_history.get("special_channel_names", ["kumc-agent"])
     if isinstance(special_channel_names_raw, str):
@@ -453,6 +559,11 @@ def _to_runtime_config(
     refusal_generation_profile = _build_generation_profile(
         rag_generation_refusal,
         default_prompt_name="answer_refusal",
+        fallback=no_rag_generation_profile,
+    )
+    idea_generation_profile = _build_generation_profile(
+        rag_generation_idea,
+        default_prompt_name="answer_idea",
         fallback=no_rag_generation_profile,
     )
     routing_provider = str(
@@ -568,6 +679,37 @@ def _to_runtime_config(
             auto_index_time=str(scheduler["auto_index_time"]),
             auto_index_weekdays=[int(v) for v in scheduler["auto_index_weekdays"]],
         ),
+        infrastructure=InfrastructureSection(
+            database=DatabaseSection(
+                url=str(database.get("url", "")),
+                connect_timeout_seconds=float(
+                    database.get("connect_timeout_seconds", 3.0)
+                ),
+                application_name=str(database.get("application_name", "kumc-agent")),
+            ),
+            redis=RedisSection(
+                url=str(redis.get("url", "")),
+                socket_timeout_seconds=float(
+                    redis.get("socket_timeout_seconds", 3.0)
+                ),
+            ),
+            object_storage=ObjectStorageSection(
+                endpoint_url=str(object_storage.get("endpoint_url", "")),
+                bucket=str(object_storage.get("bucket", "")),
+                region=str(object_storage.get("region", "ap-northeast-1")),
+                access_key_id=str(object_storage.get("access_key_id", "")),
+                secret_access_key=str(object_storage.get("secret_access_key", "")),
+                prefix=str(object_storage.get("prefix", "kumc-agent")),
+                use_ssl=bool(object_storage.get("use_ssl", True)),
+            ),
+            migrations=MigrationSection(
+                directory=_resolve_path(
+                    base_dir,
+                    str(migrations.get("directory", "infrastructure/migrations")),
+                ),
+                table_name=str(migrations.get("table_name", "schema_migrations")),
+            ),
+        ),
         features=FeatureSection(
             rag=bool(features["rag"]),
             indexing=bool(features["indexing"]),
@@ -584,6 +726,9 @@ def _to_runtime_config(
                 crafters_colony=bool(features["sources"]["crafters_colony"]),
                 x=bool(features["sources"].get("x", True)),
                 notion=bool(features["sources"].get("notion", False)),
+                minecraft_wiki=bool(
+                    features["sources"].get("minecraft_wiki", False)
+                ),
             ),
             retrieval=RetrievalSection(
                 top_k=int(features["retrieval"]["top_k"]),
@@ -628,6 +773,47 @@ def _to_runtime_config(
                     features["retrieval"].get("sparse_remove_symbols", True)
                 ),
             ),
+            risk_flags=RiskFeatureFlagsSection(
+                action_execution=str(
+                    features["risk_flags"].get(
+                        "action_execution",
+                        "approval_required",
+                    )
+                ),
+                external_posting=str(
+                    features["risk_flags"].get(
+                        "external_posting",
+                        "approval_required",
+                    )
+                ),
+                minecraft_server_ops=str(
+                    features["risk_flags"].get(
+                        "minecraft_server_ops",
+                        "approval_required",
+                    )
+                ),
+                accounting_finalize=str(
+                    features["risk_flags"].get(
+                        "accounting_finalize",
+                        "approval_required",
+                    )
+                ),
+                auto_reply=str(
+                    features["risk_flags"].get("auto_reply", "approval_required")
+                ),
+                automation_auto_run=str(
+                    features["risk_flags"].get("automation_auto_run", "disabled")
+                ),
+                vc_recording=str(
+                    features["risk_flags"].get("vc_recording", "disabled")
+                ),
+                image_generation=str(
+                    features["risk_flags"].get(
+                        "image_generation",
+                        "approval_required",
+                    )
+                ),
+            ),
         ),
         rag=RagSection(
             routing=RagRoutingSection(
@@ -669,6 +855,7 @@ def _to_runtime_config(
                 rag=rag_generation_profile,
                 no_rag=no_rag_generation_profile,
                 refusal=refusal_generation_profile,
+                idea_generation=idea_generation_profile,
             ),
             prompt_texts=RagPromptTextSection(
                 empty_context=str(
@@ -1155,6 +1342,16 @@ def _to_runtime_config(
                     for value in notion_database_ids_raw
                     if str(value).strip()
                 ],
+            ),
+            minecraft_wiki=IntegrationMinecraftWikiSection(
+                page_titles=minecraft_page_titles,
+                api_url=str(
+                    minecraft_wiki.get("api_url", "https://minecraft.wiki/api.php")
+                ),
+                page_url_base=str(
+                    minecraft_wiki.get("page_url_base", "https://minecraft.wiki/w/")
+                ),
+                max_pages=max(0, int(minecraft_wiki.get("max_pages", 20))),
             ),
             openai_api_key=str(integrations.get("openai_api_key", "")),
             gemini_api_key=str(integrations.get("gemini_api_key", "")),

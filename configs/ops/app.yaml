@@ -11,6 +11,25 @@ app:
   cache_dir: "data/cache"
   answer_record_log_path: "logs/answer_records.jsonl"
   source_max_count: 3
+infrastructure:
+  database:
+    url: ""
+    connect_timeout_seconds: 3.0
+    application_name: "kumc-agent"
+  redis:
+    url: ""
+    socket_timeout_seconds: 3.0
+  object_storage:
+    endpoint_url: ""
+    bucket: ""
+    region: "ap-northeast-1"
+    access_key_id: ""
+    secret_access_key: ""
+    prefix: "kumc-agent"
+    use_ssl: true
+  migrations:
+    directory: "infrastructure/migrations"
+    table_name: "schema_migrations"
 rag:
   fast_model_notice: "※負荷軽減のために軽量モードを使用しました。"
   answer_json_max_retries: 2
@@ -213,6 +232,11 @@ integrations:
   notion:
     api_token: ""
     database_ids: []
+  minecraft_wiki:
+    page_titles: []
+    api_url: "https://minecraft.wiki/api.php"
+    page_url_base: "https://minecraft.wiki/w/"
+    max_pages: 20
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000

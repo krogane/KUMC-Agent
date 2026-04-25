@@ -1136,7 +1136,7 @@ Discord は slash command 中心にする。ただし command 数は増やしす
 | `/automation` | 自動化 rule の一覧、dry-run、enable / disable、手動実行 | `action`, `rule_id`, `mode` | organizer / admin | enabled |
 | `/admin` | sync、eval、health、feature flag、権限確認 | `action`, `scope` | admin | enabled |
 
-`/wiki`, `/image`, `/member`, `/meeting`, `/task`, `/event`, `/schedule`, `/draft-x`, `/announce`, `/shinkan`, `/nf`, `/external`, `/finance`, `/mc` は top-level command としては増やさず、`/ask` または `/work` の `type` で扱う。
+`/wiki`, `/image`, `/member`, `/meeting`, `/task`, `/event`, `/schedule`, `/draft-x`, `/announce`, `/mc` は top-level command としては増やさず、`/ask` または `/work` の `type` で扱う。
 
 ### 13.3 `/ask`
 入力:
@@ -1175,12 +1175,6 @@ type: enum[
   announcement_draft,
   x_draft,
   doc_draft,
-  shinkan_template,
-  shinkan_faq_draft,
-  nf_checklist,
-  nf_runbook,
-  external_prepare,
-  finance_summary,
   mc_status,
   mc_request,
   image_search,
@@ -1713,7 +1707,7 @@ Indexing:
 1. lookback 期間内の Discord / Drive / Task / Event を検索する。
 2. 前回議事録との差分を確認する。
 3. 未完了タスク、期限が近いタスク、未決事項を抽出する。
-4. 新歓 / NF / 外部連携 / 会計 / サーバー運用などの確認事項に分類する。
+4. サーバー運用の確認事項に分類する。
 5. 議題案、決めるべき論点、告知文案を出す。
 
 `/work type:meeting_minutes_draft` 処理:
@@ -2387,10 +2381,7 @@ main merge 前または nightly:
 | `meeting_prepare` | 20 | 議題案、未完了タスク、決定論点、根拠リンク |
 | `task_extraction` | 30 | 担当、期限、状態、重複検出、候補止まりの確認 |
 | `event_brief` | 15 | Event 概要、関連資料、関連タスク、次の判断事項 |
-| `shinkan_templates` | 10 | サーバー構成案、自己紹介、質問チャンネル文、企画説明 |
-| `nf_runbook` | 15 | 年間チェックリスト、当日手順、振り返り分類 |
 | `announcement_safety` | 20 | 外部公開不可情報、個人情報、未確認事実の混入防止 |
-| `external_collaboration` | 10 | 質問リスト、会場比較、KUMC/先方タスク分離 |
 | `finance_safety` | 10 | 金額根拠、証跡、権限、確定処理禁止 |
 | `mc_operation_safety` | 15 | dry-run、承認、秘密情報非表示、危険操作拒否 |
 | `minecraft_wiki_search` | 15 | edition / version 差分、関連記事、古い取得日の警告 |
@@ -2591,25 +2582,15 @@ AI 機能追加時:
 - 週報 / 意思決定メモ / 告知下書きが出せる。
 - 外部公開不可情報の混入テストに通る。
 
-### Wave 6: 新歓・NF・外部連携・会計・Minecraft 支援
+### Wave 6: Minecraft 支援
 作業:
-- 新歓テンプレート
-- 新歓 FAQ / 企画説明文生成
-- NF checklist generator
-- NF runbook generator
-- ExternalContact repository
-- FinanceRecord repository
 - ServerOperation repository
 - ActionSpec registry 拡張
 - approval flow
 - executor separation
-- `/work type:shinkan_template|shinkan_faq_draft|nf_checklist|nf_runbook|external_prepare|finance_summary|mc_status|mc_request`
+- `/work type:|mc_status|mc_request`
 
 完了条件:
-- 新歓サーバー構成案と告知文案を出せる。
-- NF 年間チェックリストと当日ランブックを出せる。
-- 外部打ち合わせ用の質問リストと会場比較表を出せる。
-- 会計集計案は証跡付きで出せるが、自動確定しない。
 - Minecraft 操作は dry-run と承認なしに実行されない。
 - audit log が完全に残る。
 
@@ -2782,18 +2763,7 @@ data/index/material_catalog.json
 70. Announcement schema / repository を作る
 71. `/work type:announcement_draft` を実装する
 
-### 新歓 / NF / 外部連携 / 会計 / Minecraft
-72. Shinkan template generator を作る
-73. `/work type:shinkan_template` を実装する
-74. `/work type:shinkan_faq_draft` を実装する
-75. NF checklist generator を作る
-76. NF runbook generator を作る
-77. `/work type:nf_checklist` を実装する
-78. `/work type:nf_runbook` を実装する
-79. ExternalContact schema / repository を作る
-80. `/work type:external_prepare` を実装する
-81. FinanceRecord schema / repository を作る
-82. `/work type:finance_summary` を dry-run 実装する
+### Minecraft
 83. ServerOperation schema / repository を作る
 84. `/work type:mc_status` を実装する
 85. `/work type:mc_request` を dry-run 実装する
@@ -2819,8 +2789,6 @@ data/index/material_catalog.json
 101. secret_redaction eval cases を作る
 102. meeting_prepare eval cases を作る
 103. task_extraction eval cases を作る
-104. nf_runbook eval cases を作る
-105. announcement_safety eval cases を作る
 106. action safety eval cases を作る
 107. eval runner を作る
 108. CI eval gate を作る
@@ -2873,7 +2841,7 @@ data/index/material_catalog.json
 - 承認・却下・編集・履歴保存ができる。
 - Event / Schedule / Task の基本操作ができる。
 - X 投稿案、告知文、資料下書き、ブログ記事下書きを生成できる。
-- 新歓テンプレート、NF checklist / runbook、外部打ち合わせ準備、会計集計案、Minecraft 操作 request が生成できる。
+- Minecraft 操作 request が生成できる。
 - `/admin action:sync` で source 同期を開始できる。
 - 自動 Indexing が差分、削除、権限変更を反映し、失敗時に admin 通知できる。
 - `/automation` で rule の list / dry-run / run / enable / disable / mode 変更ができる。

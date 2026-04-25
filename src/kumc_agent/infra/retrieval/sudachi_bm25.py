@@ -43,6 +43,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     sudachi_tokenizer = None
 
 from kumc_agent.domain.models.chunk import Chunk
+from kumc_agent.domain.policies.chunk_visibility import is_chunk_allowed_for_answer_context
 
 
 class SudachiBM25Retriever:
@@ -112,7 +113,10 @@ class SudachiBM25Retriever:
         out: list[tuple[Chunk, float]] = []
         for idx in order[: max(0, top_k)]:
             if idx < len(chunks):
-                out.append((chunks[idx], float(scores[idx])))
+                chunk = chunks[idx]
+                if not is_chunk_allowed_for_answer_context(chunk):
+                    continue
+                out.append((chunk, float(scores[idx])))
         return out
 
     def _load_bm25(self) -> BM25Okapi | None:

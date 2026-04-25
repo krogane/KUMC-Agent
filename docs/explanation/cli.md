@@ -1,0 +1,419 @@
+# `src/kumc_agent/cli.py` の解説
+
+## このファイルの役割
+
+`cli.py` は、KUMC-Agent をコマンドラインから起動するための入口です。
+
+利用者は次のように `python -m kumc_agent.cli ...` という形でコマンドを実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の活動予定は？"
+```
+
+このとき Python が最初に読むのが `src/kumc_agent/cli.py` です。
+`cli.py` は、入力されたコマンドやオプションを読み取り、「どの機能を動かすべきか」を判断して、実際の処理を担当する別のモジュールへ渡します。
+
+つまり、このファイル自体が検索、回答生成、DB 操作、Discord Bot 処理などをすべて実装しているわけではありません。
+主な仕事は、コマンドライン操作とアプリケーション内部の処理をつなぐことです。
+
+## 全体像
+
+`cli.py` の処理は、大きく見ると次の順番で進みます。
+
+1. `argparse` で使えるコマンドとオプションを定義する
+2. ユーザーが入力したコマンドを解析する
+3. コマンドに応じて必要な app context や runtime context を作る
+4. 対応する service / usecase / frontend を呼び出す
+5. 結果を標準出力へ表示する
+
+`argparse` は Python 標準ライブラリのコマンドライン引数解析ツールです。
+たとえば `ask --question "..."` のような入力から、`command` は `ask`、`question` は質問文、という形でプログラム内から扱える値に変換します。
+
+## ファイル冒頭の import
+
+冒頭では、この CLI が呼び出す可能性のある処理を読み込んでいます。
+
+代表的なものは次の通りです。
+
+- `argparse`: コマンドライン引数を解析するために使う
+- `asyncio`: ingestion など非同期処理を CLI から実行するために使う
+- `json`: 結果を JSON 形式で表示するために使う
+- `logging`: 実行ログを出すために使う
+- `Path`: ファイルパスを扱うために使う
+- `run_repl`: コンソール対話モードを起動する
+- `run_discord`: 既存互換の Discord frontend を起動する
+- `run_http`: 既存互換の HTTP frontend を起動する
+- `build_runtime_context`: 旧来互換の chat / index / eval 用の依存関係をまとめて作る
+- `ChatRequest` などの request class: usecase に渡す入力データを表す
+- `configure_logging`: ログ設定を行う
+
+この import の構成からも、`cli.py` が「各機能の本体」ではなく「各機能を呼び出す入口」であることがわかります。
+
+## 補助関数
+
+### `_build_tool_rag_payload`
+
+`tool rag` コマンドの回答結果を、外部ツールや別プロセスが扱いやすい JSON 用の辞書に変換します。
+
+主に次の情報を出力します。
+
+- `answer`: 回答本文
+- `route`: どの回答ルートが使われたか
+- `sources`: 回答の根拠になった情報源
+- `routing_decision`: ルーティング判断の情報
+- `fast_mode`: 高速モードだったかどうか
+- `metadata`: その他の付加情報
+
+ここでは `metadata` から `contexts` を削除しています。
+`contexts` は検索で集めた本文断片など、サイズが大きくなりやすい情報だと考えられます。
+CLI の出力を軽くし、ツール連携で扱いやすくするために除外しています。
+
+### `_workflow_response_payload`
+
+`work` と `approval` コマンドの結果を JSON 化しやすい形に変換します。
+
+workflow 系の処理では、タスク、イベント、予定、会議、承認、Minecraft サーバー操作など、複数種類の結果が返る可能性があります。
+この関数はそれらをまとめて辞書にします。
+
+日時のように `isoformat()` を持つ値は文字列へ変換します。
+これは、`datetime` などがそのままでは JSON にしづらいためです。
+
+### `_automation_response_payload`
+
+`automation` コマンドの結果を JSON 化しやすい形に変換します。
+
+automation では自動実行ルールや実行履歴を扱うため、主に次の情報を出力します。
+
+- `text`: 人間向けの概要
+- `detail_markdown`: 詳細説明
+- `rules`: 自動化ルール一覧
+- `runs`: 実行履歴
+- `warnings`: 警告
+- `metadata`: 付加情報
+
+## `_build_parser`
+
+`_build_parser()` は、この CLI で使えるコマンド一覧を定義する関数です。
+
+ここで作られた定義により、たとえば次のようなコマンドが使えるようになります。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli --help
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --help
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --help
+```
+
+この関数では `subparsers` を使っています。
+`subparsers` は `kumc-agent ask ...`、`kumc-agent admin ...` のように、最初の単語で処理を分ける仕組みです。
+
+## 定義されている主なコマンド
+
+### `repl`
+
+コンソール上で対話的に質問できるモードを起動します。
+
+1 回だけ質問するのではなく、ターミナル上で会話を続けたいときの入口です。
+
+### `chat`
+
+1 回だけ通常のチャット質問を実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
+```
+
+内部では `ChatEntryRequest` を作り、`context.chat_entry.execute(...)` に渡します。
+
+### `tool rag`
+
+ローカルの RAG をツール連携向けに実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --query "KUMCの活動内容は？"
+```
+
+`chat` と違い、回答文だけではなく、情報源やメタデータを含む JSON を出力します。
+`--query` は複数回指定できます。
+複数指定した場合は、それぞれの質問に対する結果を配列として返します。
+
+また、このコマンドでは履歴や追加メモリを無効化する指定が入っています。
+そのため、外部ツールから安定した RAG 結果を得る用途に向いています。
+
+### `index build` / `index update`
+
+検索用インデックスを作成または更新します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index build
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index update
+```
+
+`build` はインデックス作成、`update` は更新の入口です。
+どちらも次のオプションを持ちます。
+
+- `--no-refresh-sources`: 元データの再取得をしない
+- `--full-rebuild`: 全体を作り直す
+- `--stage`: 実行する stage を絞る。複数回指定可能
+
+実行後は、読み込んだ source 数、document 数、chunk 数、index directory を JSON で表示します。
+
+### `eval ragas`
+
+RAG の評価を実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli eval ragas --eval-file data/eval/ragas.jsonl
+```
+
+評価ファイル、件数上限、結果出力先、RAGAS のバッチサイズやタイムアウト、回答キャッシュの扱いなどを指定できます。
+結果として、評価件数、完全一致率、トークン重複率、RAGAS 指標などを JSON で表示します。
+
+### `discord` / `http`
+
+既存互換の frontend を起動します。
+
+- `discord`: 既存の Discord frontend
+- `http`: 互換用の HTTP stub frontend
+
+README では、新しい Discord slash-command app は `bot`、実装済み API app は `api` を使う説明になっています。
+そのため、`discord` と `http` は主に互換維持のための入口と考えると理解しやすいです。
+
+### `bot` / `api` / `worker`
+
+Wave 1 以降の新しい app entrypoint です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli bot
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli api --host 127.0.0.1 --port 8000
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker
+```
+
+- `bot`: Discord slash-command bot を起動する
+- `api`: API app を指定 host / port で起動する
+- `worker`: worker skeleton を 1 回実行する
+
+これらは `main()` の中で必要になったタイミングで import されています。
+常にすべての app を読み込むのではなく、実行するコマンドに必要なものだけを読み込む構成です。
+
+### `admin`
+
+運用・管理用のコマンドです。
+
+`--action` で実行内容を選びます。
+
+- `health`: アプリのヘルスチェック
+- `readiness`: 自動化などを含む readiness report
+- `sync`: connector からデータを取り込む
+- `reindex`: 強制的に再取り込み・再インデックス寄りの処理を行う
+- `eval`: ローカル評価ハーネスの概要を出す
+- `feature_flags`: feature flag の状態を出す
+- `permissions`: 管理者 ID や guild allow list の設定状況を出す
+- `cost_report`: automation のコスト関連レポートを出す
+
+`sync` と `reindex` では ingestion context を作り、`backfill_many(...)` を呼びます。
+`reindex` の場合は `force` が有効になるため、より強制的な再処理として扱われます。
+
+### `db migrate`
+
+PostgreSQL migration を適用します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli db migrate
+```
+
+内部では foundation app context を作り、`foundation.migrations.apply()` を呼びます。
+適用された migration と、スキップされた migration を JSON で表示します。
+
+### `ingest backfill`
+
+connector から raw item や chunk を取り込む入口です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest backfill --source file --limit 20
+```
+
+主なオプションは次の通りです。
+
+- `--source`: 対象 connector。複数回指定可能。省略時は有効な connector 全体が対象
+- `--limit`: 取り込み件数の上限
+- `--force`: 強制的に処理する
+
+非同期処理である `ingestion.service.backfill_many(...)` を、CLI から `asyncio.run(...)` で実行しています。
+
+### `ask`
+
+統合質問応答の入口です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の活動予定は？"
+```
+
+通常は retrieval app context を作り、`retrieval.ask.ask(...)` を呼びます。
+質問文、source filter、mode、depth、アクセス情報を `RetrievalQuery` にまとめて渡します。
+
+`--depth deep` の場合だけ、通常の retrieval ではなく agentic search を使います。
+この場合は `build_agentic_app_context()` で agentic context を作り、`agentic.agentic_search.search(...)` を呼びます。
+
+アクセス制御に関係する値として、次のオプションがあります。
+
+- `--user-id`
+- `--guild-id`
+- `--role-id`
+- `--admin`
+
+これらは `AccessContext` にまとめられ、回答時の権限判定や表示制御に使われます。
+
+### `work`
+
+タスク管理、予定管理、文書下書き、告知文作成、Minecraft 支援などの workflow 機能を実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --instruction "新歓資料を作成"
+```
+
+`--type` で作業の種類を選びます。
+
+代表例は次の通りです。
+
+- `meeting_prepare`: 会議準備
+- `meeting_minutes_draft`: 議事録下書き
+- `task_extract`: 指示文からタスク候補を抽出
+- `task_add`: タスク追加
+- `task_list`: タスク一覧
+- `task_done`: タスク完了
+- `event_add`: イベント追加
+- `event_list`: イベント一覧
+- `event_brief`: イベント概要
+- `schedule_add`: スケジュール追加
+- `schedule_list`: スケジュール一覧
+- `doc_draft`: 文書下書き
+- `x_draft`: X 投稿文下書き
+- `announcement_draft`: 告知文下書き
+- `mc_status`: Minecraft サーバー状態確認
+- `mc_request`: Minecraft 関連操作リクエスト
+
+入力は `WorkRequest` にまとめられ、`workflow.workflow.run(...)` に渡されます。
+結果は `_workflow_response_payload()` で JSON 向けに整形されます。
+
+### `approval`
+
+承認操作の入口です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --action list
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --action approve --target-id task_...
+```
+
+現在の `--type` は `task` のみです。
+`--action` では次の操作を指定できます。
+
+- `list`: 承認待ち一覧
+- `show`: 詳細表示
+- `approve`: 承認
+- `reject`: 却下
+- `edit`: 編集
+
+`work` と同じ workflow app context を使い、`workflow.workflow.approval(...)` を呼びます。
+
+### `automation`
+
+自動化ルールの確認・実行・有効化などを行う入口です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli automation --action list
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli automation --action dry_run --rule-id auto_index_daily
+```
+
+`--action` で次の操作を選びます。
+
+- `list`: ルール一覧
+- `show`: ルール詳細
+- `dry_run`: 実行せずに試す
+- `run`: 実行する
+- `enable`: 有効化
+- `disable`: 無効化
+- `set_mode`: 実行モードを変える
+
+`--mode` には次の値を指定できます。
+
+- `dry_run`: 試行のみ
+- `approval_required`: 承認必須
+- `auto_run`: 自動実行
+
+`trigger-key` や `idempotency-key` は、自動化の起動理由や重複実行防止に使う値です。
+
+## `main()` の処理
+
+`main()` は、このファイルの中心です。
+
+まず `_build_parser()` で parser を作り、`parser.parse_args()` でユーザー入力を解析します。
+その後、`args.command` を見て、どの処理を実行するかを `if` 文で分岐します。
+
+### 早い段階で処理されるコマンド
+
+`discord`、`http`、`bot`、`api`、`worker`、`admin`、`db`、`ingest`、`ask`、`work`、`approval`、`automation` は、`build_runtime_context()` を作る前に処理されます。
+
+これは、それぞれが専用の app context を持っているためです。
+たとえば `ask` は retrieval app context、`work` は workflow app context、`automation` は automation app context を使います。
+
+### 後半で処理される互換系コマンド
+
+前半の分岐に当てはまらなかった場合、`build_runtime_context()` を呼びます。
+この context は、従来の console / chat / RAG / index / eval などの usecase をまとめた実行環境です。
+
+その後、次のコマンドを処理します。
+
+- `repl`
+- `chat`
+- `tool rag`
+- `index build`
+- `index update`
+- `eval ragas`
+
+この構成から、`cli.py` には「新しい app context を使うコマンド」と「従来互換の runtime context を使うコマンド」が同居していることがわかります。
+
+## 出力形式
+
+この CLI の出力は、コマンドによって少し違います。
+
+`chat` は回答本文だけを表示します。
+
+```text
+KUMCは...
+```
+
+一方で、`ask`、`work`、`automation`、`index`、`eval` などは JSON を表示します。
+
+JSON にしている理由は、人間だけでなく、スクリプト、CI、外部ツールからも結果を読み取りやすくするためです。
+`ensure_ascii=False` を指定しているため、日本語は `\uXXXX` のようなエスケープではなく、そのまま表示されます。
+
+## ログ設定
+
+一部のコマンドでは、実行前に `configure_logging(...)` を呼んでいます。
+
+ログレベルは設定ファイルや環境変数から読み込まれた config に従います。
+ログファイルの保存先は `default_execution_log_path(base_dir=...)` で決まります。
+
+ログは、CLI で何を実行したか、インデックス作成で何件処理したか、評価がどう終わったかなどを追跡するために使われます。
+
+## このファイルを読むときのポイント
+
+`cli.py` を読むときは、次の順番で見ると理解しやすいです。
+
+1. `_build_parser()` で「どんなコマンドがあるか」を見る
+2. `main()` で「そのコマンドがどの context や service に渡されるか」を見る
+3. 実際の処理内容を知りたい場合は、呼び出し先の `apps`、`features`、`usecases` を読む
+
+たとえば `ask` の中身を詳しく知りたい場合、`cli.py` だけを読んでも検索や回答生成の詳細はわかりません。
+`cli.py` では `build_retrieval_app_context()` と `retrieval.ask.ask(...)` を呼んでいるので、次は `src/kumc_agent/apps/retrieval.py` や `src/kumc_agent/features/retrieval/` を追うのが自然です。
+
+同じように、`work` の詳細は workflow、`automation` の詳細は automation、`index` の詳細は indexing の usecase や feature を見る必要があります。
+
+## まとめ
+
+`src/kumc_agent/cli.py` は、KUMC-Agent のコマンドライン入口をまとめたファイルです。
+
+このファイルは、ユーザーが入力したコマンドを解析し、適切な app context、service、usecase、frontend へ処理を渡します。
+実際の業務ロジックは別ファイルに分かれており、`cli.py` はそれらを起動するための交通整理役です。
+
+プロジェクト未理解の状態で読む場合は、まず `cli.py` で「どんな入口があるか」を把握し、その後に興味のあるコマンドの呼び出し先を追うと、全体像をつかみやすくなります。

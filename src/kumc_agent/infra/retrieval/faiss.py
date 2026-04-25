@@ -10,6 +10,7 @@ import sys
 import numpy as np
 
 from kumc_agent.domain.models.chunk import Chunk
+from kumc_agent.domain.policies.chunk_visibility import is_chunk_allowed_for_answer_context
 from kumc_agent.utils.hashing import cosine_similarity_matrix
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ class FaissLikeIndex:
             SearchResult(chunk=chunks[int(i)], score=float(scores[int(i)]))
             for i in order
             if int(i) < len(chunks)
+            and is_chunk_allowed_for_answer_context(chunks[int(i)])
         ]
 
     def _search_faiss(
@@ -145,7 +147,10 @@ class FaissLikeIndex:
                 pos = int(idx)
                 if pos < 0 or pos >= len(chunks):
                     continue
-                out.append(SearchResult(chunk=chunks[pos], score=float(score)))
+                chunk = chunks[pos]
+                if not is_chunk_allowed_for_answer_context(chunk):
+                    continue
+                out.append(SearchResult(chunk=chunk, score=float(score)))
             return out
         except Exception:
             logger.exception(

@@ -7,6 +7,15 @@ features:
   docgen: false
   http: false
   recency_mode: "soft"
+  risk_flags:
+    action_execution: "approval_required"
+    external_posting: "approval_required"
+    minecraft_server_ops: "approval_required"
+    accounting_finalize: "approval_required"
+    auto_reply: "approval_required"
+    automation_auto_run: "disabled"
+    vc_recording: "disabled"
+    image_generation: "approval_required"
   sources:
     drive: true
     discord: true
@@ -14,6 +23,7 @@ features:
     crafters_colony: true
     x: true
     notion: false
+    minecraft_wiki: false
   retrieval:
     top_k: 8
     dense_top_k: 15

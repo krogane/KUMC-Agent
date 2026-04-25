@@ -6,6 +6,7 @@ from typing import Any
 
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.document import Document
+from kumc_agent.domain.policies.chunk_visibility import is_chunk_allowed_for_answer_context
 from kumc_agent.domain.ports.prompts import PromptRepositoryPort
 from kumc_agent.domain.ports.storage import StoragePort
 
@@ -67,15 +68,15 @@ class FileSystemStorage(StoragePort):
                 if not line:
                     continue
                 payload = json.loads(line)
-                out.append(
-                    Chunk(
-                        id=str(payload["id"]),
-                        document_id=str(payload["document_id"]),
-                        text=str(payload["text"]),
-                        index=int(payload["index"]),
-                        metadata=dict(payload.get("metadata", {})),
-                    )
+                chunk = Chunk(
+                    id=str(payload["id"]),
+                    document_id=str(payload["document_id"]),
+                    text=str(payload["text"]),
+                    index=int(payload["index"]),
+                    metadata=dict(payload.get("metadata", {})),
                 )
+                if is_chunk_allowed_for_answer_context(chunk):
+                    out.append(chunk)
         return out
 
 

@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import logging
+
+from kumc_agent.domain.models.audit import AuditEvent
+from kumc_agent.domain.models.chunk import Chunk
+from kumc_agent.domain.models.secret import SecretFinding
+from kumc_agent.domain.models.source import BackfillScope, SourceDeleteItem, SourceRawItem
+from kumc_agent.domain.ports.connectors import SourceConnector
+from kumc_agent.features.foundation.tracing import current_trace_id
+from kumc_agent.features.ingestion.chunking import IngestionChunker
+from kumc_agent.infra.audit.repository import AuditLogRepository
+from kumc_agent.infra.ingestion.repository import IngestionRepository
+from kumc_agent.infra.object_storage.raw_snapshot import RawSnapshotStore
+from kumc_agent.infra.secret_finding.detector import (
+    SecretFindingDetector,
+    strictest_redaction_policy,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class IngestionResult:
+    source_kind: str
+    seen: int
+    changed: int
+    skipped: int
+    deleted: int
+    documents: int
+    chunks: int
+    secret_findings: int
+
+
+class IngestionService:
+    def __init__(
+        self,
+        *,
+        connectors: dict[str, SourceConnector],
+        repository: IngestionRepository,
+        raw_snapshots: RawSnapshotStore,
+        chunker: IngestionChunker,
+        secret_detector: SecretFindingDetector,
+        audit_log: AuditLogRepository,
+    ) -> None:
+        self._connectors = connectors
+        self._repository = repository
+        self._raw_snapshots = raw_snapshots
+        self._chunker = chunker
+        self._secret_detector = secret_detector
+        self._audit_log = audit_log
+
+    def available_sources(self) -> tuple[str, ...]:
+        return tuple(sorted(self._connectors))
+
+    async def backfill(
+        self,
+        *,
+        source_kind: str,
+        scope: BackfillScope | None = None,
+    ) -> IngestionResult:
+        if source_kind not in self._connectors:
+            raise KeyError(f"Unknown source connector: {source_kind}")
+        connector = self._connectors[source_kind]
+        resolved_scope = scope or BackfillScope()
+        known_checksums = self._repository.load_checksums(source_kind)
+        seen = changed = skipped = deleted = documents = chunks = findings_count = 0
+
+        async for item in connector.backfill(resolved_scope):
+            if isinstance(item, SourceDeleteItem):
+                self._repository.mark_deleted(
+                    source_kind=item.source_kind,
+                    external_id=item.external_id,
+                )
+                deleted += 1
+                continue
+            seen += 1
+            if (
+                not resolved_scope.force
+                and known_checksums.get(item.external_id) == item.checksum
+            ):
+                skipped += 1
+                continue
+            outcome = await self._ingest_raw_item(connector=connector, raw=item)
+            changed += 1
+            documents += 1
+            chunks += outcome.chunks
+            findings_count += outcome.secret_findings
+
+        result = IngestionResult(
+            source_kind=source_kind,
+            seen=seen,
+            changed=changed,
+            skipped=skipped,
+            deleted=deleted,
+            documents=documents,
+            chunks=chunks,
+            secret_findings=findings_count,
+        )
+        self._audit_log.append(
+            AuditEvent(
+                action="ingestion.backfill",
+                actor_id="worker",
+                actor_type="service",
+                target=source_kind,
+                outcome="succeeded",
+                risk_level="low",
+                trace_id=current_trace_id(),
+                metadata=result.__dict__,
+            )
+        )
+        return result
+
+    async def backfill_many(
+        self,
+        *,
+        source_kinds: tuple[str, ...],
+        scope: BackfillScope | None = None,
+    ) -> tuple[IngestionResult, ...]:
+        targets = source_kinds or self.available_sources()
+        results: list[IngestionResult] = []
+        for source_kind in targets:
+            results.append(await self.backfill(source_kind=source_kind, scope=scope))
+        return tuple(results)
+
+    async def _ingest_raw_item(
+        self,
+        *,
+        connector: SourceConnector,
+        raw: SourceRawItem,
+    ) -> IngestionResult:
+        raw_object_key = self._raw_snapshots.put(raw)
+        document = await connector.normalize(raw)
+        source_findings = self._secret_detector.detect(
+            source_item_id=document.source_item_id,
+            text=document.normalized_text,
+            chunk_id=None,
+        )
+        chunk_items = self._chunker.chunk(document)
+        all_findings: list[SecretFinding] = list(source_findings)
+        processed_chunks: list[Chunk] = []
+        for chunk in chunk_items:
+            chunk_findings = self._secret_detector.detect(
+                source_item_id=document.source_item_id,
+                chunk_id=chunk.id,
+                text=chunk.text,
+            )
+            all_findings.extend(chunk_findings)
+            processed_chunks.append(
+                _with_secret_metadata(
+                    chunk=chunk,
+                    findings=chunk_findings,
+                )
+            )
+        self._repository.save_item(
+            raw=raw,
+            document=document,
+            chunks=processed_chunks,
+            findings=all_findings,
+            raw_object_key=raw_object_key,
+        )
+        return IngestionResult(
+            source_kind=raw.source_kind,
+            seen=1,
+            changed=1,
+            skipped=0,
+            deleted=0,
+            documents=1,
+            chunks=len(processed_chunks),
+            secret_findings=len(all_findings),
+        )
+
+
+def _with_secret_metadata(*, chunk: Chunk, findings: list[SecretFinding]) -> Chunk:
+    policy = strictest_redaction_policy(findings)
+    index_status = "quarantined" if policy == "deny" else "active"
+    metadata = {
+        **chunk.metadata,
+        "redaction_policy": policy,
+        "index_status": index_status,
+        "secret_finding_ids": [finding.id for finding in findings],
+    }
+    return Chunk(
+        id=chunk.id,
+        document_id=chunk.document_id,
+        text=chunk.text,
+        index=chunk.index,
+        metadata=metadata,
+    )
