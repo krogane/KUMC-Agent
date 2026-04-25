@@ -47,54 +47,39 @@ rag:
     gemini_header_output_format: "# 出力形式"
     gemini_header_instructions: "## 指示"
     gemini_header_question: "# ユーザーの質問"
-    llama_header_question: "### Question"
-    llama_header_previous_attempt: "### Previous attempt (Question/Answer)"
-    llama_header_circle_info: "### サークルの基本情報"
-    llama_header_capabilities: "### チャットボット自身の機能情報"
-    llama_header_context: "### Context"
-    llama_header_output_format: "### Output format"
-    llama_header_instructions: "## 指示"
   routing:
     enabled: true
     provider: "gemini"
     gemini_model: "gemini-2.5-flash-lite"
-    llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
     prompt_name: "routing"
     tasks:
       target_model:
         provider: "gemini"
         gemini_model: "gemini-2.5-flash-lite"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_target_model"
       use_additional_memory:
         provider: "gemini"
         gemini_model: "gemini-2.5-flash-lite"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_use_additional_memory"
       include_capabilities_info:
         provider: "gemini"
         gemini_model: "gemini-2.5-flash-lite"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_include_capabilities_info"
       needs_additional_query:
         provider: "gemini"
         gemini_model: "gemini-2.5-flash-lite"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_needs_additional_query"
       additional_queries:
         provider: "gemini"
         gemini_model: "gemini-3.1-flash-lite-preview"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_additional_queries"
       material_names:
         provider: "gemini"
         gemini_model: "gemini-3.1-flash-lite-preview"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_material_names"
       recency_mode:
         provider: "gemini"
         gemini_model: "gemini-3.1-flash-lite-preview"
-        llama_model_path: "model/llm/Qwen3-0.6B-IQ4_XS.gguf"
         prompt_name: "routing_recency_mode"
     temperature: 0.0
     max_new_tokens: 128
@@ -113,7 +98,6 @@ rag:
     rag:
       provider: "gemini"
       gemini_model: "gemini-3-flash-preview"
-      llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
       temperature: 0.0
       max_output_tokens: 8192
       thinking_level: "minimal"
@@ -121,19 +105,10 @@ rag:
     no_rag:
       provider: "gemini"
       gemini_model: "gemini-2.5-flash-lite"
-      llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
       temperature: 0.0
       max_output_tokens: 4096
       thinking_level: "minimal"
       prompt_name: "answer_no_rag"
-    refusal:
-      provider: "gemini"
-      gemini_model: "gemma-3-27b-it"
-      llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-      temperature: 0.0
-      max_output_tokens: 1024
-      thinking_level: "minimal"
-      prompt_name: "answer_refusal"
 indexing:
   chunking:
     first_recursive_chunk_size: 1024
@@ -144,50 +119,24 @@ indexing:
     summary_batch_size: 2000
     summary_llm_provider: "gemini"
     summary_gemini_model: "gemini-2.5-flash-lite"
-    summary_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
     summary_temperature: 0.0
     summary_max_output_tokens: 1024
     summary_thinking_level: "minimal"
-    proposition_llm_provider: "gemini"
-    proposition_gemini_model: "gemini-2.5-flash-lite"
-    proposition_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-    proposition_temperature: 0.0
-    proposition_max_output_tokens: 4096
-    proposition_thinking_level: "minimal"
-    proposition_max_retries: 2
-    raptor_llm_provider: "gemini"
-    raptor_gemini_model: "gemini-2.5-flash-lite"
-    raptor_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-    raptor_temperature: 0.0
-    raptor_max_output_tokens: 256
-    raptor_thinking_level: "minimal"
-    raptor_max_retries: 2
-    raptor_cluster_max_tokens: 1024
-    raptor_stop_chunk_count: 20
-    raptor_k_max: 8
-    raptor_k_selection: "elbow"
   stages:
     second_recursive_enabled: true
     sparse_second_recursive_enabled: true
     summary_enabled: true
-    proposition_enabled: false
-    raptor_enabled: false
   refresh:
     clear_raw_data: false
     clear_first_recursive_chunk_data: false
     clear_second_recursive_chunk_data: false
     clear_summary_chunk_data: false
-    clear_proposition_chunk_data: false
-    clear_raptor_chunk_data: false
     update_raw_data: true
     update_first_recursive_chunk_data: true
     update_second_recursive_chunk_data: true
     update_sparse_second_recursive_chunk_data: true
     update_summary_chunk_data: true
-    update_proposition_chunk_data: false
-    update_raptor_chunk_data: false
 ops:
-  warmup_interval_minutes: 60
   index_update_estimate_min_minutes: 30
   index_update_estimate_max_minutes: 60
   ragas_answer_generation_batch_size: 30

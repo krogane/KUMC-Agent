@@ -207,8 +207,6 @@ class RagService:
         normalized = (target_model or "").strip().lower()
         if normalized == "no_rag":
             base = self._config.no_rag_generation
-        elif normalized == "refusal":
-            base = self._config.refusal_generation
         else:
             base = self._config.rag_generation
         return base
@@ -288,6 +286,7 @@ class RagService:
             recency_weight_hard=self._config.recency_weight_hard,
             recency_half_life_days=self._config.recency_half_life_days,
             mmr_lambda=self._config.mmr_lambda,
+            rrf_k=self._config.rrf_k,
         )
         return self._filter_chunks_by_source_type(
             chunks,
@@ -547,33 +546,13 @@ class RagService:
 
     def _parent_cap_key(self, chunk: Chunk) -> tuple[object, ...]:
         metadata = chunk.metadata or {}
-        stage = metadata.get("chunk_stage")
         parent_id = self._normalize_chunk_id(metadata.get("parent_chunk_id"))
-        if stage == "proposition":
-            resolved = self._resolve_first_parent_id(metadata, parent_id)
-            if resolved is not None:
-                parent_id = resolved
         if parent_id is None:
             return ("self", self._chunk_doc_key(chunk))
         key = self._chunk_lookup_key(metadata, parent_id)
         if key is None:
             return ("self", self._chunk_doc_key(chunk))
         return ("parent",) + key
-
-    def _resolve_first_parent_id(
-        self,
-        metadata: dict[str, object],
-        parent_id: int | None,
-    ) -> int | None:
-        if parent_id is None:
-            return None
-        key = self._chunk_lookup_key(metadata, parent_id)
-        if key is None:
-            return None
-        second_chunk = self._second_rec_chunk_map().get(key)
-        if second_chunk is None:
-            return None
-        return self._normalize_chunk_id((second_chunk.metadata or {}).get("parent_chunk_id"))
 
     def _append_parent_chunks(
         self,
@@ -602,16 +581,6 @@ class RagService:
         if self._metadata_flag_enabled(metadata.get("skip_parent_context")):
             return []
         stage = metadata.get("chunk_stage")
-        if stage == "proposition":
-            second_parent_id = self._normalize_chunk_id(metadata.get("parent_chunk_id"))
-            first_parent_id = self._resolve_first_parent_id(metadata, second_parent_id)
-            if first_parent_id is None:
-                return []
-            return self._first_or_summary_candidates(
-                metadata=metadata,
-                first_parent_id=first_parent_id,
-            )
-
         if stage == "second_recursive":
             first_parent_id = self._normalize_chunk_id(metadata.get("parent_chunk_id"))
             if first_parent_id is None:
@@ -749,10 +718,8 @@ class RagService:
         stage = metadata.get("chunk_stage")
         source = metadata.get("drive_file_id") or metadata.get("source_file_name")
         chunk_id = metadata.get("chunk_id")
-        raptor_level = metadata.get("raptor_level")
-        raptor_cluster = metadata.get("raptor_cluster_id")
-        if stage or source or chunk_id or raptor_level or raptor_cluster:
-            return (stage, source, chunk_id, raptor_level, raptor_cluster)
+        if stage or source or chunk_id:
+            return (stage, source, chunk_id)
         return ("content", chunk.text)
 
     @staticmethod
@@ -1173,6 +1140,7 @@ class RagService:
                 recency_weight_hard=self._config.recency_weight_hard,
                 recency_half_life_days=self._config.recency_half_life_days,
                 mmr_lambda=self._config.mmr_lambda,
+                rrf_k=self._config.rrf_k,
             )
             for chunk in candidates:
                 if not self._chunk_matches_material_keys(

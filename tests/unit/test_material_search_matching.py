@@ -16,7 +16,6 @@ from kumc_agent.domain.models.routing import RoutingDecision
 from kumc_agent.features.rag.config import (
     RagConfig,
     RagGenerationSettings,
-    RagIdeaGenerationSettings,
 )
 from kumc_agent.features.rag.service import RagService
 
@@ -90,16 +89,6 @@ def _rag_config(*, material_full_text_char_limit: int = 3000) -> RagConfig:
             temperature=0.0,
             max_output_tokens=512,
             prompt_name="answer_no_rag",
-        ),
-        refusal_generation=RagGenerationSettings(
-            provider="gemini",
-            temperature=0.0,
-            max_output_tokens=512,
-            prompt_name="answer_refusal",
-        ),
-        idea_generation=RagIdeaGenerationSettings(
-            prompt_name="answer_idea",
-            temperature=0.3,
         ),
         material_search_max_names=3,
         parent_doc_enabled=False,
@@ -232,7 +221,6 @@ class MaterialSearchMatchingTests(unittest.TestCase):
             )
             service = _new_service(retrieval=retrieval)
             decision = RoutingDecision(
-                target_model="material_search",
                 recency_mode="off",
                 material_names=["meeting memo for June"],
             )
@@ -273,7 +261,6 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                 AssertionError("RAG fallback should not be called.")
             )
             decision = RoutingDecision(
-                target_model="material_search",
                 recency_mode="off",
                 material_names=["20250614 議事録"],
             )
@@ -323,7 +310,6 @@ class MaterialSearchMatchingTests(unittest.TestCase):
             ]
 
             decision = RoutingDecision(
-                target_model="material_search",
                 recency_mode="off",
                 material_names=["20250614 議事録"],
             )

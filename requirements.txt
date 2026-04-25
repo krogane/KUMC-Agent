@@ -18,7 +18,6 @@ langchain-text-splitters
 sentence-transformers
 torch
 torchvision
-llama-cpp-python
 python-dotenv
 faiss-cpu
 ragas

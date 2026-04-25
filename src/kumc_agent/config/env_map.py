@@ -170,7 +170,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     ),
     EnvBinding("KUMC_LLM_PROVIDER", "providers.llm.provider", str),
     EnvBinding("KUMC_LLM_GEMINI_MODEL", "providers.llm.gemini_model", str),
-    EnvBinding("KUMC_LLM_LLAMA_MODEL_PATH", "providers.llm.llama_model_path", str),
     EnvBinding("KUMC_LLM_TEMPERATURE", "providers.llm.temperature", _to_float),
     EnvBinding(
         "KUMC_LLM_MAX_OUTPUT_TOKENS",
@@ -178,8 +177,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_int,
     ),
     EnvBinding("KUMC_LLM_THINKING_LEVEL", "providers.llm.thinking_level", str),
-    EnvBinding("KUMC_LLM_THREADS", "providers.llm.threads", _to_int),
-    EnvBinding("KUMC_LLM_GPU_LAYERS", "providers.llm.gpu_layers", _to_int),
     EnvBinding("KUMC_EMBEDDING_PROVIDER", "providers.embeddings.provider", str),
     EnvBinding("KUMC_EMBEDDING_MODEL", "providers.embeddings.model", str),
     EnvBinding("KUMC_EMBEDDING_DIMENSIONS", "providers.embeddings.dimensions", _to_int),
@@ -192,15 +189,9 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "providers.function_call.gemini_model",
         str,
     ),
-    EnvBinding(
-        "KUMC_FUNCTION_CALL_LLAMA_MODEL_PATH",
-        "providers.function_call.llama_model_path",
-        str,
-    ),
     EnvBinding("KUMC_RAG_ROUTING_ENABLED", "rag.routing.enabled", _to_bool),
     EnvBinding("KUMC_RAG_ROUTING_PROVIDER", "rag.routing.provider", str),
     EnvBinding("KUMC_RAG_ROUTING_GEMINI_MODEL", "rag.routing.gemini_model", str),
-    EnvBinding("KUMC_RAG_ROUTING_LLAMA_MODEL_PATH", "rag.routing.llama_model_path", str),
     EnvBinding("KUMC_RAG_ROUTING_TEMPERATURE", "rag.routing.temperature", _to_float),
     EnvBinding("KUMC_RAG_ROUTING_MAX_NEW_TOKENS", "rag.routing.max_new_tokens", _to_int),
     EnvBinding("KUMC_RAG_ROUTING_MAX_RETRIES", "rag.routing.max_retries", _to_int),
@@ -335,42 +326,10 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "rag.prompt_texts.gemini_header_question",
         str,
     ),
-    EnvBinding("PROMPT_LLAMA_HEADER_QUESTION", "rag.prompt_texts.llama_header_question", str),
-    EnvBinding(
-        "PROMPT_LLAMA_HEADER_PREVIOUS_ATTEMPT",
-        "rag.prompt_texts.llama_header_previous_attempt",
-        str,
-    ),
-    EnvBinding(
-        "PROMPT_LLAMA_HEADER_CIRCLE_INFO",
-        "rag.prompt_texts.llama_header_circle_info",
-        str,
-    ),
-    EnvBinding(
-        "PROMPT_LLAMA_HEADER_CAPABILITIES",
-        "rag.prompt_texts.llama_header_capabilities",
-        str,
-    ),
-    EnvBinding("PROMPT_LLAMA_HEADER_CONTEXT", "rag.prompt_texts.llama_header_context", str),
-    EnvBinding(
-        "PROMPT_LLAMA_HEADER_OUTPUT_FORMAT",
-        "rag.prompt_texts.llama_header_output_format",
-        str,
-    ),
-    EnvBinding(
-        "PROMPT_LLAMA_HEADER_INSTRUCTIONS",
-        "rag.prompt_texts.llama_header_instructions",
-        str,
-    ),
     EnvBinding("KUMC_RAG_GENERATION_RAG_PROVIDER", "rag.generation.rag.provider", str),
     EnvBinding(
         "KUMC_RAG_GENERATION_RAG_GEMINI_MODEL",
         "rag.generation.rag.gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_RAG_LLAMA_MODEL_PATH",
-        "rag.generation.rag.llama_model_path",
         str,
     ),
     EnvBinding(
@@ -404,11 +363,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding(
-        "KUMC_RAG_GENERATION_NO_RAG_LLAMA_MODEL_PATH",
-        "rag.generation.no_rag.llama_model_path",
-        str,
-    ),
-    EnvBinding(
         "KUMC_RAG_GENERATION_NO_RAG_TEMPERATURE",
         "rag.generation.no_rag.temperature",
         _to_float,
@@ -429,41 +383,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_PROVIDER",
-        "rag.generation.refusal.provider",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_GEMINI_MODEL",
-        "rag.generation.refusal.gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_LLAMA_MODEL_PATH",
-        "rag.generation.refusal.llama_model_path",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_TEMPERATURE",
-        "rag.generation.refusal.temperature",
-        _to_float,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_MAX_OUTPUT_TOKENS",
-        "rag.generation.refusal.max_output_tokens",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_THINKING_LEVEL",
-        "rag.generation.refusal.thinking_level",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_GENERATION_REFUSAL_PROMPT_NAME",
-        "rag.generation.refusal.prompt_name",
-        str,
-    ),
-    EnvBinding(
         "KUMC_RAG_IDEA_PROMPT_NAME",
         "rag.generation.idea_generation.prompt_name",
         str,
@@ -481,11 +400,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_RAG_IDEA_GEMINI_MODEL",
         "rag.generation.idea_generation.gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_LLAMA_MODEL_PATH",
-        "rag.generation.idea_generation.llama_model_path",
         str,
     ),
     EnvBinding(
@@ -529,96 +443,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_int,
     ),
     EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_LLM_PROVIDER",
-        "indexing.chunking.proposition_llm_provider",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_GEMINI_MODEL",
-        "indexing.chunking.proposition_gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_LLAMA_MODEL_PATH",
-        "indexing.chunking.proposition_llama_model_path",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_TEMPERATURE",
-        "indexing.chunking.proposition_temperature",
-        _to_float,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_MAX_OUTPUT_TOKENS",
-        "indexing.chunking.proposition_max_output_tokens",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_THINKING_LEVEL",
-        "indexing.chunking.proposition_thinking_level",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_MAX_RETRIES",
-        "indexing.chunking.proposition_max_retries",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_LLM_PROVIDER",
-        "indexing.chunking.raptor_llm_provider",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_GEMINI_MODEL",
-        "indexing.chunking.raptor_gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_LLAMA_MODEL_PATH",
-        "indexing.chunking.raptor_llama_model_path",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_TEMPERATURE",
-        "indexing.chunking.raptor_temperature",
-        _to_float,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_MAX_OUTPUT_TOKENS",
-        "indexing.chunking.raptor_max_output_tokens",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_THINKING_LEVEL",
-        "indexing.chunking.raptor_thinking_level",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_MAX_RETRIES",
-        "indexing.chunking.raptor_max_retries",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_CLUSTER_MAX_TOKENS",
-        "indexing.chunking.raptor_cluster_max_tokens",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_STOP_CHUNK_COUNT",
-        "indexing.chunking.raptor_stop_chunk_count",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_K_MAX",
-        "indexing.chunking.raptor_k_max",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_K_SELECTION",
-        "indexing.chunking.raptor_k_selection",
-        str,
-    ),
-    EnvBinding(
         "KUMC_INDEXING_SECOND_RECURSIVE_ENABLED",
         "indexing.stages.second_recursive_enabled",
         _to_bool,
@@ -631,16 +455,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_INDEXING_SUMMARY_ENABLED",
         "indexing.stages.summary_enabled",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_PROPOSITION_ENABLED",
-        "indexing.stages.proposition_enabled",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_INDEXING_RAPTOR_ENABLED",
-        "indexing.stages.raptor_enabled",
         _to_bool,
     ),
     EnvBinding("KUMC_CLEAR_RAW_DATA", "indexing.refresh.clear_raw_data", _to_bool),
@@ -657,16 +471,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_CLEAR_SUMMARY_CHUNK_DATA",
         "indexing.refresh.clear_summary_chunk_data",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_CLEAR_PROPOSITION_CHUNK_DATA",
-        "indexing.refresh.clear_proposition_chunk_data",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_CLEAR_RAPTOR_CHUNK_DATA",
-        "indexing.refresh.clear_raptor_chunk_data",
         _to_bool,
     ),
     EnvBinding("KUMC_UPDATE_RAW_DATA", "indexing.refresh.update_raw_data", _to_bool),
@@ -689,21 +493,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "KUMC_UPDATE_SUMMARY_CHUNK_DATA",
         "indexing.refresh.update_summary_chunk_data",
         _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_UPDATE_PROPOSITION_CHUNK_DATA",
-        "indexing.refresh.update_proposition_chunk_data",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_UPDATE_RAPTOR_CHUNK_DATA",
-        "indexing.refresh.update_raptor_chunk_data",
-        _to_bool,
-    ),
-    EnvBinding(
-        "KUMC_WARMUP_INTERVAL_MINUTES",
-        "ops.warmup_interval_minutes",
-        _to_int,
     ),
     EnvBinding(
         "KUMC_INDEX_UPDATE_ESTIMATE_MIN_MINUTES",
@@ -847,6 +636,7 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "features.retrieval.rerank_pool_size",
         _to_int,
     ),
+    EnvBinding("KUMC_RETRIEVAL_RRF_K", "features.retrieval.rrf_k", _to_int),
     EnvBinding("KUMC_RETRIEVAL_MMR_LAMBDA", "features.retrieval.mmr_lambda", _to_float),
     EnvBinding(
         "KUMC_RETRIEVAL_RECENCY_WEIGHT_SOFT",
@@ -912,7 +702,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "security.discord_guild_allow_list",
         _to_int_csv,
     ),
-    EnvBinding("KUMC_REFUSAL_KEYWORDS", "security.refusal_keywords", _to_str_list),
     EnvBinding("KUMC_MODEL_ROOT_DIR", "model.root_dir", str),
     EnvBinding("KUMC_MODEL_LLM_DIR", "model.llm_dir", str),
     EnvBinding("KUMC_MODEL_EMBEDDING_DIR", "model.embedding_dir", str),
@@ -966,8 +755,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     ),
     EnvBinding("KUMC_VC_SUMMARY_LLM_PROVIDER", "vc.summary_llm_provider", str),
     EnvBinding("KUMC_VC_SUMMARY_GEMINI_MODEL", "vc.summary_gemini_model", str),
-    EnvBinding("KUMC_VC_SUMMARY_LLAMA_MODEL_PATH", "vc.summary_llama_model_path", str),
-    EnvBinding("KUMC_VC_SUMMARY_LLAMA_CTX_SIZE", "vc.summary_llama_ctx_size", _to_int),
     EnvBinding("KUMC_VC_SUMMARY_TEMPERATURE", "vc.summary_temperature", _to_float),
     EnvBinding(
         "KUMC_VC_SUMMARY_MAX_OUTPUT_TOKENS",
@@ -1013,16 +800,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding(
-        "KUMC_VC_MINUTES_EDIT_LLAMA_MODEL_PATH",
-        "vc.minutes_edit_llama_model_path",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_VC_MINUTES_EDIT_LLAMA_CTX_SIZE",
-        "vc.minutes_edit_llama_ctx_size",
-        _to_int,
-    ),
-    EnvBinding(
         "KUMC_VC_MINUTES_EDIT_TEMPERATURE",
         "vc.minutes_edit_temperature",
         _to_float,
@@ -1046,16 +823,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "KUMC_VC_FINAL_SUMMARY_GEMINI_MODEL",
         "vc.final_summary_gemini_model",
         str,
-    ),
-    EnvBinding(
-        "KUMC_VC_FINAL_SUMMARY_LLAMA_MODEL_PATH",
-        "vc.final_summary_llama_model_path",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_VC_FINAL_SUMMARY_LLAMA_CTX_SIZE",
-        "vc.final_summary_llama_ctx_size",
-        _to_int,
     ),
     EnvBinding(
         "KUMC_VC_FINAL_SUMMARY_TEMPERATURE",

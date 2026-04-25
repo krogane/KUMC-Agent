@@ -45,7 +45,6 @@ class GenerationComponent:
         *,
         llm: LLMPort,
         no_rag_llm: LLMPort | None = None,
-        refusal_llm: LLMPort | None = None,
         prompts: PromptRepositoryPort,
         source_max_count: int,
         raw_dir: Path | None = None,
@@ -53,7 +52,6 @@ class GenerationComponent:
     ) -> None:
         self._rag_llm = llm
         self._no_rag_llm = no_rag_llm or llm
-        self._refusal_llm = refusal_llm or self._no_rag_llm
         self._prompts = prompts
         self._source_max_count = max(0, int(source_max_count))
         self._raw_dir = raw_dir
@@ -299,87 +297,6 @@ class GenerationComponent:
             sources=[],
             metadata={
                 "raw": last_raw,
-                "answer_payload_is_json": is_json,
-                "llm_prompt": {
-                    "system_prompt": system_prompt,
-                    "user_prompt": user_prompt,
-                },
-            },
-        )
-
-    def generate_refusal(
-        self,
-        *,
-        query: str,
-        history: Sequence[tuple[str, str, Sequence[str]]] | None,
-        provider: str = "gemini",
-        temperature: float,
-        max_output_tokens: int,
-        refusal_prompt_name: str = "answer_refusal",
-        extra_mode_instruction: str | None = None,
-    ) -> Answer:
-        history_text = self._format_history(history)
-        refusal = self._prompt_first_available(
-            refusal_prompt_name,
-            "answer_refusal",
-            "refusal",
-            default="",
-        )
-        fixed_prefix = "安全上の理由により、この質問には回答できません。"
-        instruction_text = (extra_mode_instruction or "").strip()
-        sections = [
-            self._section(
-                header=self._question_header(provider=provider),
-                body=(query or "").strip(),
-            ),
-            self._section(
-                header=self._history_header(provider=provider, retry_mode=True),
-                body=history_text,
-            ),
-        ]
-        instruction_parts: list[str] = []
-        if instruction_text:
-            instruction_parts.append(instruction_text)
-        if refusal:
-            instruction_parts.append(refusal)
-        if instruction_parts:
-            sections.append(
-                self._section(
-                    header=self._instructions_header(provider=provider),
-                    body="\n\n".join(instruction_parts),
-                )
-            )
-        sections.append(
-            self._section(
-                header=self._output_format_header(provider=provider),
-                body=(
-                    "- 安全上の理由で回答できないことを簡潔に伝えてください。\n"
-                    "- 機密情報の推測・言い換え・部分開示はしないでください。"
-                ),
-            )
-        )
-        user_prompt = "\n\n".join(sections)
-        system_prompt = self._system_prompt()
-        raw = self._refusal_llm.generate(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-        )
-        parsed_answer, _, is_json, has_answer = self._parse_answer_payload(
-            raw,
-            max_source_index=0,
-        )
-        supplemental = parsed_answer if has_answer else (raw or "").strip()
-        supplemental = _mask_discord_mentions(supplemental)
-        text = fixed_prefix if not supplemental else f"{fixed_prefix}\n\n{supplemental}"
-        return Answer(
-            text=text,
-            route="refusal",
-            sources=[],
-            metadata={
-                "query": query,
-                "raw": raw,
                 "answer_payload_is_json": is_json,
                 "llm_prompt": {
                     "system_prompt": system_prompt,
@@ -1021,45 +938,34 @@ class GenerationComponent:
     def _section(*, header: str, body: str) -> str:
         return f"{header}\n{body}"
 
-    def _is_llama_provider(self, provider: str) -> bool:
-        normalized = (provider or "").strip().lower().replace(".", "_")
-        return normalized in {"llama", "llama_cpp"}
-
     def _question_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_question
+        _ = provider
         return self._prompt_texts.gemini_header_question
 
     def _history_header(self, *, provider: str, retry_mode: bool) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_previous_attempt
+        _ = provider
         if retry_mode:
             return self._prompt_texts.gemini_header_retry_history
         return self._prompt_texts.gemini_header_chat_history
 
     def _circle_info_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_circle_info
+        _ = provider
         return self._prompt_texts.gemini_header_circle_info
 
     def _capabilities_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_capabilities
+        _ = provider
         return self._prompt_texts.gemini_header_capabilities
 
     def _context_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_context
+        _ = provider
         return self._prompt_texts.gemini_header_context
 
     def _output_format_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_output_format
+        _ = provider
         return self._prompt_texts.gemini_header_output_format
 
     def _instructions_header(self, *, provider: str) -> str:
-        if self._is_llama_provider(provider):
-            return self._prompt_texts.llama_header_instructions
+        _ = provider
         return self._prompt_texts.gemini_header_instructions
 
     def _system_prompt(self) -> str:

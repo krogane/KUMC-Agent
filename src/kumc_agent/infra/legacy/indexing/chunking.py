@@ -15,7 +15,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from kumc_agent.infra.llm.gemini_rate_limit import index_summary_rate_limiter_name
 from kumc_agent.infra.legacy.config import (
     AppConfig,
-    build_proposition_chunk_prompt,
     build_summery_chunk_prompt,
     get_llm_chunk_system_prompt,
 )
@@ -955,11 +954,7 @@ def summery_chunk_jsonl_dir(
             "gemini_summary_requests_per_minute",
             getattr(config, "gemini_requests_per_minute", 60),
         )
-        summary_model = _select_model_for_provider(
-            provider=provider,
-            gemini_model=config.summery_gemini_model,
-            llama_model=config.summery_llama_model,
-        )
+        summary_model = config.summery_gemini_model
         pending_prompts: list[str] = []
         pending_metadatas: list[dict[str, object]] = []
 
@@ -971,14 +966,10 @@ def summery_chunk_jsonl_dir(
                 api_key=config.gemini_api_key,
                 gemini_requests_per_minute=summary_requests_per_minute,
                 model=summary_model,
-                llama_model_path=config.summery_llama_model_path,
-                llama_ctx_size=config.summery_llama_ctx_size,
                 temperature=config.summery_temperature,
                 max_output_tokens=config.summery_max_output_tokens,
                 max_retries=max_retries,
                 thinking_level=config.thinking_level,
-                llama_threads=config.llama_threads,
-                llama_gpu_layers=config.llama_gpu_layers,
                 action_label="Summery chunking",
                 gemini_rate_limiter_name=index_summary_rate_limiter_name(),
                 output_format="raw_text",
@@ -1063,132 +1054,6 @@ def summery_chunk_jsonl_dir(
             output_dir=output_chunk_dir,
             expected_names=expected_output_names,
         )
-
-
-def proposition_chunk_jsonl_dir(
-    *,
-    input_chunk_dir: Path,
-    output_chunk_dir: Path,
-    config: AppConfig,
-    skip_existing: bool = False,
-    update_existing: bool = True,
-    sync_deleted: bool = False,
-) -> None:
-    ensure_dir(output_chunk_dir)
-
-    if not input_chunk_dir.exists():
-        raise FileNotFoundError(
-            f"Input chunk directory does not exist: {input_chunk_dir}"
-        )
-
-    jsonl_files = sorted(input_chunk_dir.glob("*.jsonl"))
-    if not jsonl_files:
-        if sync_deleted:
-            _cleanup_stale_jsonl_outputs(output_dir=output_chunk_dir, expected_names=set())
-        logger.warning("No .jsonl chunk files found under %s", input_chunk_dir)
-        return
-
-    provider = (config.prop_provider or "").lower()
-    max_retries = max(1, config.prop_max_retries)
-    logger.info(
-        "Proposition chunking enabled (%s) for %d files in %s",
-        provider,
-        len(jsonl_files),
-        input_chunk_dir,
-    )
-
-    expected_output_names = {path.name for path in jsonl_files}
-    for path in jsonl_files:
-        out_path = output_chunk_dir / path.name
-        if _should_skip_existing_output(
-            output_path=out_path,
-            input_path=path,
-            skip_existing=skip_existing,
-            update_existing=update_existing,
-            action_label="proposition chunking",
-        ):
-            continue
-        chunks = load_chunks(path)
-        if not chunks:
-            logger.warning("Empty chunk file: %s", path.name)
-            continue
-
-        output_chunks: list[Chunk] = []
-        output_index = 0
-
-        for chunk in chunks:
-            source_text = chunk.text
-            if not source_text:
-                continue
-            base_metadata = _strip_chunk_metadata(chunk.metadata)
-            if _metadata_flag_enabled(chunk.metadata.get("skip_parent_context")):
-                base_metadata["skip_parent_context"] = True
-            parent_chunk_id = chunk.metadata.get("chunk_id")
-            if parent_chunk_id is not None:
-                base_metadata["parent_chunk_id"] = parent_chunk_id
-            prompt = build_proposition_chunk_prompt(text=source_text)
-            source_name = path.name
-            chunk_texts = _run_llm_chunking(
-                prompt=prompt,
-                source_name=source_name,
-                provider=provider,
-                api_key=config.gemini_api_key,
-                gemini_requests_per_minute=getattr(
-                    config,
-                    "gemini_requests_per_minute",
-                    60,
-                ),
-                model=_select_model_for_provider(
-                    provider=provider,
-                    gemini_model=config.prop_gemini_model,
-                    llama_model=config.prop_llama_model,
-                ),
-                llama_model_path=config.prop_llama_model_path,
-                llama_ctx_size=config.prop_llama_ctx_size,
-                temperature=config.prop_temperature,
-                max_output_tokens=config.prop_max_output_tokens,
-                max_retries=max_retries,
-                thinking_level=config.thinking_level,
-                llama_threads=config.llama_threads,
-                llama_gpu_layers=config.llama_gpu_layers,
-                action_label="Proposition chunking",
-            )
-            if chunk_texts is None:
-                continue
-
-            for chunk_text in chunk_texts:
-                metadata = dict(base_metadata)
-                metadata["chunk_id"] = output_index
-                metadata = _with_stage(metadata, "proposition")
-                output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
-                output_index += 1
-
-        write_chunks(out_path, output_chunks)
-        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
-        logger.info(
-            "Proposition chunked %s -> %s (%d chunks)",
-            path.name,
-            out_path.name,
-            len(output_chunks),
-        )
-
-    if sync_deleted:
-        _cleanup_stale_jsonl_outputs(
-            output_dir=output_chunk_dir,
-            expected_names=expected_output_names,
-        )
-
-
-def _select_model_for_provider(
-    *,
-    provider: str,
-    gemini_model: str,
-    llama_model: str,
-) -> str:
-    if (provider or "").lower() == "llama":
-        return llama_model
-    return gemini_model
-
 
 def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
     cleaned = {k: metadata.get(k, "") for k in _METADATA_KEYS}
@@ -1344,14 +1209,10 @@ def _run_llm_chunking(
     api_key: str,
     gemini_requests_per_minute: int,
     model: str,
-    llama_model_path: str,
-    llama_ctx_size: int,
     temperature: float,
     max_output_tokens: int,
     max_retries: int,
     thinking_level: str,
-    llama_threads: int,
-    llama_gpu_layers: int,
     action_label: str,
     gemini_rate_limiter_name: str = "",
     output_format: str = "json_list",
@@ -1367,13 +1228,9 @@ def _run_llm_chunking(
                 prompt=prompt,
                 model=model,
                 system_prompt=get_llm_chunk_system_prompt(),
-                llama_model_path=llama_model_path,
-                llama_ctx_size=llama_ctx_size,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
                 thinking_level=thinking_level,
-                llama_threads=llama_threads,
-                llama_gpu_layers=llama_gpu_layers,
                 response_mime_type=response_mime_type,
                 gemini_requests_per_minute=gemini_requests_per_minute,
                 gemini_rate_limiter_name=gemini_rate_limiter_name,

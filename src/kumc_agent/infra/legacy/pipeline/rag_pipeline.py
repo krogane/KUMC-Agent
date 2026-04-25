@@ -45,12 +45,10 @@ from kumc_agent.infra.legacy.indexing.sparse_sources import (
 from kumc_agent.infra.legacy.pipeline.function_calling import FunctionRoutingDecision, decide_tools
 from kumc_agent.infra.legacy.pipeline.llm_clients import (
     generate_with_gemini_config,
-    generate_with_llama_config,
 )
 from kumc_agent.infra.legacy.pipeline.prompts import (
     ChatHistoryEntry,
     build_gemini_prompt,
-    build_llama_messages,
     doc_to_context,
 )
 from kumc_agent.infra.legacy.pipeline.reranker import CrossEncoderReranker
@@ -646,8 +644,6 @@ class RagPipeline:
         _raise_if_cancelled(cancel_event)
         provider = (self._config.llm_provider or "").lower()
         gemini_model = self._config.genai_model
-        llama_model_path = self._config.llama_model_path
-        llama_ctx_size = self._config.llama_ctx_size
         temperature = (
             self._config.rag_idea_temperature
             if idea_generation
@@ -694,37 +690,10 @@ class RagPipeline:
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("Answer LLM output (gemini): %s", text)
-        elif provider == "llama":
-            messages = build_llama_messages(
-                query=query,
-                question_author=question_author,
-                prompt_mode="rag_idea" if idea_generation else "rag",
-                docs=docs,
-                config=self._config,
-                history=history,
-                retry_history=retry_history,
-                include_capabilities_info=include_capabilities_info,
-                circle_basic_info=self._config.circle_basic_info,
-                extra_mode_instruction=extra_mode_instruction,
-            )
-            if self._config.prompt_full_log_enabled:
-                logger.info("Answer LLM prompt (llama): %s", messages)
-            text = generate_with_llama_config(
-                messages=messages,
-                model_path=llama_model_path,
-                ctx_size=llama_ctx_size,
-                threads=self._config.llama_threads,
-                gpu_layers=self._config.llama_gpu_layers,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                stop=["\n---"],
-            )
-            if self._config.prompt_full_log_enabled:
-                logger.info("Answer LLM output (llama): %s", text)
         else:
             raise ValueError(
                 f"Unsupported llm_provider: {provider}. "
-                "Use 'gemini' or 'llama'."
+                "Use 'gemini'."
             )
 
         if not text:
@@ -789,37 +758,10 @@ class RagPipeline:
             )
             if self._config.prompt_full_log_enabled:
                 logger.info("No-RAG LLM output (gemini): %s", text)
-        elif provider == "llama":
-            messages = build_llama_messages(
-                query=query,
-                question_author=question_author,
-                prompt_mode="no_rag",
-                docs=docs,
-                config=self._config,
-                history=history,
-                retry_history=retry_history,
-                include_capabilities_info=include_capabilities_info,
-                circle_basic_info="",
-                extra_mode_instruction=extra_mode_instruction,
-            )
-            if self._config.prompt_full_log_enabled:
-                logger.info("No-RAG LLM prompt (llama): %s", messages)
-            text = generate_with_llama_config(
-                messages=messages,
-                model_path=self._config.no_rag_llama_model_path,
-                ctx_size=self._config.no_rag_llama_ctx_size,
-                threads=self._config.llama_threads,
-                gpu_layers=self._config.llama_gpu_layers,
-                temperature=self._config.no_rag_temperature,
-                max_output_tokens=self._config.no_rag_max_output_tokens,
-                stop=["\n---"],
-            )
-            if self._config.prompt_full_log_enabled:
-                logger.info("No-RAG LLM output (llama): %s", text)
         else:
             raise ValueError(
                 "Unsupported no_rag_llm_provider: "
-                f"{self._config.no_rag_llm_provider}. Use 'gemini' or 'llama'."
+                f"{self._config.no_rag_llm_provider}. Use 'gemini'."
             )
 
         if not text:
@@ -895,44 +837,6 @@ class RagPipeline:
                     60,
                 ),
             )
-        elif provider == "llama":
-            messages = build_llama_messages(
-                query=query,
-                question_author=question_author,
-                prompt_mode="refusal",
-                docs=docs,
-                config=self._config,
-                history=history,
-                include_capabilities_info=include_capabilities_info,
-                circle_basic_info="",
-                extra_mode_instruction=extra_mode_instruction,
-            )
-            text = generate_with_llama_config(
-                messages=messages,
-                model_path=(
-                    self._config.llama_model_path
-                    if fast_mode
-                    else self._config.refusal_llama_model_path
-                ),
-                ctx_size=(
-                    self._config.llama_ctx_size
-                    if fast_mode
-                    else self._config.refusal_llama_ctx_size
-                ),
-                threads=self._config.llama_threads,
-                gpu_layers=self._config.llama_gpu_layers,
-                temperature=(
-                    self._config.temperature
-                    if fast_mode
-                    else self._config.refusal_temperature
-                ),
-                max_output_tokens=(
-                    self._config.max_output_tokens
-                    if fast_mode
-                    else self._config.refusal_max_output_tokens
-                ),
-                stop=["\n---"],
-            )
         else:
             provider_label = (
                 "llm_provider"
@@ -941,7 +845,7 @@ class RagPipeline:
             )
             raise ValueError(
                 f"Unsupported {provider_label}: {provider}. "
-                "Use 'gemini' or 'llama'."
+                "Use 'gemini'."
             )
 
         _raise_if_cancelled(cancel_event)
@@ -1586,17 +1490,12 @@ class RagPipeline:
 
     def _dense_stages(self) -> set[str]:
         stages: set[str] = set()
-        if self._config.prop_enabled and self._config.second_rec_enabled:
-            stages.add("proposition")
+        if self._config.second_rec_enabled:
+            stages.add("second_recursive")
         else:
-            if self._config.second_rec_enabled:
+            stages.add("first_recursive")
+            if (self._config.second_rec_chunk_dir / "vc").exists():
                 stages.add("second_recursive")
-            else:
-                stages.add("first_recursive")
-                if (self._config.second_rec_chunk_dir / "vc").exists():
-                    stages.add("second_recursive")
-        if self._config.raptor_enabled:
-            stages.add("raptor")
         return stages
 
     def _dense_search_filtered(
@@ -2051,10 +1950,8 @@ class RagPipeline:
         stage = metadata.get("chunk_stage")
         source = metadata.get("drive_file_id") or metadata.get("source_file_name")
         chunk_id = metadata.get("chunk_id")
-        raptor_level = metadata.get("raptor_level")
-        raptor_cluster = metadata.get("raptor_cluster_id")
-        if stage or source or chunk_id or raptor_level or raptor_cluster:
-            return (stage, source, chunk_id, raptor_level, raptor_cluster)
+        if stage or source or chunk_id:
+            return (stage, source, chunk_id)
         return ("content", doc.page_content)
 
     def _merge_docs(self, groups: list[list[Document]]) -> list[Document]:
@@ -2244,35 +2141,13 @@ class RagPipeline:
 
     def _parent_cap_key(self, doc: Document) -> tuple[object, ...]:
         metadata = doc.metadata or {}
-        stage = metadata.get("chunk_stage")
         parent_id = self._normalize_chunk_id(metadata.get("parent_chunk_id"))
-        if stage == "proposition":
-            resolved = self._resolve_first_parent_id(metadata, parent_id)
-            if resolved is not None:
-                parent_id = resolved
         if parent_id is None:
             return ("self", self._doc_key(doc))
         key = self._chunk_lookup_key(metadata, parent_id)
         if key is None:
             return ("self", self._doc_key(doc))
         return ("parent",) + key
-
-    def _resolve_first_parent_id(
-        self,
-        metadata: dict[str, object],
-        parent_id: int | None,
-    ) -> int | None:
-        if parent_id is None:
-            return None
-        key = self._chunk_lookup_key(metadata, parent_id)
-        if key is None:
-            return None
-        second_doc = self._second_rec_chunk_map().get(key)
-        if second_doc is None:
-            return None
-        return self._normalize_chunk_id(
-            (second_doc.metadata or {}).get("parent_chunk_id")
-        )
 
     def _limit_rerank_pool(self, docs: list[Document]) -> list[Document]:
         if not docs:
@@ -2440,7 +2315,7 @@ class RagPipeline:
             candidate_groups = [future.result() for future in futures]
 
         # Keep parent-related context adjacent to the originating chunk so
-        # second_recursive / proposition style chunks and their summaries stay paired.
+        # second recursive chunks and their summaries stay paired.
         ordered: list[Document] = []
         seen_doc_keys: set[tuple[object, ...]] = set()
         for doc, candidates in zip(docs, candidate_groups):
@@ -2461,20 +2336,6 @@ class RagPipeline:
         if self._metadata_flag_enabled(metadata.get("skip_parent_context")):
             return []
         stage = metadata.get("chunk_stage")
-        if stage == "proposition":
-            second_parent_id = self._normalize_chunk_id(
-                metadata.get("parent_chunk_id")
-            )
-            first_parent_id = self._resolve_first_parent_id(
-                metadata, second_parent_id
-            )
-            if first_parent_id is None:
-                return []
-            return self._first_or_summery_candidates(
-                metadata=metadata,
-                first_parent_id=first_parent_id,
-            )
-
         if stage == "second_recursive":
             first_parent_id = self._normalize_chunk_id(
                 metadata.get("parent_chunk_id")
@@ -2708,13 +2569,9 @@ class RagPipeline:
         provider = (
             self._config.material_search_selector_llm_provider or ""
         ).strip().lower()
-        if provider not in {"gemini", "llama"}:
-            provider = "llama"
-        model = (
-            self._config.material_search_selector_gemini_model
-            if provider == "gemini"
-            else self._config.material_search_selector_llama_model
-        )
+        if provider != "gemini":
+            provider = "gemini"
+        model = self._config.material_search_selector_gemini_model
         max_retries = max(0, self._config.material_search_selector_max_retries)
         for attempt in range(max_retries + 1):
             try:
@@ -2729,13 +2586,9 @@ class RagPipeline:
                     prompt=user_prompt,
                     model=model,
                     system_prompt=system_prompt,
-                    llama_model_path=self._config.material_search_selector_llama_model_path,
-                    llama_ctx_size=self._config.material_search_selector_llama_ctx_size,
                     temperature=self._config.material_search_selector_temperature,
                     max_output_tokens=self._config.material_search_selector_max_output_tokens,
                     thinking_level=self._config.material_search_selector_thinking_level,
-                    llama_threads=self._config.llama_threads,
-                    llama_gpu_layers=self._config.llama_gpu_layers,
                     response_mime_type="application/json",
                 )
                 selected_indices = self._parse_material_selector_indices(

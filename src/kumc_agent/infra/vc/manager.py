@@ -107,8 +107,6 @@ class _PostProcessJob:
 class _LLMConfig:
     provider: str
     model: str
-    llama_model_path: str
-    llama_ctx_size: int
     temperature: float
     max_output_tokens: int
 
@@ -271,37 +269,19 @@ class VoiceMeetingManager:
 
         self._summary_llm_cfg = _LLMConfig(
             provider=(self._config.vc_summary_llm_provider or "").lower(),
-            model=self._select_llm_model(
-                provider=(self._config.vc_summary_llm_provider or "").lower(),
-                gemini_model=self._config.vc_summary_gemini_model,
-                llama_model=self._config.vc_summary_llama_model,
-            ),
-            llama_model_path=self._config.vc_summary_llama_model_path,
-            llama_ctx_size=self._config.vc_summary_llama_ctx_size,
+            model=self._config.vc_summary_gemini_model,
             temperature=self._config.vc_summary_temperature,
             max_output_tokens=self._config.vc_summary_max_output_tokens,
         )
         self._minutes_edit_llm_cfg = _LLMConfig(
             provider=(self._config.vc_minutes_edit_llm_provider or "").lower(),
-            model=self._select_llm_model(
-                provider=(self._config.vc_minutes_edit_llm_provider or "").lower(),
-                gemini_model=self._config.vc_minutes_edit_gemini_model,
-                llama_model=self._config.vc_minutes_edit_llama_model,
-            ),
-            llama_model_path=self._config.vc_minutes_edit_llama_model_path,
-            llama_ctx_size=self._config.vc_minutes_edit_llama_ctx_size,
+            model=self._config.vc_minutes_edit_gemini_model,
             temperature=self._config.vc_minutes_edit_temperature,
             max_output_tokens=self._config.vc_minutes_edit_max_output_tokens,
         )
         self._final_llm_cfg = _LLMConfig(
             provider=(self._config.vc_final_summary_llm_provider or "").lower(),
-            model=self._select_llm_model(
-                provider=(self._config.vc_final_summary_llm_provider or "").lower(),
-                gemini_model=self._config.vc_final_summary_gemini_model,
-                llama_model=self._config.vc_final_summary_llama_model,
-            ),
-            llama_model_path=self._config.vc_final_summary_llama_model_path,
-            llama_ctx_size=self._config.vc_final_summary_llama_ctx_size,
+            model=self._config.vc_final_summary_gemini_model,
             temperature=self._config.vc_final_summary_temperature,
             max_output_tokens=self._config.vc_final_summary_max_output_tokens,
         )
@@ -1598,12 +1578,8 @@ class VoiceMeetingManager:
             prompt=prompt,
             model=cfg.model,
             system_prompt=system_prompt,
-            llama_model_path=cfg.llama_model_path,
-            llama_ctx_size=cfg.llama_ctx_size,
             temperature=cfg.temperature,
             max_output_tokens=cfg.max_output_tokens,
-            llama_threads=self._config.llama_threads,
-            llama_gpu_layers=self._config.llama_gpu_layers,
             response_mime_type=response_mime_type,
             gemini_requests_per_minute=self._config.gemini_requests_per_minute,
         )
@@ -1655,14 +1631,6 @@ class VoiceMeetingManager:
         if not allow_list:
             return True
         return guild_id in set(allow_list)
-
-    @staticmethod
-    def _select_llm_model(*, provider: str, gemini_model: str, llama_model: str) -> str:
-        if provider == "llama":
-            return llama_model
-        return gemini_model
-
-
 
 def _resolve_torch_device(device_name: str) -> str:
     if torch is None:

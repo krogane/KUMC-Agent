@@ -18,7 +18,7 @@
 | Minecraft Wiki | API policy、対象 page list、edition/version review | 運営 | Wiki production indexing |
 | Minecraft server | 対象 host、compose path、executor isolation、backup path | サーバー管理者 | Minecraft write executor |
 | Object storage | S3-compatible endpoint/bucket/credential | インフラ担当 | raw snapshot production 保存 |
-| PostgreSQL / pgvector | DB URL、migration 実行、pgvector extension | インフラ担当 | production repository / vector search |
+| PostgreSQL | DB URL、migration 実行 | インフラ担当 | production repository |
 | Redis / queue | Redis URL、worker deployment | インフラ担当 | background jobs / automation runner |
 | Secret Manager | production secrets を `.env` から移行 | インフラ担当 | production readiness |
 
@@ -93,4 +93,3 @@ Minecraft 書き込み操作は、次を満たすまで dry-run のみとする�
 - organizer/admin 限定 ACL
 - 外部公開回答からの個人情報 redaction
 - member privacy redaction eval
-

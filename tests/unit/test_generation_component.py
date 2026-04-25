@@ -56,7 +56,6 @@ class GenerationComponentTests(unittest.TestCase):
         component = GenerationComponent(
             llm=llm,
             no_rag_llm=llm,
-            refusal_llm=llm,
             prompts=_DictPromptRepo(prompt_payload),
             source_max_count=source_max_count,
             prompt_texts=prompt_texts,
@@ -131,13 +130,6 @@ class GenerationComponentTests(unittest.TestCase):
                 gemini_header_output_format="OUT",
                 gemini_header_instructions="INS",
                 gemini_header_question="Q",
-                llama_header_question="LQ",
-                llama_header_previous_attempt="LPREV",
-                llama_header_circle_info="LCIRCLE",
-                llama_header_capabilities="LCAP",
-                llama_header_context="LCTX",
-                llama_header_output_format="LOUT",
-                llama_header_instructions="LINS",
             ),
         )
         component.generate_rag_answer(

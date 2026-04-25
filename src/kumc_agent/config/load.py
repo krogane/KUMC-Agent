@@ -330,6 +330,11 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(features, dict):
         features = {}
         updated["features"] = features
+    retrieval = features.get("retrieval")
+    if not isinstance(retrieval, dict):
+        retrieval = {}
+        features["retrieval"] = retrieval
+    retrieval.setdefault("rrf_k", 60)
     risk_flags = features.get("risk_flags")
     if not isinstance(risk_flags, dict):
         risk_flags = {}
@@ -445,7 +450,6 @@ def _to_runtime_config(
     rag_prompt_texts = rag.get("prompt_texts", {})
     rag_generation_rag = rag_generation.get("rag", {})
     rag_generation_no_rag = rag_generation.get("no_rag", {})
-    rag_generation_refusal = rag_generation.get("refusal", {})
     rag_generation_idea = rag_generation.get("idea_generation", {})
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
@@ -510,11 +514,6 @@ def _to_runtime_config(
             if fallback is not None
             else str(providers["llm"]["gemini_model"])
         )
-        llama_model_path_default = (
-            fallback.llama_model_path
-            if fallback is not None
-            else str(providers["llm"]["llama_model_path"])
-        )
         temperature_default = (
             fallback.temperature
             if fallback is not None
@@ -536,9 +535,6 @@ def _to_runtime_config(
         return RagGenerationProfileSection(
             provider=str(section.get("provider", provider_default)),
             gemini_model=str(section.get("gemini_model", gemini_model_default)),
-            llama_model_path=str(
-                section.get("llama_model_path", llama_model_path_default)
-            ),
             temperature=float(section.get("temperature", temperature_default)),
             max_output_tokens=int(
                 section.get("max_output_tokens", max_output_tokens_default)
@@ -555,11 +551,6 @@ def _to_runtime_config(
         rag_generation_no_rag,
         default_prompt_name="answer_no_rag",
         fallback=rag_generation_profile,
-    )
-    refusal_generation_profile = _build_generation_profile(
-        rag_generation_refusal,
-        default_prompt_name="answer_refusal",
-        fallback=no_rag_generation_profile,
     )
     idea_generation_profile = _build_generation_profile(
         rag_generation_idea,
@@ -578,12 +569,6 @@ def _to_runtime_config(
             providers["function_call"].get("gemini_model", ""),
         )
     )
-    routing_llama_model_path = str(
-        rag_routing.get(
-            "llama_model_path",
-            providers["function_call"].get("llama_model_path", ""),
-        )
-    )
     routing_prompt_name = str(rag_routing.get("prompt_name", "routing")).strip() or "routing"
     routing_tasks_raw = rag_routing.get("tasks", {})
     if not isinstance(routing_tasks_raw, dict):
@@ -597,16 +582,12 @@ def _to_runtime_config(
         gemini_model_value = str(
             task_raw.get("gemini_model", routing_gemini_model)
         ).strip()
-        llama_model_path_value = str(
-            task_raw.get("llama_model_path", routing_llama_model_path)
-        ).strip()
         prompt_name_value = str(
             task_raw.get("prompt_name", routing_prompt_name)
         ).strip()
         return RagRoutingTaskSection(
             provider=provider_value or routing_provider,
             gemini_model=gemini_model_value or routing_gemini_model,
-            llama_model_path=llama_model_path_value or routing_llama_model_path,
             prompt_name=prompt_name_value or routing_prompt_name,
         )
 
@@ -644,12 +625,9 @@ def _to_runtime_config(
             llm=LLMSection(
                 provider=str(providers["llm"]["provider"]),
                 gemini_model=str(providers["llm"]["gemini_model"]),
-                llama_model_path=str(providers["llm"]["llama_model_path"]),
                 temperature=float(providers["llm"]["temperature"]),
                 max_output_tokens=int(providers["llm"]["max_output_tokens"]),
                 thinking_level=str(providers["llm"]["thinking_level"]),
-                threads=int(providers["llm"].get("threads", 4)),
-                gpu_layers=int(providers["llm"].get("gpu_layers", 0)),
             ),
             embeddings=EmbeddingSection(
                 provider=str(providers["embeddings"]["provider"]),
@@ -664,7 +642,6 @@ def _to_runtime_config(
                 enabled=bool(providers["function_call"]["enabled"]),
                 provider=str(providers["function_call"]["provider"]),
                 gemini_model=str(providers["function_call"]["gemini_model"]),
-                llama_model_path=str(providers["function_call"]["llama_model_path"]),
             ),
         ),
         security=SecuritySection(
@@ -672,7 +649,6 @@ def _to_runtime_config(
                 int(v) for v in security["maintenance_command_author_ids"]
             ],
             discord_guild_allow_list=[int(v) for v in security["discord_guild_allow_list"]],
-            refusal_keywords=[str(v) for v in security["refusal_keywords"]],
         ),
         scheduler=SchedulerSection(
             auto_index_enabled=bool(scheduler["auto_index_enabled"]),
@@ -741,6 +717,7 @@ def _to_runtime_config(
                     )
                 ),
                 rerank_pool_size=int(features["retrieval"]["rerank_pool_size"]),
+                rrf_k=int(features["retrieval"].get("rrf_k", 60)),
                 mmr_lambda=float(features["retrieval"]["mmr_lambda"]),
                 recency_weight_soft=float(
                     features["retrieval"].get(
@@ -825,7 +802,6 @@ def _to_runtime_config(
                 ),
                 provider=routing_provider,
                 gemini_model=routing_gemini_model,
-                llama_model_path=routing_llama_model_path,
                 prompt_name=routing_prompt_name,
                 temperature=float(rag_routing.get("temperature", 0.0)),
                 max_new_tokens=int(rag_routing.get("max_new_tokens", 64)),
@@ -854,7 +830,6 @@ def _to_runtime_config(
             generation=RagGenerationSection(
                 rag=rag_generation_profile,
                 no_rag=no_rag_generation_profile,
-                refusal=refusal_generation_profile,
                 idea_generation=idea_generation_profile,
             ),
             prompt_texts=RagPromptTextSection(
@@ -921,42 +896,6 @@ def _to_runtime_config(
                         "# ユーザーの質問",
                     )
                 ),
-                llama_header_question=str(
-                    rag_prompt_texts.get("llama_header_question", "### Question")
-                ),
-                llama_header_previous_attempt=str(
-                    rag_prompt_texts.get(
-                        "llama_header_previous_attempt",
-                        "### Previous attempt (Question/Answer)",
-                    )
-                ),
-                llama_header_circle_info=str(
-                    rag_prompt_texts.get(
-                        "llama_header_circle_info",
-                        "### サークルの基本情報",
-                    )
-                ),
-                llama_header_capabilities=str(
-                    rag_prompt_texts.get(
-                        "llama_header_capabilities",
-                        "### チャットボット自身の機能情報",
-                    )
-                ),
-                llama_header_context=str(
-                    rag_prompt_texts.get("llama_header_context", "### Context")
-                ),
-                llama_header_output_format=str(
-                    rag_prompt_texts.get(
-                        "llama_header_output_format",
-                        "### Output format",
-                    )
-                ),
-                llama_header_instructions=str(
-                    rag_prompt_texts.get(
-                        "llama_header_instructions",
-                        "## 指示",
-                    )
-                ),
             ),
             fast_model_notice=str(
                 rag.get(
@@ -997,12 +936,6 @@ def _to_runtime_config(
                         providers["llm"]["gemini_model"],
                     )
                 ),
-                summary_llama_model_path=str(
-                    indexing_chunking.get(
-                        "summary_llama_model_path",
-                        providers["llm"]["llama_model_path"],
-                    )
-                ),
                 summary_temperature=float(
                     indexing_chunking.get(
                         "summary_temperature",
@@ -1021,101 +954,6 @@ def _to_runtime_config(
                         providers["llm"]["thinking_level"],
                     )
                 ),
-                proposition_llm_provider=str(
-                    indexing_chunking.get(
-                        "proposition_llm_provider",
-                        providers["llm"]["provider"],
-                    )
-                ),
-                proposition_gemini_model=str(
-                    indexing_chunking.get(
-                        "proposition_gemini_model",
-                        providers["llm"]["gemini_model"],
-                    )
-                ),
-                proposition_llama_model_path=str(
-                    indexing_chunking.get(
-                        "proposition_llama_model_path",
-                        providers["llm"]["llama_model_path"],
-                    )
-                ),
-                proposition_temperature=float(
-                    indexing_chunking.get(
-                        "proposition_temperature",
-                        providers["llm"]["temperature"],
-                    )
-                ),
-                proposition_max_output_tokens=int(
-                    indexing_chunking.get(
-                        "proposition_max_output_tokens",
-                        providers["llm"]["max_output_tokens"],
-                    )
-                ),
-                proposition_thinking_level=str(
-                    indexing_chunking.get(
-                        "proposition_thinking_level",
-                        providers["llm"]["thinking_level"],
-                    )
-                ),
-                proposition_max_retries=max(
-                    1,
-                    int(indexing_chunking.get("proposition_max_retries", 2)),
-                ),
-                raptor_llm_provider=str(
-                    indexing_chunking.get(
-                        "raptor_llm_provider",
-                        providers["llm"]["provider"],
-                    )
-                ),
-                raptor_gemini_model=str(
-                    indexing_chunking.get(
-                        "raptor_gemini_model",
-                        providers["llm"]["gemini_model"],
-                    )
-                ),
-                raptor_llama_model_path=str(
-                    indexing_chunking.get(
-                        "raptor_llama_model_path",
-                        providers["llm"]["llama_model_path"],
-                    )
-                ),
-                raptor_temperature=float(
-                    indexing_chunking.get(
-                        "raptor_temperature",
-                        providers["llm"]["temperature"],
-                    )
-                ),
-                raptor_max_output_tokens=int(
-                    indexing_chunking.get(
-                        "raptor_max_output_tokens",
-                        providers["llm"]["max_output_tokens"],
-                    )
-                ),
-                raptor_thinking_level=str(
-                    indexing_chunking.get(
-                        "raptor_thinking_level",
-                        providers["llm"]["thinking_level"],
-                    )
-                ),
-                raptor_max_retries=max(
-                    1,
-                    int(indexing_chunking.get("raptor_max_retries", 2)),
-                ),
-                raptor_cluster_max_tokens=max(
-                    32,
-                    int(indexing_chunking.get("raptor_cluster_max_tokens", 1024)),
-                ),
-                raptor_stop_chunk_count=max(
-                    1,
-                    int(indexing_chunking.get("raptor_stop_chunk_count", 20)),
-                ),
-                raptor_k_max=max(
-                    2,
-                    int(indexing_chunking.get("raptor_k_max", 8)),
-                ),
-                raptor_k_selection=str(
-                    indexing_chunking.get("raptor_k_selection", "elbow")
-                ),
             ),
             stages=IndexingStagesSection(
                 second_recursive_enabled=bool(
@@ -1125,10 +963,6 @@ def _to_runtime_config(
                     indexing_stages.get("sparse_second_recursive_enabled", True)
                 ),
                 summary_enabled=bool(indexing_stages.get("summary_enabled", True)),
-                proposition_enabled=bool(
-                    indexing_stages.get("proposition_enabled", False)
-                ),
-                raptor_enabled=bool(indexing_stages.get("raptor_enabled", False)),
             ),
             refresh=IndexingRefreshSection(
                 clear_raw_data=bool(indexing_refresh.get("clear_raw_data", False)),
@@ -1140,12 +974,6 @@ def _to_runtime_config(
                 ),
                 clear_summary_chunk_data=bool(
                     indexing_refresh.get("clear_summary_chunk_data", False)
-                ),
-                clear_proposition_chunk_data=bool(
-                    indexing_refresh.get("clear_proposition_chunk_data", False)
-                ),
-                clear_raptor_chunk_data=bool(
-                    indexing_refresh.get("clear_raptor_chunk_data", False)
                 ),
                 update_raw_data=bool(indexing_refresh.get("update_raw_data", True)),
                 update_first_recursive_chunk_data=bool(
@@ -1163,16 +991,9 @@ def _to_runtime_config(
                 update_summary_chunk_data=bool(
                     indexing_refresh.get("update_summary_chunk_data", True)
                 ),
-                update_proposition_chunk_data=bool(
-                    indexing_refresh.get("update_proposition_chunk_data", True)
-                ),
-                update_raptor_chunk_data=bool(
-                    indexing_refresh.get("update_raptor_chunk_data", True)
-                ),
             ),
         ),
         ops=OpsSection(
-            warmup_interval_minutes=int(ops.get("warmup_interval_minutes", 60)),
             index_update_estimate_min_minutes=int(
                 ops.get("index_update_estimate_min_minutes", 30)
             ),
@@ -1454,10 +1275,6 @@ def _to_runtime_config(
             summary_gemini_model=str(
                 vc.get("summary_gemini_model", providers["llm"]["gemini_model"])
             ),
-            summary_llama_model_path=str(
-                vc.get("summary_llama_model_path", providers["llm"]["llama_model_path"])
-            ),
-            summary_llama_ctx_size=int(vc.get("summary_llama_ctx_size", 4096)),
             summary_temperature=float(vc.get("summary_temperature", 0.2)),
             summary_max_output_tokens=int(vc.get("summary_max_output_tokens", 256)),
             summary_thinking_level=str(vc.get("summary_thinking_level", "minimal")),
@@ -1474,10 +1291,6 @@ def _to_runtime_config(
             minutes_edit_gemini_model=str(
                 vc.get("minutes_edit_gemini_model", providers["llm"]["gemini_model"])
             ),
-            minutes_edit_llama_model_path=str(
-                vc.get("minutes_edit_llama_model_path", providers["llm"]["llama_model_path"])
-            ),
-            minutes_edit_llama_ctx_size=int(vc.get("minutes_edit_llama_ctx_size", 4096)),
             minutes_edit_temperature=float(vc.get("minutes_edit_temperature", 0.2)),
             minutes_edit_max_output_tokens=int(
                 vc.get("minutes_edit_max_output_tokens", 1024)
@@ -1490,12 +1303,6 @@ def _to_runtime_config(
             ),
             final_summary_gemini_model=str(
                 vc.get("final_summary_gemini_model", providers["llm"]["gemini_model"])
-            ),
-            final_summary_llama_model_path=str(
-                vc.get("final_summary_llama_model_path", providers["llm"]["llama_model_path"])
-            ),
-            final_summary_llama_ctx_size=int(
-                vc.get("final_summary_llama_ctx_size", 4096)
             ),
             final_summary_temperature=float(vc.get("final_summary_temperature", 0.0)),
             final_summary_max_output_tokens=int(

@@ -12,7 +12,6 @@ from kumc_agent.infra.cache.redis_client import RedisClient
 from kumc_agent.infra.database.postgres import PostgresClient
 from kumc_agent.infra.object_storage.s3 import S3ObjectStorageClient
 from kumc_agent.infra.retrieval.elasticsearch import ElasticsearchAdapter
-from kumc_agent.infra.retrieval.pgvector import PgVectorAdapter
 
 
 @dataclass(frozen=True)
@@ -22,7 +21,6 @@ class FoundationHealthService:
     object_storage: S3ObjectStorageClient
     audit_log: AuditLogRepository
     feature_flags: FeatureFlagService
-    pgvector: PgVectorAdapter | None = None
     elasticsearch: ElasticsearchAdapter | None = None
 
     def check(
@@ -35,7 +33,6 @@ class FoundationHealthService:
             self.postgres.check(),
             self.redis.check(),
             self.object_storage.check(),
-            (self.pgvector or PgVectorAdapter(self.postgres)).check(),
             (self.elasticsearch or ElasticsearchAdapter()).check(),
             self._feature_flag_health(),
         ]

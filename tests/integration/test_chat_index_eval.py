@@ -34,16 +34,11 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
         (base / "assets" / "prompts" / "answer_no_rag.md").write_text(
             '{"answer": "...", "sources": []}', encoding="utf-8"
         )
-        (base / "assets" / "prompts" / "answer_refusal.md").write_text(
-            "回答できません", encoding="utf-8"
-        )
         (base / "assets" / "prompts" / "answer_idea.md").write_text(
             '{"answer": "...", "sources": ["1"]}', encoding="utf-8"
         )
         (base / "assets" / "prompts" / "routing.md").write_text("routing", encoding="utf-8")
         (base / "assets" / "prompts" / "summarization.md").write_text("sum", encoding="utf-8")
-        (base / "assets" / "prompts" / "proposition.md").write_text("prop", encoding="utf-8")
-        (base / "assets" / "prompts" / "raptor.md").write_text("raptor", encoding="utf-8")
 
         (base / "configs" / "ops" / "app.yaml").write_text(
             dedent(
@@ -64,29 +59,19 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                 rag:
                   generation:
                     rag:
-                      provider: "llama"
+                      provider: "gemini"
                       gemini_model: "gemini-x"
-                      llama_model_path: ""
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
                       prompt_name: "answer_rag"
                     no_rag:
-                      provider: "llama"
+                      provider: "gemini"
                       gemini_model: "gemini-x"
-                      llama_model_path: ""
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
                       prompt_name: "answer_no_rag"
-                    refusal:
-                      provider: "llama"
-                      gemini_model: "gemini-x"
-                      llama_model_path: ""
-                      temperature: 0.0
-                      max_output_tokens: 128
-                      thinking_level: "minimal"
-                      prompt_name: "answer_refusal"
                     idea_generation:
                       prompt_name: "answer_idea"
                       temperature: 0.0
@@ -106,14 +91,11 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                 """
                 providers:
                   llm:
-                    provider: "llama"
+                    provider: "gemini"
                     gemini_model: "gemini-x"
-                    llama_model_path: ""
                     temperature: 0.0
                     max_output_tokens: 128
                     thinking_level: "minimal"
-                    threads: 4
-                    gpu_layers: 0
                   embeddings:
                     provider: "local"
                     model: "e5"
@@ -125,14 +107,13 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                     enabled: false
                     provider: "gemini"
                     gemini_model: "gemini-x"
-                    llama_model_path: ""
                 """
             ).strip()
             + "\n",
             encoding="utf-8",
         )
         (base / "configs" / "ops" / "security.yaml").write_text(
-            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n  refusal_keywords: ['住所']\n",
+            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
             encoding="utf-8",
         )
         (base / "configs" / "ops" / "scheduler.yaml").write_text(
@@ -208,8 +189,6 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                   summary_target_characters: 100
                   summary_llm_provider: "gemini"
                   summary_gemini_model: "gemini-x"
-                  summary_llama_model_path: "model/llm/model.gguf"
-                  summary_llama_ctx_size: 4096
                   summary_temperature: 0.2
                   summary_max_output_tokens: 256
                   summary_thinking_level: "minimal"
@@ -222,15 +201,11 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                   minutes_image_batch_size: 10
                   minutes_edit_llm_provider: "gemini"
                   minutes_edit_gemini_model: "gemini-x"
-                  minutes_edit_llama_model_path: "model/llm/model.gguf"
-                  minutes_edit_llama_ctx_size: 4096
                   minutes_edit_temperature: 0.2
                   minutes_edit_max_output_tokens: 1024
                   minutes_edit_thinking_level: "minimal"
                   final_summary_llm_provider: "gemini"
                   final_summary_gemini_model: "gemini-x"
-                  final_summary_llama_model_path: "model/llm/model.gguf"
-                  final_summary_llama_ctx_size: 4096
                   final_summary_temperature: 0.0
                   final_summary_max_output_tokens: 1024
                   final_summary_thinking_level: "minimal"

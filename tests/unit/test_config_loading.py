@@ -52,18 +52,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     gemini_header_output_format: "# 出力形式"
                     gemini_header_instructions: "## 指示"
                     gemini_header_question: "# ユーザーの質問"
-                    llama_header_question: "### Question"
-                    llama_header_previous_attempt: "### Previous attempt (Question/Answer)"
-                    llama_header_circle_info: "### サークルの基本情報"
-                    llama_header_capabilities: "### チャットボット自身の機能情報"
-                    llama_header_context: "### Context"
-                    llama_header_output_format: "### Output format"
-                    llama_header_instructions: "## 指示"
                   generation:
                     rag:
                       provider: "gemini"
                       gemini_model: "gemini-x"
-                      llama_model_path: "model.gguf"
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
@@ -71,19 +63,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     no_rag:
                       provider: "gemini"
                       gemini_model: "gemini-x"
-                      llama_model_path: "model.gguf"
                       temperature: 0.0
                       max_output_tokens: 128
                       thinking_level: "minimal"
                       prompt_name: "answer_no_rag"
-                    refusal:
-                      provider: "gemini"
-                      gemini_model: "gemini-x"
-                      llama_model_path: "model.gguf"
-                      temperature: 0.0
-                      max_output_tokens: 128
-                      thinking_level: "minimal"
-                      prompt_name: "answer_refusal"
                     idea_generation:
                       prompt_name: "answer_idea"
                       temperature: 0.0
@@ -92,12 +75,10 @@ class ConfigLoadingTests(unittest.TestCase):
                     summary_batch_size: 1
                     summary_llm_provider: "gemini"
                     summary_gemini_model: "gemini-summary"
-                    summary_llama_model_path: "summary.gguf"
                     summary_temperature: 0.1
                     summary_max_output_tokens: 96
                     summary_thinking_level: "minimal"
                 ops:
-                  warmup_interval_minutes: 60
                   index_update_estimate_min_minutes: 30
                   index_update_estimate_max_minutes: 60
                   ragas_answer_generation_batch_size: 10
@@ -153,12 +134,9 @@ class ConfigLoadingTests(unittest.TestCase):
                   llm:
                     provider: "gemini"
                     gemini_model: "gemini-x"
-                    llama_model_path: "model.gguf"
                     temperature: 0.0
                     max_output_tokens: 128
                     thinking_level: "minimal"
-                    threads: 4
-                    gpu_layers: 0
                   embeddings:
                     provider: "local"
                     model: "e5"
@@ -170,14 +148,13 @@ class ConfigLoadingTests(unittest.TestCase):
                     enabled: true
                     provider: "gemini"
                     gemini_model: "gemini-x"
-                    llama_model_path: "fc.gguf"
                 """
             ).strip()
             + "\n",
             encoding="utf-8",
         )
         (base / "configs" / "ops" / "security.yaml").write_text(
-            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n  refusal_keywords: ['秘密']\n",
+            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
             encoding="utf-8",
         )
         (base / "configs" / "ops" / "scheduler.yaml").write_text(
@@ -207,6 +184,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     dense_top_k: 5
                     sparse_top_k: 5
                     rerank_pool_size: 10
+                    rrf_k: 55
                     mmr_lambda: 0.5
                     recency_weight_soft: 0.2
                     recency_weight_hard: 0.5
@@ -259,8 +237,6 @@ class ConfigLoadingTests(unittest.TestCase):
                   summary_target_characters: 100
                   summary_llm_provider: "gemini"
                   summary_gemini_model: "gemini-x"
-                  summary_llama_model_path: "model/llm/model.gguf"
-                  summary_llama_ctx_size: 4096
                   summary_temperature: 0.2
                   summary_max_output_tokens: 256
                   summary_thinking_level: "minimal"
@@ -273,15 +249,11 @@ class ConfigLoadingTests(unittest.TestCase):
                   minutes_image_batch_size: 10
                   minutes_edit_llm_provider: "gemini"
                   minutes_edit_gemini_model: "gemini-x"
-                  minutes_edit_llama_model_path: "model/llm/model.gguf"
-                  minutes_edit_llama_ctx_size: 4096
                   minutes_edit_temperature: 0.2
                   minutes_edit_max_output_tokens: 1024
                   minutes_edit_thinking_level: "minimal"
                   final_summary_llm_provider: "gemini"
                   final_summary_gemini_model: "gemini-x"
-                  final_summary_llama_model_path: "model/llm/model.gguf"
-                  final_summary_llama_ctx_size: 4096
                   final_summary_temperature: 0.0
                   final_summary_max_output_tokens: 1024
                   final_summary_thinking_level: "minimal"
@@ -337,6 +309,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_RAGAS_METRIC_CONTEXT_PRECISION_ENABLED": "0",
                     "KUMC_RAGAS_METRIC_CONTEXT_RECALL_ENABLED": "1",
                     "KUMC_RETRIEVAL_TOP_K": "9",
+                    "KUMC_RETRIEVAL_RRF_K": "17",
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_SOFT": "0.33",
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_HARD": "0.66",
                     "KUMC_RETRIEVAL_RECENCY_HALF_LIFE_DAYS": "22",
@@ -352,6 +325,7 @@ class ConfigLoadingTests(unittest.TestCase):
                 config = load_runtime_config(base_dir=base)
 
             self.assertEqual(config.features.retrieval.top_k, 7)
+            self.assertEqual(config.features.retrieval.rrf_k, 17)
             self.assertEqual(config.features.retrieval.recency_weight_soft, 0.33)
             self.assertEqual(config.features.retrieval.recency_weight_hard, 0.66)
             self.assertEqual(config.features.retrieval.recency_half_life_days, 22.0)
@@ -414,7 +388,6 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.indexing.chunking.summary_batch_size, 3)
             self.assertEqual(config.indexing.chunking.summary_llm_provider, "gemini")
             self.assertEqual(config.indexing.chunking.summary_gemini_model, "gemini-summary")
-            self.assertEqual(config.indexing.chunking.summary_llama_model_path, "summary.gguf")
             self.assertEqual(config.indexing.chunking.summary_temperature, 0.1)
             self.assertEqual(config.indexing.chunking.summary_max_output_tokens, 96)
             self.assertEqual(config.indexing.chunking.summary_thinking_level, "minimal")
@@ -475,10 +448,39 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.integrations.openclaw.lite_agent, "")
         self.assertEqual(config.integrations.openclaw.lite_model, "")
         self.assertEqual(config.integrations.openai_api_key, "")
+        self.assertEqual(config.features.retrieval.rrf_k, 55)
         self.assertEqual(
             config.integrations.openclaw.config_dir,
             base / "configs" / "openclaw",
         )
+
+    def test_retrieval_rrf_k_defaults_to_60(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._prepare_base(base)
+            features_path = base / "configs" / "ops" / "features.yaml"
+            features_path.write_text(
+                "\n".join(
+                    line
+                    for line in features_path.read_text(encoding="utf-8").splitlines()
+                    if "rrf_k:" not in line
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+
+        self.assertEqual(config.features.retrieval.rrf_k, 60)
 
     def test_rag_generation_profiles_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,7 +493,6 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_RAG_GENERATION_NO_RAG_GEMINI_MODEL": "gemini-no-rag",
-                    "KUMC_RAG_GENERATION_REFUSAL_TEMPERATURE": "0.1",
                     "KUMC_RAG_IDEA_PROMPT_NAME": "idea_generation",
                     "KUMC_RAG_IDEA_TEMPERATURE": "0.8",
                     "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
@@ -505,7 +506,6 @@ class ConfigLoadingTests(unittest.TestCase):
                 config.rag.generation.no_rag.gemini_model,
                 "gemini-no-rag",
             )
-            self.assertEqual(config.rag.generation.refusal.temperature, 0.1)
             self.assertEqual(
                 config.rag.generation.idea_generation.prompt_name,
                 "idea_generation",

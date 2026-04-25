@@ -24,7 +24,6 @@ This audit compares the current codebase with the implemented Wave 1-7 surface a
 The following files had no static references from `src/kumc_agent` or `tests`, were outside `infra/legacy`, and were not current app entrypoints:
 
 - `src/kumc_agent/domain/policies/recency.py`
-- `src/kumc_agent/domain/policies/refusal.py`
 - `src/kumc_agent/domain/ports/chunkers.py`
 - `src/kumc_agent/domain/ports/loaders.py`
 - `src/kumc_agent/domain/ports/parsers.py`

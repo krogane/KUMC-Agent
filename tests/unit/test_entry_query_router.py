@@ -17,13 +17,9 @@ def _build_router(*, retries: int = 1) -> EntryQueryRouter:
     return EntryQueryRouter(
         provider="gemini",
         gemini_model="gemini-2.5-flash-lite",
-        llama_model_path="",
         temperature=0.0,
         max_new_tokens=128,
         max_retries=retries,
-        llm_threads=4,
-        llm_gpu_layers=0,
-        llm_ctx_size=4096,
         gemini_api_key="dummy",
         gemini_requests_per_minute=60,
         prompt_name="routing_openclaw_gate",

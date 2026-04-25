@@ -99,14 +99,4 @@ def sparse_chunk_dirs(config: AppConfig) -> list[Path]:
             if vc_second.exists():
                 dirs.append(vc_second)
 
-    if config.prop_enabled and config.second_rec_enabled:
-        for name in ("docs", "sheets", "hatenablog", "crafters_colony"):
-            candidate = config.prop_chunk_dir / name
-            if candidate.exists():
-                dirs.append(candidate)
-
-    if config.raptor_enabled:
-        raptor_dir = config.raptor_chunk_dir
-        if raptor_dir.exists():
-            dirs.append(raptor_dir)
     return dirs

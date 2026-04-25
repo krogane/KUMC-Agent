@@ -12,7 +12,6 @@ from kumc_agent.infra.llm.gemini_rate_limit import (
     embedding_rate_limiter_name,
     index_summary_rate_limiter_name,
 )
-from kumc_agent.infra.llm.llama_cpp import LlamaCppLLM
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
@@ -48,7 +47,6 @@ from kumc_agent.usecases.indexing.build import BuildIndexUsecase
 from kumc_agent.usecases.indexing.update import UpdateIndexUsecase
 from kumc_agent.usecases.summarization.run import SummarizationUsecase
 from kumc_agent.usecases.vc.run import VCUsecase
-from kumc_agent.usecases.warmup.run import WarmupUsecase
 from kumc_agent.utils.migrate_summary_dir import migrate_summery_chunk_dir
 
 
@@ -56,13 +54,12 @@ def _build_llm_for_route(
     *,
     provider: str,
     gemini_model: str,
-    llama_model_path: str,
     gemini_api_key: str,
     gemini_requests_per_minute: int,
 ):
     normalized = (provider or "").strip().lower()
-    if normalized in {"llama", "llama_cpp"}:
-        return LlamaCppLLM(model_path=llama_model_path)
+    if normalized != "gemini":
+        raise ValueError(f"Unsupported LLM provider: {provider}. Use 'gemini'.")
     return GeminiLLM(
         api_key=gemini_api_key,
         model=gemini_model,
@@ -74,7 +71,6 @@ def _build_indexing_stage_llm(
     *,
     provider: str,
     gemini_model: str,
-    llama_model_path: str,
     gemini_api_key: str,
     gemini_requests_per_minute: int,
     limiter_name: str = "",
@@ -82,10 +78,6 @@ def _build_indexing_stage_llm(
     normalized = (provider or "").strip().lower()
     if normalized in {"", "none", "off", "disabled", "false", "0"}:
         return None
-    if normalized in {"llama", "llama_cpp"}:
-        if not llama_model_path:
-            return None
-        return LlamaCppLLM(model_path=llama_model_path)
     if normalized == "gemini":
         if not gemini_api_key:
             return None
@@ -97,9 +89,7 @@ def _build_indexing_stage_llm(
         if limiter_name:
             kwargs["limiter_name"] = limiter_name
         return GeminiLLM(**kwargs)
-    raise ValueError(
-        "Unsupported indexing stage llm provider. Use 'none', 'gemini', or 'llama'."
-    )
+    raise ValueError("Unsupported indexing stage llm provider. Use 'none' or 'gemini'.")
 
 
 def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
@@ -107,32 +97,9 @@ def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
     return _build_indexing_stage_llm(
         provider=chunking.summary_llm_provider,
         gemini_model=chunking.summary_gemini_model,
-        llama_model_path=chunking.summary_llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
         limiter_name=index_summary_rate_limiter_name(),
-    )
-
-
-def _build_proposition_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
-    chunking = config.indexing.chunking
-    return _build_indexing_stage_llm(
-        provider=chunking.proposition_llm_provider,
-        gemini_model=chunking.proposition_gemini_model,
-        llama_model_path=chunking.proposition_llama_model_path,
-        gemini_api_key=config.integrations.gemini_api_key,
-        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
-    )
-
-
-def _build_raptor_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
-    chunking = config.indexing.chunking
-    return _build_indexing_stage_llm(
-        provider=chunking.raptor_llm_provider,
-        gemini_model=chunking.raptor_gemini_model,
-        llama_model_path=chunking.raptor_llama_model_path,
-        gemini_api_key=config.integrations.gemini_api_key,
-        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
 
 
@@ -157,21 +124,12 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     rag_llm = _build_llm_for_route(
         provider=config.rag.generation.rag.provider,
         gemini_model=config.rag.generation.rag.gemini_model,
-        llama_model_path=config.rag.generation.rag.llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
     no_rag_llm = _build_llm_for_route(
         provider=config.rag.generation.no_rag.provider,
         gemini_model=config.rag.generation.no_rag.gemini_model,
-        llama_model_path=config.rag.generation.no_rag.llama_model_path,
-        gemini_api_key=config.integrations.gemini_api_key,
-        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
-    )
-    refusal_llm = _build_llm_for_route(
-        provider=config.rag.generation.refusal.provider,
-        gemini_model=config.rag.generation.refusal.gemini_model,
-        llama_model_path=config.rag.generation.refusal.llama_model_path,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
@@ -210,7 +168,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     generation_component = GenerationComponent(
         llm=rag_llm,
         no_rag_llm=no_rag_llm,
-        refusal_llm=refusal_llm,
         prompts=prompt_repo,
         source_max_count=config.app.source_max_count,
         raw_dir=config.app.raw_dir,
@@ -228,55 +185,36 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             gemini_header_output_format=config.rag.prompt_texts.gemini_header_output_format,
             gemini_header_instructions=config.rag.prompt_texts.gemini_header_instructions,
             gemini_header_question=config.rag.prompt_texts.gemini_header_question,
-            llama_header_question=config.rag.prompt_texts.llama_header_question,
-            llama_header_previous_attempt=config.rag.prompt_texts.llama_header_previous_attempt,
-            llama_header_circle_info=config.rag.prompt_texts.llama_header_circle_info,
-            llama_header_capabilities=config.rag.prompt_texts.llama_header_capabilities,
-            llama_header_context=config.rag.prompt_texts.llama_header_context,
-            llama_header_output_format=config.rag.prompt_texts.llama_header_output_format,
-            llama_header_instructions=config.rag.prompt_texts.llama_header_instructions,
         ),
     )
 
     router = QueryRouter(
-        refusal_keywords=config.security.refusal_keywords,
         routing_enabled=config.rag.routing.enabled,
         provider=config.rag.routing.provider,
         gemini_model=config.rag.routing.gemini_model,
-        llama_model_path=config.rag.routing.llama_model_path,
         prompt_name=config.rag.routing.prompt_name,
         temperature=config.rag.routing.temperature,
         max_new_tokens=config.rag.routing.max_new_tokens,
         max_retries=config.rag.routing.max_retries,
         log_enabled=config.rag.routing.log_enabled,
         material_search_max_names=config.rag.routing.material_search_max_names,
-        llm_threads=config.providers.llm.threads,
-        llm_gpu_layers=config.providers.llm.gpu_layers,
-        llm_ctx_size=4096,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
         task_configs={
             "target_model": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.target_model.provider,
                 gemini_model=config.rag.routing.tasks.target_model.gemini_model,
-                llama_model_path=config.rag.routing.tasks.target_model.llama_model_path,
                 prompt_name=config.rag.routing.tasks.target_model.prompt_name,
             ),
             "use_additional_memory": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.use_additional_memory.provider,
                 gemini_model=config.rag.routing.tasks.use_additional_memory.gemini_model,
-                llama_model_path=(
-                    config.rag.routing.tasks.use_additional_memory.llama_model_path
-                ),
                 prompt_name=config.rag.routing.tasks.use_additional_memory.prompt_name,
             ),
             "include_capabilities_info": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.include_capabilities_info.provider,
                 gemini_model=(
                     config.rag.routing.tasks.include_capabilities_info.gemini_model
-                ),
-                llama_model_path=(
-                    config.rag.routing.tasks.include_capabilities_info.llama_model_path
                 ),
                 prompt_name=(
                     config.rag.routing.tasks.include_capabilities_info.prompt_name
@@ -287,9 +225,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 gemini_model=(
                     config.rag.routing.tasks.needs_additional_query.gemini_model
                 ),
-                llama_model_path=(
-                    config.rag.routing.tasks.needs_additional_query.llama_model_path
-                ),
                 prompt_name=(
                     config.rag.routing.tasks.needs_additional_query.prompt_name
                 ),
@@ -297,21 +232,16 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             "additional_queries": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.additional_queries.provider,
                 gemini_model=config.rag.routing.tasks.additional_queries.gemini_model,
-                llama_model_path=(
-                    config.rag.routing.tasks.additional_queries.llama_model_path
-                ),
                 prompt_name=config.rag.routing.tasks.additional_queries.prompt_name,
             ),
             "material_names": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.material_names.provider,
                 gemini_model=config.rag.routing.tasks.material_names.gemini_model,
-                llama_model_path=config.rag.routing.tasks.material_names.llama_model_path,
                 prompt_name=config.rag.routing.tasks.material_names.prompt_name,
             ),
             "recency_mode": RoutingTaskConfig(
                 provider=config.rag.routing.tasks.recency_mode.provider,
                 gemini_model=config.rag.routing.tasks.recency_mode.gemini_model,
-                llama_model_path=config.rag.routing.tasks.recency_mode.llama_model_path,
                 prompt_name=config.rag.routing.tasks.recency_mode.prompt_name,
             ),
         },
@@ -326,6 +256,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 config.features.retrieval.sparse_initial_sparse_top_k
             ),
             rerank_pool_size=config.features.retrieval.rerank_pool_size,
+            rrf_k=config.features.retrieval.rrf_k,
             mmr_lambda=config.features.retrieval.mmr_lambda,
             recency_weight_soft=config.features.retrieval.recency_weight_soft,
             recency_weight_hard=config.features.retrieval.recency_weight_hard,
@@ -343,12 +274,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 temperature=config.rag.generation.no_rag.temperature,
                 max_output_tokens=config.rag.generation.no_rag.max_output_tokens,
                 prompt_name=config.rag.generation.no_rag.prompt_name,
-            ),
-            refusal_generation=RagGenerationSettings(
-                provider=config.rag.generation.refusal.provider,
-                temperature=config.rag.generation.refusal.temperature,
-                max_output_tokens=config.rag.generation.refusal.max_output_tokens,
-                prompt_name=config.rag.generation.refusal.prompt_name,
             ),
             material_search_max_names=config.rag.routing.material_search_max_names,
             parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
@@ -434,13 +359,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     entry_router = EntryQueryRouter(
         provider=config.rag.routing.provider,
         gemini_model=config.rag.routing.gemini_model,
-        llama_model_path=config.rag.routing.llama_model_path,
         temperature=config.rag.routing.temperature,
         max_new_tokens=config.rag.routing.max_new_tokens,
         max_retries=config.rag.routing.max_retries,
-        llm_threads=config.providers.llm.threads,
-        llm_gpu_layers=config.providers.llm.gpu_layers,
-        llm_ctx_size=4096,
         gemini_api_key=config.integrations.gemini_api_key,
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
         prompt_name="routing_openclaw_gate",
@@ -461,15 +382,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         entry_router=entry_router,
     )
     chat_route_usecase = ChatRouteUsecase(router=router)
-    warmup_usecase = WarmupUsecase(
-        config=config,
-        embedder=embedder,
-        reranker=reranker,
-        route_usecase=chat_route_usecase,
-        rag_llm=rag_llm,
-        no_rag_llm=no_rag_llm,
-        refusal_llm=refusal_llm,
-    )
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
 
     return RuntimeContext(
@@ -477,7 +389,6 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         chat_answer=chat_answer_usecase,
         chat_entry=chat_entry_usecase,
         chat_route=chat_route_usecase,
-        warmup=warmup_usecase,
         build_index=build_index_usecase,
         update_index=UpdateIndexUsecase(
             build_usecase=build_index_usecase,

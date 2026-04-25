@@ -4,7 +4,6 @@ from dataclasses import asdict
 from functools import lru_cache
 import json
 import logging
-from pathlib import Path
 import re
 import time
 
@@ -44,13 +43,9 @@ class EntryQueryRouter:
         *,
         provider: str,
         gemini_model: str,
-        llama_model_path: str,
         temperature: float,
         max_new_tokens: int,
         max_retries: int,
-        llm_threads: int,
-        llm_gpu_layers: int,
-        llm_ctx_size: int,
         gemini_api_key: str,
         gemini_requests_per_minute: int,
         prompt_name: str = _DEFAULT_PROMPT_NAME,
@@ -58,13 +53,9 @@ class EntryQueryRouter:
     ) -> None:
         self._provider = str(provider or "").strip()
         self._gemini_model = str(gemini_model or "").strip()
-        self._llama_model_path = str(llama_model_path or "").strip()
         self._temperature = float(temperature)
         self._max_new_tokens = max(1, int(max_new_tokens))
         self._max_retries = max(0, int(max_retries))
-        self._llm_threads = int(llm_threads)
-        self._llm_gpu_layers = int(llm_gpu_layers)
-        self._llm_ctx_size = max(1, int(llm_ctx_size))
         self._gemini_api_key = str(gemini_api_key or "").strip()
         self._gemini_requests_per_minute = max(0, int(gemini_requests_per_minute))
         self._prompt_name = str(prompt_name or "").strip() or _DEFAULT_PROMPT_NAME
@@ -121,16 +112,12 @@ class EntryQueryRouter:
         provider = self._provider.strip().lower().replace(".", "_")
         if provider == "gemini":
             return f"gemini:{self._gemini_model}"
-        if provider in {"llama", "llama_cpp"}:
-            return f"llama_cpp:{Path(self._llama_model_path).name}"
         return provider or "unknown"
 
     def _generate_payload(self, query: str) -> str:
         provider = self._provider.strip().lower().replace(".", "_")
         if provider == "gemini":
             return self._generate_payload_gemini(query)
-        if provider in {"llama", "llama_cpp"}:
-            return self._generate_payload_llama(query)
         raise ValueError(f"Unsupported routing provider: {self._provider}")
 
     def _generate_payload_gemini(self, query: str) -> str:
@@ -172,40 +159,6 @@ class EntryQueryRouter:
             config=genai.types.GenerateContentConfig(**request_config),
         )
         return (response.text or "").strip()
-
-    def _generate_payload_llama(self, query: str) -> str:
-        if not self._llama_model_path:
-            raise RuntimeError("Routing llama_model_path is not set for entry routing.")
-        llama = _llama_client(
-            model_path=self._llama_model_path,
-            ctx_size=self._llm_ctx_size,
-            threads=self._llm_threads,
-            gpu_layers=self._llm_gpu_layers,
-        )
-        grammar = _llama_grammar_from_schema(self._schema())
-        result = llama.create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": self._load_prompt_template(self._prompt_name),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "次のクエリを route=direct_rag か route=openclaw のどちらかで判定し、"
-                        "JSON objectのみで返してください。\n\n"
-                        f"query:\n{query}"
-                    ),
-                },
-            ],
-            max_tokens=self._max_new_tokens,
-            temperature=self._temperature,
-            grammar=grammar,
-        )
-        return (
-            (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-            or ""
-        ).strip()
 
     def _schema(self) -> dict[str, object]:
         return {
@@ -354,38 +307,3 @@ def _genai_client(api_key: str):
     except ImportError as exc:
         raise RuntimeError("google-genai is required for Gemini access.") from exc
     return genai.Client(api_key=api_key)
-
-
-@lru_cache(maxsize=8)
-def _llama_client(
-    *,
-    model_path: str,
-    ctx_size: int,
-    threads: int,
-    gpu_layers: int,
-):
-    try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is not installed. Please install it to use llama.cpp."
-        ) from exc
-    return Llama(
-        model_path=model_path,
-        n_ctx=max(1, int(ctx_size)),
-        n_threads=max(1, int(threads)),
-        n_gpu_layers=int(gpu_layers),
-    )
-
-
-def _llama_grammar_from_schema(schema: dict[str, object]):
-    try:
-        from llama_cpp import LlamaGrammar
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is required for llama.cpp JSON schema grammar."
-        ) from exc
-    return LlamaGrammar.from_json_schema(
-        json.dumps(schema, ensure_ascii=False),
-        verbose=False,
-    )

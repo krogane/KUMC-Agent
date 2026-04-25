@@ -18,7 +18,6 @@ from kumc_agent.config.load import ConfigLoadError, load_runtime_config
 from kumc_agent.infra.legacy.config import AppConfig
 from kumc_agent.infra.legacy.indexing.chunking import (
     message_chunk_jsonl_dir,
-    proposition_chunk_jsonl_dir,
     recursive_chunk_dir,
     recursive_chunk_jsonl_dir,
     sparse_chunk_jsonl_dir,
@@ -40,7 +39,6 @@ from kumc_agent.infra.legacy.indexing.keyword_inverted_index import (
     build_and_save_keyword_index,
     tokenize_sparse_doc,
 )
-from kumc_agent.infra.legacy.indexing.raptor import raptor_chunk_global
 from kumc_agent.infra.legacy.indexing.sparse_sources import (
     second_rec_chunk_dirs,
     sparse_chunk_dirs,
@@ -120,16 +118,6 @@ def _reset_output_dirs(cfg: AppConfig) -> None:
             target = cfg.summery_chunk_dir / name
             if target.exists():
                 _clear_dir_contents(target)
-
-    if cfg.clear_prop_chunk_data:
-        for name in ("docs", "sheets", "hatenablog", "crafters_colony"):
-            target = cfg.prop_chunk_dir / name
-            if target.exists():
-                _clear_dir_contents(target)
-
-    if cfg.clear_raptor_chunk_data and cfg.raptor_chunk_dir.exists():
-        _clear_dir_contents(cfg.raptor_chunk_dir)
-
 
 def _build_keyword_inverted_indexes(cfg: AppConfig) -> None:
     normalizer = SparseNormalizer(
@@ -254,18 +242,6 @@ def main() -> None:
     summery_x_dir = cfg.summery_chunk_dir / "x"
     summery_hatenablog_dir = cfg.summery_chunk_dir / "hatenablog"
     summery_crafters_colony_dir = cfg.summery_chunk_dir / "crafters_colony"
-    prop_docs_dir = cfg.prop_chunk_dir / "docs"
-    prop_sheets_dir = cfg.prop_chunk_dir / "sheets"
-    prop_hatenablog_dir = cfg.prop_chunk_dir / "hatenablog"
-    prop_crafters_colony_dir = cfg.prop_chunk_dir / "crafters_colony"
-
-    def _llm_label(provider: str, gemini_model: str, llama_model_path: str, llama_model: str) -> str:
-        if (provider or "").lower() == "gemini":
-            return gemini_model
-        if llama_model_path:
-            return Path(llama_model_path).name
-        return llama_model
-
     logger.info(
         "FIRST_REC_CFG : size=%d overlap=%d",
         cfg.first_rec_chunk_size,
@@ -291,8 +267,6 @@ def main() -> None:
         "CLEAR_SUMMERY   : %s",
         "yes" if cfg.clear_summery_chunk_data else "no",
     )
-    logger.info("CLEAR_PROP    : %s", "yes" if cfg.clear_prop_chunk_data else "no")
-    logger.info("CLEAR_RAPTOR  : %s", "yes" if cfg.clear_raptor_chunk_data else "no")
     logger.info("UPDATE_RAW    : %s", "yes" if cfg.update_raw_data else "no")
     logger.info(
         "UPDATE_FIRST_REC: %s",
@@ -309,11 +283,6 @@ def main() -> None:
     logger.info(
         "UPDATE_SUMMERY : %s",
         "yes" if cfg.update_summery_chunk_data else "no",
-    )
-    logger.info("UPDATE_PROP   : %s", "yes" if cfg.update_prop_chunk_data else "no")
-    logger.info(
-        "UPDATE_RAPTOR : %s",
-        "yes" if cfg.update_raptor_chunk_data else "no",
     )
     logger.info(
         "SECOND_REC    : %s",
@@ -334,12 +303,7 @@ def main() -> None:
         logger.info(
             "SUMMERY_LLM   : %s / %s",
             cfg.summery_provider,
-            _llm_label(
-                cfg.summery_provider,
-                cfg.summery_gemini_model,
-                cfg.summery_llama_model_path,
-                cfg.summery_llama_model,
-            ),
+            cfg.summery_gemini_model,
         )
         logger.info(
             "SUMMERY_CFG   : chars=%d temp=%s retries=%d batch=%d",
@@ -347,51 +311,6 @@ def main() -> None:
             cfg.summery_temperature,
             cfg.summery_max_retries,
             cfg.summery_batch_size,
-        )
-
-    logger.info(
-        "PROP_CHUNKING : %s",
-        "enabled" if cfg.prop_enabled else "disabled",
-    )
-    if cfg.prop_enabled:
-        logger.info(
-            "PROP_CHUNK_LLM: %s / %s",
-            cfg.prop_provider,
-            _llm_label(
-                cfg.prop_provider,
-                cfg.prop_gemini_model,
-                cfg.prop_llama_model_path,
-                cfg.prop_llama_model,
-            ),
-        )
-        logger.info(
-            "PROP_CHUNK_CFG: temp=%s retries=%d",
-            cfg.prop_temperature,
-            cfg.prop_max_retries,
-        )
-    logger.info(
-        "RAPTOR        : %s",
-        "enabled" if cfg.raptor_enabled else "disabled",
-    )
-    if cfg.raptor_enabled:
-        logger.info(
-            "RAPTOR_CFG    : cluster_max=%d summary_max=%d stop=%d k_max=%d method=%s",
-            cfg.raptor_cluster_max_tokens,
-            cfg.raptor_summery_max_tokens,
-            cfg.raptor_stop_chunk_count,
-            cfg.raptor_k_max,
-            cfg.raptor_k_selection,
-        )
-        logger.info("RAPTOR_EMBED  : %s", cfg.raptor_embedding_model)
-        logger.info(
-            "RAPTOR_LLM    : %s / %s",
-            cfg.raptor_summery_provider,
-            _llm_label(
-                cfg.raptor_summery_provider,
-                cfg.raptor_summery_gemini_model,
-                cfg.raptor_summery_llama_model_path,
-                cfg.raptor_summery_llama_model,
-            ),
         )
 
     _reset_output_dirs(cfg)
@@ -752,78 +671,6 @@ def main() -> None:
                 sync_deleted=cfg.update_summery_chunk_data,
             )
 
-    if cfg.prop_enabled:
-        if not cfg.second_rec_enabled:
-            logger.warning(
-                "Proposition chunking is enabled but SECOND_REC is disabled. Skipping."
-            )
-        else:
-            proposition_chunk_jsonl_dir(
-                input_chunk_dir=second_rec_docs_dir,
-                output_chunk_dir=prop_docs_dir,
-                config=cfg,
-                skip_existing=not cfg.clear_prop_chunk_data,
-                update_existing=cfg.update_prop_chunk_data,
-                sync_deleted=cfg.update_prop_chunk_data,
-            )
-            proposition_chunk_jsonl_dir(
-                input_chunk_dir=second_rec_sheets_dir,
-                output_chunk_dir=prop_sheets_dir,
-                config=cfg,
-                skip_existing=not cfg.clear_prop_chunk_data,
-                update_existing=cfg.update_prop_chunk_data,
-                sync_deleted=cfg.update_prop_chunk_data,
-            )
-            if second_rec_hatenablog_dir.exists():
-                proposition_chunk_jsonl_dir(
-                    input_chunk_dir=second_rec_hatenablog_dir,
-                    output_chunk_dir=prop_hatenablog_dir,
-                    config=cfg,
-                    skip_existing=not cfg.clear_prop_chunk_data,
-                    update_existing=cfg.update_prop_chunk_data,
-                    sync_deleted=cfg.update_prop_chunk_data,
-                )
-            if second_rec_crafters_colony_dir.exists():
-                proposition_chunk_jsonl_dir(
-                    input_chunk_dir=second_rec_crafters_colony_dir,
-                    output_chunk_dir=prop_crafters_colony_dir,
-                    config=cfg,
-                    skip_existing=not cfg.clear_prop_chunk_data,
-                    update_existing=cfg.update_prop_chunk_data,
-                    sync_deleted=cfg.update_prop_chunk_data,
-                )
-
-    if cfg.raptor_enabled:
-        if cfg.summery_enabled:
-            raptor_input_dirs = [
-                summery_docs_dir,
-                summery_sheets_dir,
-                summery_hatenablog_dir,
-                summery_crafters_colony_dir,
-            ]
-        elif cfg.second_rec_enabled:
-            raptor_input_dirs = [
-                second_rec_docs_dir,
-                second_rec_sheets_dir,
-                second_rec_hatenablog_dir,
-                second_rec_crafters_colony_dir,
-            ]
-        else:
-            raptor_input_dirs = [
-                first_rec_docs_dir,
-                first_rec_sheets_dir,
-                first_rec_hatenablog_dir,
-                first_rec_crafters_colony_dir,
-            ]
-        raptor_chunk_global(
-            input_chunk_dirs=raptor_input_dirs,
-            output_chunk_dir=cfg.raptor_chunk_dir,
-            config=cfg,
-            skip_existing=not cfg.clear_raptor_chunk_data,
-            update_existing=cfg.update_raptor_chunk_data,
-            sync_deleted=cfg.update_raptor_chunk_data,
-        )
-
     index_chunks = []
     base_chunk_dirs = []
     if cfg.second_rec_enabled:
@@ -856,20 +703,6 @@ def main() -> None:
         index_chunks.extend(load_chunks_from_dirs(base_chunk_dirs))
     if second_rec_vc_dir.exists():
         index_chunks.extend(load_chunks_from_dirs([second_rec_vc_dir]))
-    if cfg.prop_enabled and cfg.second_rec_enabled:
-        index_chunks.extend(
-            load_chunks_from_dirs(
-                [
-                    prop_docs_dir,
-                    prop_sheets_dir,
-                    prop_hatenablog_dir,
-                    prop_crafters_colony_dir,
-                ]
-            )
-        )
-    if cfg.raptor_enabled:
-        index_chunks.extend(load_chunks_from_dirs([cfg.raptor_chunk_dir]))
-
     build_faiss_index(
         chunks=index_chunks,
         model_name=cfg.embedding_model,

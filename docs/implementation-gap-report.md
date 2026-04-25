@@ -28,7 +28,7 @@ Wave 1-7 は基盤と主要経路を実装済みだが、設計書が求める�
 |---|---|---|---|
 | Wave 1 Foundation | Partial | `apps/bot`, `apps/api`, `apps/worker`, config, feature flags, audit, migrations, health, HTTP API routes | OpenTelemetry 本格連携、Redis queue worker、CI migration gate、production Secret Manager |
 | Wave 2 Connector / Ingestion / SecretFinding | Partial | connector interface、file-backed Drive/Discord/Notion/Hatena/X/Crafters/Minecraft Wiki、raw snapshot、chunking、secret finding、deleted marker | Drive changes API、Discord incremental capture、外部 source の利用規約確認、fixture integration tests、権限変更の自動反映 |
-| Wave 3 Retrieval / Ask | Partial | dense/sparse/RRF/MMR/context/citation、ACL filter、`/ask`、未信頼 context delimiter、pgvector/Elasticsearch health adapter | pgvector 本番検索、外部 embedding/rerank adapter の本番設定、eval gate、Minecraft edition/version aware answer の強化 |
+| Wave 3 Retrieval / Ask | Partial | dense/sparse/RRF/MMR/context/citation、ACL filter、`/ask`、未信頼 context delimiter、FaissLikeIndex dense search、Elasticsearch health adapter | 外部 embedding/rerank adapter の本番設定、eval gate、Minecraft edition/version aware answer の強化 |
 | Wave 4 Workflow | Partial | meeting/task/event/schedule、Task/Event/Schedule candidate approval、task_add/list/done、image/member の安全な最小 workflow、WorkflowRun 記録 | Google Calendar 連携、重複検出の高度化、汎用 WorkflowCandidate の本格 UI |
 | Wave 5 Agentic / DocGen / Announcement | Partial | state-machine Agentic Search、budget、ToolSchema registry、deterministic judge、DocGen Markdown、Announcement draft、fact check | LLM pairwise judge、本格 template/exporter、Agentic eval 基準、外部公開 safety eval の網羅 |
 | Wave 6 Minecraft | Partial | ActionSpec registry、dry-run、ServerOperation repository、approval-required 保存 | isolated executor、二者承認の実行、実サーバー連携、ログ収集、backup 実行 |
@@ -62,7 +62,7 @@ Wave 1-7 は基盤と主要経路を実装済みだが、設計書が求める�
 ## Retrieval / Agentic Gaps
 
 - Retrieval currently uses file/PostgreSQL chunk stores and hashed/local fallback embeddings when external provider is absent.
-- pgvector-native search and external rerank production paths are not complete; health adapters exist.
+- Dense retrieval is standardized on FaissLikeIndex; external rerank production paths are not complete.
 - Agentic Search is deterministic and bounded, and records a minimal search/read/verify tool catalog with deterministic judge metadata.
 - Cost is tracked for Agentic steps in a simple local cost model, not a provider-billed ledger.
 

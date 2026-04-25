@@ -18,8 +18,6 @@ vc:
   summary_target_characters: 100
   summary_llm_provider: "gemini"
   summary_gemini_model: "gemini-3.1-flash-lite-preview"
-  summary_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-  summary_llama_ctx_size: 4096
   summary_temperature: 0.2
   summary_max_output_tokens: 256
   summary_thinking_level: "minimal"
@@ -32,15 +30,11 @@ vc:
   minutes_image_batch_size: 10
   minutes_edit_llm_provider: "gemini"
   minutes_edit_gemini_model: "gemini-3.1-flash-lite-preview"
-  minutes_edit_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-  minutes_edit_llama_ctx_size: 4096
   minutes_edit_temperature: 0.2
   minutes_edit_max_output_tokens: 1024
   minutes_edit_thinking_level: "minimal"
   final_summary_llm_provider: "gemini"
   final_summary_gemini_model: "gemini-3.1-flash-lite-preview"
-  final_summary_llama_model_path: "model/llm/gemma-3n-E2B-it-IQ4_XS.gguf"
-  final_summary_llama_ctx_size: 4096
   final_summary_temperature: 0.0
   final_summary_max_output_tokens: 1024
   final_summary_thinking_level: "minimal"

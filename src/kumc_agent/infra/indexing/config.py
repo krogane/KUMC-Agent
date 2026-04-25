@@ -37,17 +37,6 @@ def get_llm_chunk_system_prompt() -> str:
     return get_required_prompt_env("PROMPT_LLM_CHUNK_SYSTEM_PROMPT")
 
 
-def get_raptor_summary_system_prompt() -> str:
-    return get_required_prompt_env("PROMPT_RAPTOR_SUMMARY_SYSTEM_PROMPT")
-
-
-def build_proposition_chunk_prompt(*, text: str) -> str:
-    return render_prompt_template(
-        "PROMPT_PROPOSITION_CHUNK_TEMPLATE",
-        text=text,
-    )
-
-
 def build_summery_chunk_prompt(
     *,
     text: str,
@@ -82,14 +71,6 @@ def build_summery_chunk_prompt(
     )
 
 
-def build_raptor_summary_prompt(*, text: str, target_tokens: int) -> str:
-    return render_prompt_template(
-        "PROMPT_RAPTOR_SUMMARY_TEMPLATE",
-        target_tokens=target_tokens,
-        text=text,
-    )
-
-
 @dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
@@ -98,8 +79,6 @@ class AppConfig:
     second_rec_chunk_dir: Path
     sparse_second_rec_chunk_dir: Path
     summery_chunk_dir: Path
-    prop_chunk_dir: Path
-    raptor_chunk_dir: Path
     index_dir: Path
     discord_bot_token: str = ""
     discord_guild_allow_list: tuple[int, ...] = ()
@@ -114,7 +93,6 @@ class AppConfig:
     crafters_colony_max_articles: int = 0
     pdf_ocr_model_path: str = ""
     embedding_model: str = ""
-    raptor_embedding_model: str = ""
     first_rec_chunk_size: int = 1024
     first_rec_chunk_overlap: int = 128
     second_rec_enabled: bool = True
@@ -122,59 +100,26 @@ class AppConfig:
     second_rec_chunk_overlap: int = 64
     summery_enabled: bool = True
     summery_characters: int = 200
-    summery_provider: str = "llama"
+    summery_provider: str = "gemini"
     summery_gemini_model: str = "gemini-3-flash-preview"
-    summery_llama_model: str = ""
-    summery_llama_model_path: str = ""
-    summery_llama_ctx_size: int = 4096
     summery_temperature: float = 0.2
     summery_max_output_tokens: int = 1024
     summery_max_retries: int = 2
     summery_batch_size: int = 1
-    llm_provider: str = "llama"
+    llm_provider: str = "gemini"
     genai_model: str = "gemini-3-flash-preview"
-    llama_model_path: str = ""
-    llama_ctx_size: int = 4096
-    llama_gpu_layers: int = 0
-    llama_threads: int = 4
     temperature: float = 0.0
     max_output_tokens: int = 512
     thinking_level: str = "minimal"
-    prop_enabled: bool = False
-    prop_provider: str = "llama"
-    prop_gemini_model: str = "gemini-3-flash-preview"
-    prop_llama_model: str = ""
-    prop_llama_model_path: str = ""
-    prop_llama_ctx_size: int = 4096
-    prop_temperature: float = 0.2
-    prop_max_output_tokens: int = 4096
-    prop_max_retries: int = 2
-    raptor_enabled: bool = False
-    raptor_cluster_max_tokens: int = 1024
-    raptor_summery_max_tokens: int = 256
-    raptor_stop_chunk_count: int = 20
-    raptor_k_max: int = 8
-    raptor_k_selection: str = "elbow"
-    raptor_summery_provider: str = "llama"
-    raptor_summery_gemini_model: str = "gemini-3-flash-preview"
-    raptor_summery_llama_model: str = ""
-    raptor_summery_llama_model_path: str = ""
-    raptor_summery_llama_ctx_size: int = 4096
-    raptor_summery_temperature: float = 0.2
-    raptor_summery_max_retries: int = 2
     clear_raw_data: bool = False
     clear_first_rec_chunk_data: bool = False
     clear_second_rec_chunk_data: bool = False
     clear_summery_chunk_data: bool = False
-    clear_prop_chunk_data: bool = False
-    clear_raptor_chunk_data: bool = False
     update_raw_data: bool = True
     update_first_rec_chunk_data: bool = True
     update_second_rec_chunk_data: bool = True
     update_sparse_second_rec_chunk_data: bool = True
     update_summery_chunk_data: bool = True
-    update_prop_chunk_data: bool = True
-    update_raptor_chunk_data: bool = True
     sudachi_mode: str = "B"
     sparse_bm25_k1: float = 1.2
     sparse_bm25_b: float = 0.75

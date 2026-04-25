@@ -35,12 +35,9 @@ class ModelSection:
 class LLMSection:
     provider: str
     gemini_model: str
-    llama_model_path: str
     temperature: float
     max_output_tokens: int
     thinking_level: str
-    threads: int
-    gpu_layers: int
 
 
 @dataclass(frozen=True)
@@ -61,7 +58,6 @@ class FunctionCallSection:
     enabled: bool
     provider: str
     gemini_model: str
-    llama_model_path: str
 
 
 @dataclass(frozen=True)
@@ -76,7 +72,6 @@ class ProviderSection:
 class SecuritySection:
     maintenance_command_author_ids: list[int]
     discord_guild_allow_list: list[int]
-    refusal_keywords: list[str]
 
 
 @dataclass(frozen=True)
@@ -131,6 +126,7 @@ class RetrievalSection:
     sparse_top_k: int
     sparse_initial_sparse_top_k: int
     rerank_pool_size: int
+    rrf_k: int
     mmr_lambda: float
     recency_weight_soft: float
     recency_weight_hard: float
@@ -187,7 +183,6 @@ class FeatureSection:
 class RagRoutingTaskSection:
     provider: str
     gemini_model: str
-    llama_model_path: str
     prompt_name: str
 
 
@@ -207,7 +202,6 @@ class RagRoutingSection:
     enabled: bool
     provider: str
     gemini_model: str
-    llama_model_path: str
     prompt_name: str
     temperature: float
     max_new_tokens: int
@@ -232,7 +226,6 @@ class RagHistorySection:
 class RagGenerationProfileSection:
     provider: str
     gemini_model: str
-    llama_model_path: str
     temperature: float
     max_output_tokens: int
     thinking_level: str
@@ -243,7 +236,6 @@ class RagGenerationProfileSection:
 class RagGenerationSection:
     rag: RagGenerationProfileSection
     no_rag: RagGenerationProfileSection
-    refusal: RagGenerationProfileSection
     idea_generation: RagGenerationProfileSection
 
 
@@ -262,13 +254,6 @@ class RagPromptTextSection:
     gemini_header_output_format: str
     gemini_header_instructions: str
     gemini_header_question: str
-    llama_header_question: str
-    llama_header_previous_attempt: str
-    llama_header_circle_info: str
-    llama_header_capabilities: str
-    llama_header_context: str
-    llama_header_output_format: str
-    llama_header_instructions: str
 
 
 @dataclass(frozen=True)
@@ -291,28 +276,9 @@ class IndexingChunkingSection:
     summary_batch_size: int
     summary_llm_provider: str
     summary_gemini_model: str
-    summary_llama_model_path: str
     summary_temperature: float
     summary_max_output_tokens: int
     summary_thinking_level: str
-    proposition_llm_provider: str
-    proposition_gemini_model: str
-    proposition_llama_model_path: str
-    proposition_temperature: float
-    proposition_max_output_tokens: int
-    proposition_thinking_level: str
-    proposition_max_retries: int
-    raptor_llm_provider: str
-    raptor_gemini_model: str
-    raptor_llama_model_path: str
-    raptor_temperature: float
-    raptor_max_output_tokens: int
-    raptor_thinking_level: str
-    raptor_max_retries: int
-    raptor_cluster_max_tokens: int
-    raptor_stop_chunk_count: int
-    raptor_k_max: int
-    raptor_k_selection: str
 
 
 @dataclass(frozen=True)
@@ -320,8 +286,6 @@ class IndexingStagesSection:
     second_recursive_enabled: bool
     sparse_second_recursive_enabled: bool
     summary_enabled: bool
-    proposition_enabled: bool
-    raptor_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -330,15 +294,11 @@ class IndexingRefreshSection:
     clear_first_recursive_chunk_data: bool
     clear_second_recursive_chunk_data: bool
     clear_summary_chunk_data: bool
-    clear_proposition_chunk_data: bool
-    clear_raptor_chunk_data: bool
     update_raw_data: bool
     update_first_recursive_chunk_data: bool
     update_second_recursive_chunk_data: bool
     update_sparse_second_recursive_chunk_data: bool
     update_summary_chunk_data: bool
-    update_proposition_chunk_data: bool
-    update_raptor_chunk_data: bool
 
 
 @dataclass(frozen=True)
@@ -358,7 +318,6 @@ class OpsRagasMetricsSection:
 
 @dataclass(frozen=True)
 class OpsSection:
-    warmup_interval_minutes: int
     index_update_estimate_min_minutes: int
     index_update_estimate_max_minutes: int
     ragas_answer_generation_batch_size: int
@@ -461,8 +420,6 @@ class VCSection:
     summary_target_characters: int
     summary_llm_provider: str
     summary_gemini_model: str
-    summary_llama_model_path: str
-    summary_llama_ctx_size: int
     summary_temperature: float
     summary_max_output_tokens: int
     summary_thinking_level: str
@@ -475,15 +432,11 @@ class VCSection:
     minutes_image_batch_size: int
     minutes_edit_llm_provider: str
     minutes_edit_gemini_model: str
-    minutes_edit_llama_model_path: str
-    minutes_edit_llama_ctx_size: int
     minutes_edit_temperature: float
     minutes_edit_max_output_tokens: int
     minutes_edit_thinking_level: str
     final_summary_llm_provider: str
     final_summary_gemini_model: str
-    final_summary_llama_model_path: str
-    final_summary_llama_ctx_size: int
     final_summary_temperature: float
     final_summary_max_output_tokens: int
     final_summary_thinking_level: str

@@ -67,7 +67,6 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
 class RoutingTaskConfig:
     provider: str
     gemini_model: str
-    llama_model_path: str
     prompt_name: str = "routing"
 
 
@@ -84,38 +83,28 @@ class QueryRouter:
     def __init__(
         self,
         *,
-        refusal_keywords: list[str],
         routing_enabled: bool,
         provider: str,
         gemini_model: str,
-        llama_model_path: str,
         prompt_name: str = "routing",
         temperature: float,
         max_new_tokens: int,
         max_retries: int,
         log_enabled: bool,
         material_search_max_names: int,
-        llm_threads: int,
-        llm_gpu_layers: int,
-        llm_ctx_size: int,
         gemini_api_key: str,
         gemini_requests_per_minute: int,
         task_configs: dict[str, RoutingTaskConfig] | None = None,
     ) -> None:
-        self._refusal_keywords = list(refusal_keywords)
         self._routing_enabled = routing_enabled
         self._provider = provider
         self._gemini_model = gemini_model
-        self._llama_model_path = llama_model_path
         self._prompt_name = str(prompt_name or "routing").strip() or "routing"
         self._temperature = temperature
         self._max_new_tokens = max_new_tokens
         self._max_retries = max_retries
         self._log_enabled = log_enabled
         self._material_search_max_names = max(1, material_search_max_names)
-        self._llm_threads = llm_threads
-        self._llm_gpu_layers = llm_gpu_layers
-        self._llm_ctx_size = llm_ctx_size
         self._gemini_api_key = gemini_api_key
         self._gemini_requests_per_minute = max(0, int(gemini_requests_per_minute))
         self._routing_prompt_template_cache: dict[str, str] = {}
@@ -147,7 +136,6 @@ class QueryRouter:
         defaults = RoutingTaskConfig(
             provider=self._provider,
             gemini_model=self._gemini_model,
-            llama_model_path=self._llama_model_path,
             prompt_name=self._prompt_name,
         )
         resolved: dict[str, RoutingTaskConfig] = {}
@@ -157,7 +145,6 @@ class QueryRouter:
                 candidate = RoutingTaskConfig(
                     provider=str(candidate.get("provider", "")),
                     gemini_model=str(candidate.get("gemini_model", "")),
-                    llama_model_path=str(candidate.get("llama_model_path", "")),
                     prompt_name=str(candidate.get("prompt_name", "")),
                 )
             if not isinstance(candidate, RoutingTaskConfig):
@@ -166,15 +153,10 @@ class QueryRouter:
             gemini_model = (
                 str(candidate.gemini_model or "").strip() or defaults.gemini_model
             )
-            llama_model_path = (
-                str(candidate.llama_model_path or "").strip()
-                or defaults.llama_model_path
-            )
             prompt_name = str(candidate.prompt_name or "").strip() or defaults.prompt_name
             resolved[task_name] = RoutingTaskConfig(
                 provider=provider,
                 gemini_model=gemini_model,
-                llama_model_path=llama_model_path,
                 prompt_name=prompt_name,
             )
         return resolved
@@ -398,18 +380,9 @@ class QueryRouter:
                 history=history,
                 context=context,
             )
-        if provider in {"llama", "llama_cpp"}:
-            return self._generate_task_payload_llama(
-                task_name=task_name,
-                task_config=task_config,
-                query=query,
-                question_author=question_author,
-                history=history,
-                context=context,
-            )
         raise ValueError(
             "Unsupported routing provider: "
-            f"{task_config.provider}. Use 'gemini' or 'llama_cpp'."
+            f"{task_config.provider}. Use 'gemini'."
         )
 
     def _generate_task_payload_gemini(
@@ -466,57 +439,6 @@ class QueryRouter:
             config=genai.types.GenerateContentConfig(**request_config),
         )
         return (response.text or "").strip()
-
-    def _generate_task_payload_llama(
-        self,
-        *,
-        task_name: str,
-        task_config: RoutingTaskConfig,
-        query: str,
-        question_author: str | None,
-        history: Sequence[ChatHistoryEntry] | None,
-        context: dict[str, object],
-    ) -> str:
-        if not task_config.llama_model_path:
-            raise RuntimeError(
-                f"Routing llama_model_path is not set for task: {task_name}"
-            )
-
-        llama = _llama_client(
-            model_path=task_config.llama_model_path,
-            ctx_size=self._llm_ctx_size,
-            threads=self._llm_threads,
-            gpu_layers=self._llm_gpu_layers,
-        )
-        grammar = _llama_grammar_from_schema(self._task_schema(task_name=task_name))
-        result = llama.create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": self._routing_system_prompt(
-                        task_name=task_name,
-                        prompt_name=task_config.prompt_name,
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": self._routing_task_user_prompt(
-                        task_name=task_name,
-                        query=query,
-                        question_author=question_author,
-                        history=history,
-                        context=context,
-                    ),
-                },
-            ],
-            max_tokens=max(1, int(self._max_new_tokens)),
-            temperature=float(self._temperature),
-            grammar=grammar,
-        )
-        return (
-            (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-            or ""
-        ).strip()
 
     def _routing_system_prompt(self, *, task_name: str, prompt_name: str) -> str:
         rendered_template = self._render_routing_template(
@@ -943,38 +865,3 @@ def _genai_client(api_key: str):
     except ImportError as exc:
         raise RuntimeError("google-genai is required for Gemini access.") from exc
     return genai.Client(api_key=api_key)
-
-
-@lru_cache(maxsize=16)
-def _llama_client(
-    *,
-    model_path: str,
-    ctx_size: int,
-    threads: int,
-    gpu_layers: int,
-):
-    try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is not installed. Please install it to use llama.cpp."
-        ) from exc
-    return Llama(
-        model_path=model_path,
-        n_ctx=max(1, int(ctx_size)),
-        n_threads=max(1, int(threads)),
-        n_gpu_layers=int(gpu_layers),
-    )
-
-
-def _llama_grammar_from_schema(schema: dict[str, object]):
-    try:
-        from llama_cpp import LlamaGrammar
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is required for llama.cpp JSON schema grammar."
-        ) from exc
-    return LlamaGrammar.from_json_schema(
-        json.dumps(schema, ensure_ascii=False),
-        verbose=False,
-    )

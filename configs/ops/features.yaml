@@ -30,6 +30,7 @@ features:
     sparse_top_k: 15
     sparse_initial_sparse_top_k: 15
     rerank_pool_size: 20
+    rrf_k: 60
     mmr_lambda: 0.75
     recency_weight_soft: 0.30
     recency_weight_hard: 0.60

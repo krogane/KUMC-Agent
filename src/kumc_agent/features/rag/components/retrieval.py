@@ -13,7 +13,7 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
-from kumc_agent.utils.hashing import merge_unique, stable_hash
+from kumc_agent.utils.hashing import stable_hash
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ class RetrievalComponent:
         recency_weight_hard: float = 0.45,
         recency_half_life_days: float = 45.0,
         mmr_lambda: float = 0.75,
+        rrf_k: int = 60,
     ) -> list[Chunk]:
         dense_limit = max(0, int(dense_top_k))
         sparse_limit = max(0, int(sparse_top_k))
@@ -122,7 +123,11 @@ class RetrievalComponent:
                 sparse_top_k=sparse_initial_limit,
             )
 
-        scored = self._merge_scores(dense_hits=dense_hits, sparse_hits=sparse_hits)
+        scored = self._merge_scores(
+            dense_hits=dense_hits,
+            sparse_hits=sparse_hits,
+            rrf_k=rrf_k,
+        )
         _ = (
             recency_mode,
             recency_weight_soft,
@@ -451,30 +456,41 @@ class RetrievalComponent:
         return merged
 
     @staticmethod
-    def _merge_scores(*, dense_hits, sparse_hits) -> list[_ScoredChunk]:
-        dense_scores = {item.chunk.id: float(item.score) for item in dense_hits}
-        sparse_scores = {chunk.id: float(score) for chunk, score in sparse_hits}
+    def _merge_scores(
+        *,
+        dense_hits,
+        sparse_hits,
+        rrf_k: int = 60,
+    ) -> list[_ScoredChunk]:
+        k = max(0.0, float(rrf_k))
         dense_chunks = {item.chunk.id: item.chunk for item in dense_hits}
         sparse_chunks = {chunk.id: chunk for chunk, _ in sparse_hits}
 
-        dense_norm = _normalize_score_map(dense_scores)
-        sparse_norm = _normalize_score_map(sparse_scores)
-
-        merged_ids = [
-            str(value)
-            for value in merge_unique(
-                [item.chunk.id for item in dense_hits]
-                + [chunk.id for chunk, _ in sparse_hits]
+        scores: dict[str, float] = {}
+        order: dict[str, int] = {}
+        for index, item in enumerate(dense_hits, start=1):
+            chunk_id = str(item.chunk.id)
+            order.setdefault(chunk_id, len(order))
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + (
+                1.0 / (k + float(index))
             )
-        ]
+        for index, (chunk, _) in enumerate(sparse_hits, start=1):
+            chunk_id = str(chunk.id)
+            order.setdefault(chunk_id, len(order))
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + (
+                1.0 / (k + float(index))
+            )
+
         out: list[_ScoredChunk] = []
-        for chunk_id in merged_ids:
+        for chunk_id, score in scores.items():
             chunk = dense_chunks.get(chunk_id) or sparse_chunks.get(chunk_id)
             if chunk is None:
                 continue
-            score = dense_norm.get(chunk_id, 0.0) + sparse_norm.get(chunk_id, 0.0)
             out.append(_ScoredChunk(chunk=chunk, score=score))
-        return out
+        return sorted(
+            out,
+            key=lambda item: (-item.score, order.get(item.chunk.id, 0)),
+        )
 
     @staticmethod
     def _apply_recency(
@@ -556,23 +572,6 @@ class RetrievalComponent:
         except Exception:
             logger.exception("MMR ranking failed. Falling back to hybrid ranking.")
             return chunks
-
-
-def _normalize_score_map(scores: dict[str, float]) -> dict[str, float]:
-    if not scores:
-        return {}
-    values = list(scores.values())
-    max_score = max(values)
-    min_score = min(values)
-    if max_score == min_score:
-        if max_score <= 0.0:
-            return {key: 0.0 for key in scores}
-        return {key: 1.0 for key in scores}
-    scale = max_score - min_score
-    return {
-        key: (value - min_score) / scale
-        for key, value in scores.items()
-    }
 
 
 def _chunk_updated_at(chunk: Chunk) -> datetime | None:

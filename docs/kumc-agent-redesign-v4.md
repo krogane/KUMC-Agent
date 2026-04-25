@@ -72,7 +72,7 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 - OpenClaw を優先し、失敗時に Local RAG へ fallback する。
 - message prefix `/ai` を中心に Discord 操作を受ける。
 - HTTP / DocGen は stub である。
-- VC、local LLM、warmup など、現行の運用方針と合わない機能が残っている。
+- VC、local LLM など、現行の運用方針と合わない機能が残っている。
 
 新設計では、これを次のように変更する。
 | 項目 | 現行 | 新設計 |
@@ -81,7 +81,7 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 | Discord UI | `/ai` message command 中心 | slash command / component / modal 中心。`/ai` は廃止|
 | index 正本 | ローカル artifact | PostgreSQL 正本 + 検索 index + object storage |
 | worker | frontend と強く結合 | bot / api / worker を分離 |
-| LLM | Gemini / local llama.cpp 混在 | LLM・embedding・rerank は外部 API 前提 |
+| LLM | Gemini 中心 | LLM・embedding・rerank は外部 API 前提 |
 | RAG | hybrid(dense + sparse) + rerank + Doc Cap + MMR | hybrid(dense + sparse) + rerank + Doc Cap + MMR + ACL + eval + trace |
 | Agent | OpenClaw 外部依存 | 内部状態機械型 Agentic Search |
 | 業務 Workflow | 個別機能なし / 手作業 | Workflow registry + Candidate + Approval + 正本 DB |
@@ -89,15 +89,13 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 | Minecraft Wiki | 未整備 | Wiki connector + edition/version aware RAG |
 | Command 実行 | 未整備 | 定義済み command registry + schema 検証 + 承認 |
 | DocGen | NotImplemented | 中間表現 + template + exporter |
-| Security | refusal stub 等が未接続 | threat model / prompt injection 防御 / audit / ACL を必須化 |
+| Security | 安全制御 stub 等が未接続 | threat model / prompt injection 防御 / audit / ACL を必須化 |
 | Observability | answer log / prompt log 中心 | trace / metric / structured log / cost log / audit log |
 
 ### 2.2 廃止・縮小する機能
 以下は新設計では廃止または縮小する。
 | 機能 | 方針 | 理由 |
 |---|---|---|
-| local llama.cpp generation | 廃止 | 外部 API 使用を前提にするため |
-| local embedding warmup | 廃止 | embedding も外部 API 前提にするため |
 | CrossEncoder local reranker | 廃止 | rerank も外部 API または軽量 LLM judge へ移行 |
 | OpenClaw 優先 routing | 縮小 | 自前実装の自由度を優先するため |
 | `data/index` artifact 正本 | 廃止 | DB / search index を正本にするため |
@@ -196,7 +194,7 @@ worker   : ingestion、embedding、indexing、agent search、doc generation、au
 | Bot | discord.py 系 | slash command / interaction を主に使う |
 | API | FastAPI | Webhook / 管理 API / 承認 UI 用 |
 | DB | PostgreSQL | domain 正本、audit、task、workflow |
-| Vector | pgvector | PostgreSQL 内で初期運用 |
+| Vector | FaissLikeIndex | ファイルベースの dense index を標準運用 |
 | Sparse search | Elasticsearch | BM25 / Sudachi を使用 |
 | Queue | Celery | worker job 管理 |
 | Object Storage | S3 互換 | raw snapshot、export、生成資料 |
@@ -476,7 +474,7 @@ class SecretFinding:
 ### 7.1 方針
 DB の詳細 DDL はこの詳細設計書には載せず、`/infrastructure/migrations`、`/docs/adr`、repository interface の型定義に分離する。この文書では、実装で守るべき DB 方針と主要 table の責務だけを定義する。
 
-PostgreSQL を業務正本にする。raw file や生成資料そのものは object storage に置き、DB には参照 key と metadata を保存する。検索 index は PostgreSQL / pgvector / Elasticsearch に分散するが、正本は DB 側に置く。
+PostgreSQL を業務正本にする。raw file や生成資料そのものは object storage に置き、DB には参照 key と metadata を保存する。dense 検索 index は FaissLikeIndex、sparse 検索 index は Elasticsearch などに分散するが、正本は DB 側に置く。
 
 ### 7.2 主要 table 群
 最低限、次の table 群を migration 側で定義する。
@@ -964,6 +962,7 @@ Elasticsearch BM25を使う
 
 ### 11.5 RRF
 Dense と sparse の結果を RRF で融合する。
+現行RAGコンポーネントでも、dense-vs-sparse の候補融合はスコア正規化加算ではなくRRFを使う。
 ```python
 def rrf_score(rank: int, k: int = 60) -> float:
     return 1.0 / (k + rank)
@@ -2638,8 +2637,7 @@ AI 機能追加時:
 | `features.summarization` | `libs/docgen` / `retrieval` | LLM 要約と summary chunk へ |
 | `features.vc` | optional package | feature flag で enable / disable を切り替える |
 | `infra.openclaw` | `libs/providers/openclaw_adapter` | 任意 adapter に縮小 |
-| `infra.llama_cpp` | 廃止 | 外部 API 前提 |
-| `infra.faiss` | 廃止または experimental | pgvector / vector DB へ |
+| `infra.faiss` | 標準 dense index | FaissLikeIndex に一本化 |
 | `infra.storage` | `libs/storage` | object storage + DB へ |
 | `runtime.container` | `apps/*/bootstrap` | DI を分割 |
 
@@ -2721,7 +2719,7 @@ data/index/material_catalog.json
 ### Retrieval
 33. chunking pipeline を実装する
 34. embedding job を実装する
-35. pgvector repository を実装する
+35. FaissLikeIndex repository を整備する
 36. sparse search repository を実装する
 37. RRF を実装する
 38. rerank adapter を実装する

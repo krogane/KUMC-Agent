@@ -1,9 +1,3 @@
 security:
   maintenance_command_author_ids: []
   discord_guild_allow_list: []
-  refusal_keywords:
-    - "住所"
-    - "電話番号"
-    - "パスワード"
-    - "口座"
-    - "契約"

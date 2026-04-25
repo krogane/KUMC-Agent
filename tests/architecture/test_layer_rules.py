@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
 class LayerRuleTests(unittest.TestCase):
     def test_domain_has_no_external_sdk_imports(self) -> None:
         domain_dir = SRC / "kumc_agent" / "domain"
-        forbidden = ("discord", "google", "langchain", "faiss", "llama_cpp")
+        forbidden = ("discord", "google", "langchain", "faiss")
 
         for path in domain_dir.rglob("*.py"):
             content = path.read_text(encoding="utf-8")

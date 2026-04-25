@@ -130,16 +130,9 @@ def _generate_routing_payload(
             config=config,
             history=history,
         )
-    if provider in {"llama_cpp", "llama"}:
-        return _generate_routing_payload_llama(
-            query=query,
-            question_author=question_author,
-            config=config,
-            history=history,
-        )
     raise ValueError(
         "Unsupported FUNCTION_CALL_PROVIDER: "
-        f"{config.function_call_provider}. Use 'gemini' or 'llama_cpp'."
+        f"{config.function_call_provider}. Use 'gemini'."
     )
 
 
@@ -334,55 +327,6 @@ def _routing_gemini_model_supports_thinking(model_name: str) -> bool:
 
 def _is_unsupported_gemini_thinking_error(exc: Exception) -> bool:
     return "thinking level is not supported for this model" in str(exc).lower()
-
-
-def _generate_routing_payload_llama(
-    *,
-    query: str,
-    question_author: str | None = None,
-    config: AppConfig,
-    history: Sequence[ChatHistoryEntry] | None = None,
-) -> str:
-    if not config.function_call_llama_model_path:
-        raise RuntimeError(
-            "FUNCTION_CALL_LLAMA_MODEL is not set. Please set it to a gguf model path in .env"
-        )
-
-    llama = _llama_client(
-        model_path=config.function_call_llama_model_path,
-        ctx_size=config.llama_ctx_size,
-        threads=config.llama_threads,
-        gpu_layers=config.llama_gpu_layers,
-    )
-    schema = _routing_schema(
-        max_material_names=max(1, config.material_search_max_names)
-    )
-    grammar = _llama_grammar_from_schema(schema)
-    result = llama.create_chat_completion(
-        messages=[
-            {
-                "role": "system",
-                "content": _routing_system_prompt(
-                    material_search_max_names=config.material_search_max_names
-                ),
-            },
-            {
-                "role": "user",
-                "content": _routing_user_prompt(
-                    query=query,
-                    question_author=question_author,
-                    history=history,
-                ),
-            },
-        ],
-        max_tokens=max(1, int(config.function_call_max_new_tokens)),
-        temperature=config.function_call_temperature,
-        grammar=grammar,
-    )
-    return (
-        (result.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-        or ""
-    ).strip()
 
 
 def _parse_routing_payload(
@@ -619,39 +563,3 @@ def _genai_client(api_key: str):
     except ImportError as exc:
         raise RuntimeError("google-genai is required for Gemini access.") from exc
     return genai.Client(api_key=api_key)
-
-
-@lru_cache(maxsize=1)
-def _llama_client(
-    *,
-    model_path: str,
-    ctx_size: int,
-    threads: int,
-    gpu_layers: int,
-):
-    try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is not installed. Please install it to use llama.cpp."
-        ) from exc
-
-    return Llama(
-        model_path=model_path,
-        n_ctx=ctx_size,
-        n_threads=threads,
-        n_gpu_layers=gpu_layers,
-    )
-
-
-def _llama_grammar_from_schema(schema: dict[str, object]):
-    try:
-        from llama_cpp import LlamaGrammar
-    except ImportError as exc:
-        raise RuntimeError(
-            "llama-cpp-python is required for llama.cpp JSON schema grammar."
-        ) from exc
-    return LlamaGrammar.from_json_schema(
-        json.dumps(schema, ensure_ascii=False),
-        verbose=False,
-    )

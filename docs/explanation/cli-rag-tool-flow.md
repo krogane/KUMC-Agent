@@ -48,7 +48,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag \
 - sparse index: Sudachi BM25検索index
 - reranker: cross encoder reranker。有効な場合のみ
 - prompt repository: `assets/prompts` 配下のプロンプト読み込み
-- RAG回答用LLM、No-RAG回答用LLM、refusal用LLM
+- RAG回答用LLM、No-RAG回答用LLM
 - `QueryRouter`
 - `RetrievalComponent`
 - `GenerationComponent`
@@ -111,8 +111,8 @@ CLI本体はRAGの詳細処理を直接持ちません。
 - `material_names`
 - `recency_mode`
 
-それぞれのタスクはGeminiまたはllama.cppで実行できます。
-Geminiの場合はJSON MIMEを指定し、llama.cppの場合はタスクごとのschemaからgrammarを作ってJSONを返しやすくしています。
+それぞれのタスクはGeminiで実行します。
+GeminiにはJSON MIMEを指定して、JSONを返しやすくしています。
 
 ルーティングLLMの出力が壊れている、またはAPIエラーが起きた場合はリトライします。
 最終的に失敗した場合は安全側のデフォルトとして、`recency_mode="off"`、資料名なし、追加クエリなし、追加メモリなしの判定になります。
@@ -140,7 +140,7 @@ Geminiの場合はJSON MIMEを指定し、llama.cppの場合はタスクごと�
 denseとsparseの両方が有効な場合、2つは並列に実行されます。
 片方が失敗してもログを出して空扱いにし、もう片方の結果で続行します。
 
-検索結果はスコアで統合・ソートされ、`Chunk` のリストとして `RagService` に戻ります。
+検索結果はdense側の順位とsparse側の順位をRRFで融合し、`Chunk` のリストとして `RagService` に戻ります。
 
 ## 9. RagServiceでrerank、recency、MMR、親chunk追加を行う
 
@@ -153,7 +153,7 @@ denseとsparseの両方が有効な場合、2つは並列に実行されます�
 - rerank pool sizeで候補数を絞る
 - fast modeでなければMMRで多様性を加味して並べ替える
 - `top_k` 件に絞る
-- 設定が有効なら、proposition chunkやsecond recursive chunkの親にあたる本文・要約chunkを追加する
+- 設定が有効なら、second recursive chunkの親にあたる本文・要約chunkを追加する
 
 この段階で、回答プロンプトに入るcontextが決まります。
 
@@ -343,4 +343,3 @@ _build_tool_rag_payload()
 そのため、OpenClaw入口判定を通さず、ローカルRAGの結果をJSONで返すツールブリッジとして動きます。
 
 また、`tool rag` は履歴・追加メモリを切っているため、同じindex・設定・外部LLM応答であれば、通常チャットよりも入力質問に閉じた結果になりやすい経路です。
-

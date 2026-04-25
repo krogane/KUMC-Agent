@@ -13,21 +13,16 @@ if str(SRC) not in sys.path:
 from kumc_agent.features.rag.components.routing import QueryRouter
 
 
-def _build_router(*, refusal_keywords: list[str] | None = None) -> QueryRouter:
+def _build_router() -> QueryRouter:
     return QueryRouter(
-        refusal_keywords=list(refusal_keywords or []),
         routing_enabled=True,
         provider="gemini",
         gemini_model="gemini-2.5-flash-lite",
-        llama_model_path="",
         temperature=0.0,
         max_new_tokens=128,
         max_retries=1,
         log_enabled=False,
         material_search_max_names=3,
-        llm_threads=4,
-        llm_gpu_layers=0,
-        llm_ctx_size=4096,
         gemini_api_key="dummy",
         gemini_requests_per_minute=60,
     )
@@ -42,13 +37,13 @@ class QueryRouterTests(unittest.TestCase):
                 "_generate_task_payload",
                 side_effect=[
                     RuntimeError("503 UNAVAILABLE: high demand"),
-                    '{"idea_generation": true}',
+                    '{"use_additional_memory": true}',
                 ],
             ),
             patch("kumc_agent.features.rag.components.routing.time.sleep") as sleep_mock,
         ):
             result = router._run_task_with_retries(
-                task_name="idea_generation",
+                task_name="use_additional_memory",
                 query="企画案を出して",
                 question_author=None,
                 history=None,
@@ -69,7 +64,7 @@ class QueryRouterTests(unittest.TestCase):
             patch("kumc_agent.features.rag.components.routing.time.sleep") as sleep_mock,
         ):
             result = router._run_task_with_retries(
-                task_name="idea_generation",
+                task_name="use_additional_memory",
                 query="企画案を出して",
                 question_author=None,
                 history=None,
@@ -79,13 +74,10 @@ class QueryRouterTests(unittest.TestCase):
         self.assertFalse(result)
         sleep_mock.assert_not_called()
 
-    def test_material_search_flow_ignores_rag_only_fields(self) -> None:
+    def test_route_collects_supported_fields(self) -> None:
         router = _build_router()
         values = {
-            "target_model": "material_search",
             "use_additional_memory": True,
-            "idea_generation": True,
-            "needs_additional_query": True,
             "material_names": ["運営資料", "議事録"],
             "recency_mode": "hard",
             "additional_queries": ["追加クエリ"],
@@ -97,14 +89,11 @@ class QueryRouterTests(unittest.TestCase):
             )
             decision = router.route("資料「運営資料」を探して")
 
-        self.assertEqual(decision.target_model, "material_search")
         self.assertEqual(decision.recency_mode, "hard")
         self.assertEqual(decision.material_names, ["運営資料", "議事録"])
         self.assertFalse(decision.include_capabilities_info)
         self.assertTrue(decision.use_additional_memory)
-        self.assertFalse(decision.idea_generation)
-        self.assertFalse(decision.needs_additional_query)
-        self.assertEqual(decision.additional_queries, [])
+        self.assertEqual(decision.additional_queries, ["追加クエリ"])
 
         called_tasks = [
             call.kwargs["task_name"] for call in mocked.call_args_list if "task_name" in call.kwargs
@@ -113,74 +102,15 @@ class QueryRouterTests(unittest.TestCase):
         self.assertIn("recency_mode", called_tasks)
         self.assertIn("additional_queries", called_tasks)
 
-    def test_rag_flow_runs_additional_queries_after_needs_flag(self) -> None:
-        router = _build_router()
-        values = {
-            "target_model": "rag",
-            "use_additional_memory": False,
-            "idea_generation": True,
-            "needs_additional_query": True,
-            "recency_mode": "soft",
-            "additional_queries": [],
-        }
-
-        with patch.object(router, "_run_task_with_retries") as mocked:
-            mocked.side_effect = (
-                lambda *, task_name, **_: values.get(task_name, router._default_task_value(task_name))
-            )
-            decision = router.route("最近の活動を踏まえた企画案を出して")
-
-        self.assertEqual(decision.target_model, "rag")
-        self.assertEqual(decision.recency_mode, "soft")
-        self.assertTrue(decision.idea_generation)
-        self.assertFalse(decision.needs_additional_query)
-        self.assertEqual(decision.additional_queries, [])
-
-        called_tasks = [
-            call.kwargs["task_name"] for call in mocked.call_args_list if "task_name" in call.kwargs
-        ]
-        self.assertIn("recency_mode", called_tasks)
-        self.assertIn("additional_queries", called_tasks)
-        self.assertNotIn("material_names", called_tasks)
-
-    def test_deprecated_target_model_falls_back_to_rag(self) -> None:
-        router = _build_router()
-        values = {
-            "target_model": "no_rag",
-            "use_additional_memory": True,
-            "idea_generation": False,
-            "needs_additional_query": False,
-            "recency_mode": "soft",
-        }
-
-        with patch.object(router, "_run_task_with_retries") as mocked:
-            mocked.side_effect = (
-                lambda *, task_name, **_: values.get(task_name, router._default_task_value(task_name))
-            )
-            decision = router.route("一般知識だけで答えられる質問")
-
-        self.assertEqual(decision.target_model, "rag")
-        self.assertEqual(decision.recency_mode, "soft")
-        self.assertTrue(decision.use_additional_memory)
-        self.assertFalse(decision.include_capabilities_info)
-
-        called_tasks = [
-            call.kwargs["task_name"] for call in mocked.call_args_list if "task_name" in call.kwargs
-        ]
-        self.assertIn("target_model", called_tasks)
-        self.assertIn("use_additional_memory", called_tasks)
-        self.assertIn("idea_generation", called_tasks)
-        self.assertIn("needs_additional_query", called_tasks)
-        self.assertIn("recency_mode", called_tasks)
-
     def test_routing_disabled_returns_safe_default(self) -> None:
         router = _build_router()
         router._routing_enabled = False  # test setup only
 
         decision = router.route("今日の天気は？")
 
-        self.assertEqual(decision.target_model, "rag")
         self.assertEqual(decision.recency_mode, "off")
+        self.assertEqual(decision.material_names, [])
+        self.assertFalse(decision.use_additional_memory)
 
 
 if __name__ == "__main__":

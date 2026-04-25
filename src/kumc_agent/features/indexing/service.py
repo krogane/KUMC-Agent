@@ -5,7 +5,6 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
-import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,8 +59,6 @@ class IndexingService:
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
         self._sparse_second_rec_dir = self._chunks_root / "sparse_second_rec_chunk"
         self._summary_dir = self._chunks_root / "summary_chunk"
-        self._prop_dir = self._chunks_root / "prop_chunk"
-        self._raptor_dir = self._chunks_root / "raptor_chunk"
         self._raw_docs_dir = self._raw_dir / "docs"
         self._raw_sheets_dir = self._raw_dir / "sheets"
         self._raw_messages_dir = self._raw_dir / "messages"
@@ -107,11 +104,6 @@ class IndexingService:
         self._summary_crafters_colony_dir = self._summary_dir / "crafters_colony"
         self._summary_notion_dir = self._summary_dir / "notion"
 
-        self._prop_docs_dir = self._prop_dir / "docs"
-        self._prop_sheets_dir = self._prop_dir / "sheets"
-        self._prop_hatenablog_dir = self._prop_dir / "hatenablog"
-        self._prop_crafters_colony_dir = self._prop_dir / "crafters_colony"
-        self._prop_notion_dir = self._prop_dir / "notion"
 
     def build(
         self,
@@ -192,10 +184,6 @@ class IndexingService:
             self._clear_dir_contents(self._sparse_second_rec_dir)
         if clear_all or refresh.clear_summary_chunk_data:
             self._clear_dir_contents(self._summary_dir)
-        if clear_all or refresh.clear_proposition_chunk_data:
-            self._clear_dir_contents(self._prop_dir)
-        if clear_all or refresh.clear_raptor_chunk_data:
-            self._clear_dir_contents(self._raptor_dir)
 
     def _ensure_raw_source_dirs(self) -> None:
         for path in (
@@ -220,12 +208,6 @@ class IndexingService:
         retrieval = self._runtime.features.retrieval
         integrations = self._runtime.integrations
 
-        def _model_label(path_value: str) -> str:
-            cleaned = str(path_value or "").strip()
-            if not cleaned:
-                return ""
-            return Path(cleaned).name
-
         return LegacyAppConfig(
             base_dir=self._runtime.base_dir,
             raw_data_dir=self._raw_dir,
@@ -233,8 +215,6 @@ class IndexingService:
             second_rec_chunk_dir=self._second_rec_dir,
             sparse_second_rec_chunk_dir=self._sparse_second_rec_dir,
             summery_chunk_dir=self._summary_dir,
-            prop_chunk_dir=self._prop_dir,
-            raptor_chunk_dir=self._raptor_dir,
             index_dir=self._runtime.app.index_dir,
             discord_bot_token=self._runtime.integrations.discord.bot_token,
             discord_guild_allow_list=tuple(self._runtime.security.discord_guild_allow_list),
@@ -253,7 +233,6 @@ class IndexingService:
             crafters_colony_max_articles=integrations.crafters_colony.max_articles,
             pdf_ocr_model_path=integrations.drive.pdf_ocr_model_path,
             embedding_model=self._runtime.providers.embeddings.model,
-            raptor_embedding_model=self._runtime.providers.embeddings.model,
             first_rec_chunk_size=chunking.first_recursive_chunk_size,
             first_rec_chunk_overlap=chunking.first_recursive_chunk_overlap,
             second_rec_enabled=stages.second_recursive_enabled,
@@ -263,49 +242,18 @@ class IndexingService:
             summery_characters=chunking.summary_characters,
             summery_provider=chunking.summary_llm_provider,
             summery_gemini_model=chunking.summary_gemini_model,
-            summery_llama_model=_model_label(chunking.summary_llama_model_path),
-            summery_llama_model_path=chunking.summary_llama_model_path,
-            summery_llama_ctx_size=4096,
             summery_temperature=chunking.summary_temperature,
             summery_max_output_tokens=chunking.summary_max_output_tokens,
             summery_max_retries=2,
             summery_batch_size=chunking.summary_batch_size,
             llm_provider=providers_llm.provider,
             genai_model=providers_llm.gemini_model,
-            llama_model_path=providers_llm.llama_model_path,
-            llama_ctx_size=4096,
-            llama_gpu_layers=providers_llm.gpu_layers,
-            llama_threads=providers_llm.threads,
             temperature=providers_llm.temperature,
             max_output_tokens=providers_llm.max_output_tokens,
-            prop_enabled=stages.proposition_enabled,
-            prop_provider=chunking.proposition_llm_provider,
-            prop_gemini_model=chunking.proposition_gemini_model,
-            prop_llama_model=_model_label(chunking.proposition_llama_model_path),
-            prop_llama_model_path=chunking.proposition_llama_model_path,
-            prop_llama_ctx_size=4096,
-            prop_temperature=chunking.proposition_temperature,
-            prop_max_output_tokens=chunking.proposition_max_output_tokens,
-            prop_max_retries=chunking.proposition_max_retries,
-            raptor_enabled=stages.raptor_enabled,
-            raptor_cluster_max_tokens=chunking.raptor_cluster_max_tokens,
-            raptor_summery_max_tokens=chunking.raptor_max_output_tokens,
-            raptor_stop_chunk_count=chunking.raptor_stop_chunk_count,
-            raptor_k_max=chunking.raptor_k_max,
-            raptor_k_selection=chunking.raptor_k_selection,
-            raptor_summery_provider=chunking.raptor_llm_provider,
-            raptor_summery_gemini_model=chunking.raptor_gemini_model,
-            raptor_summery_llama_model=_model_label(chunking.raptor_llama_model_path),
-            raptor_summery_llama_model_path=chunking.raptor_llama_model_path,
-            raptor_summery_llama_ctx_size=4096,
-            raptor_summery_temperature=chunking.raptor_temperature,
-            raptor_summery_max_retries=chunking.raptor_max_retries,
             clear_raw_data=refresh.clear_raw_data,
             clear_first_rec_chunk_data=refresh.clear_first_recursive_chunk_data,
             clear_second_rec_chunk_data=refresh.clear_second_recursive_chunk_data,
             clear_summery_chunk_data=refresh.clear_summary_chunk_data,
-            clear_prop_chunk_data=refresh.clear_proposition_chunk_data,
-            clear_raptor_chunk_data=refresh.clear_raptor_chunk_data,
             update_raw_data=refresh.update_raw_data,
             update_first_rec_chunk_data=refresh.update_first_recursive_chunk_data,
             update_second_rec_chunk_data=refresh.update_second_recursive_chunk_data,
@@ -313,8 +261,6 @@ class IndexingService:
                 refresh.update_sparse_second_recursive_chunk_data
             ),
             update_summery_chunk_data=refresh.update_summary_chunk_data,
-            update_prop_chunk_data=refresh.update_proposition_chunk_data,
-            update_raptor_chunk_data=refresh.update_raptor_chunk_data,
             sudachi_mode=retrieval.sudachi_mode,
             sparse_bm25_k1=retrieval.sparse_bm25_k1,
             sparse_bm25_b=retrieval.sparse_bm25_b,
@@ -326,12 +272,6 @@ class IndexingService:
         defaults = {
             "PROMPT_LLM_CHUNK_SYSTEM_PROMPT": (
                 "You are a careful Japanese document chunking assistant."
-            ),
-            "PROMPT_PROPOSITION_CHUNK_TEMPLATE": (
-                "次の本文を命題単位で分解し、JSON配列のみを出力してください。"
-                "\\n- 1要素1命題"
-                "\\n- 重複と空要素は禁止"
-                "\\n\\n本文:\\n{text}"
             ),
             "PROMPT_SUMMERY_CHUNK_MESSAGES_TEMPLATE": (
                 "次の会話ログを{target_characters}文字以内で要約してください。"
@@ -346,14 +286,6 @@ class IndexingService:
             "PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE": (
                 "次の本文を{target_characters}文字以内で要約してください。"
                 "\\n元ファイル: {drive_path_display}"
-                "\\n\\n本文:\\n{text}"
-            ),
-            "PROMPT_RAPTOR_SUMMARY_SYSTEM_PROMPT": (
-                "You summarize clustered Japanese chunks faithfully."
-            ),
-            "PROMPT_RAPTOR_SUMMARY_TEMPLATE": (
-                "次の複数チャンクを統合し、重要情報を維持して要約してください。"
-                "\\n目安トークン数: {target_tokens}"
                 "\\n\\n本文:\\n{text}"
             ),
         }
@@ -383,7 +315,6 @@ class IndexingService:
     ) -> None:
         from kumc_agent.infra.indexing.chunking import (
             message_chunk_jsonl_dir,
-            proposition_chunk_jsonl_dir,
             recursive_chunk_dir,
             recursive_chunk_jsonl_dir,
             sparse_chunk_jsonl_dir,
@@ -394,8 +325,6 @@ class IndexingService:
             MESSAGE_SEPARATORS,
             SHEETS_SEPARATORS,
         )
-        from kumc_agent.infra.indexing.raptor import raptor_chunk_global
-
         refresh = self._runtime.indexing.refresh
         stages = self._runtime.indexing.stages
         chunking = self._runtime.indexing.chunking
@@ -698,74 +627,6 @@ class IndexingService:
                 )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
 
-        if stages.proposition_enabled and self._should_run_stage(
-            stage_name="proposition",
-            selected=selected,
-        ):
-            if not stages.second_recursive_enabled:
-                logger.warning(
-                    "Proposition chunking is enabled but SECOND_REC is disabled. Skipping."
-                )
-            else:
-                for input_dir, output_dir in (
-                    (self._second_rec_docs_dir, self._prop_docs_dir),
-                    (self._second_rec_sheets_dir, self._prop_sheets_dir),
-                    (self._second_rec_hatenablog_dir, self._prop_hatenablog_dir),
-                    (
-                        self._second_rec_crafters_colony_dir,
-                        self._prop_crafters_colony_dir,
-                    ),
-                    (self._second_rec_notion_dir, self._prop_notion_dir),
-                ):
-                    if not input_dir.exists():
-                        continue
-                    proposition_chunk_jsonl_dir(
-                        input_chunk_dir=input_dir,
-                        output_chunk_dir=output_dir,
-                        config=legacy_cfg,
-                        skip_existing=not refresh.clear_proposition_chunk_data,
-                        update_existing=refresh.update_proposition_chunk_data,
-                        sync_deleted=refresh.update_proposition_chunk_data,
-                    )
-        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
-
-        if stages.raptor_enabled and self._should_run_stage(
-            stage_name="raptor",
-            selected=selected,
-        ):
-            if stages.summary_enabled:
-                raptor_input_dirs = [
-                    self._summary_docs_dir,
-                    self._summary_sheets_dir,
-                    self._summary_hatenablog_dir,
-                    self._summary_crafters_colony_dir,
-                    self._summary_notion_dir,
-                ]
-            elif stages.second_recursive_enabled:
-                raptor_input_dirs = [
-                    self._second_rec_docs_dir,
-                    self._second_rec_sheets_dir,
-                    self._second_rec_hatenablog_dir,
-                    self._second_rec_crafters_colony_dir,
-                    self._second_rec_notion_dir,
-                ]
-            else:
-                raptor_input_dirs = [
-                    self._first_rec_docs_dir,
-                    self._first_rec_sheets_dir,
-                    self._first_rec_hatenablog_dir,
-                    self._first_rec_crafters_colony_dir,
-                    self._first_rec_notion_dir,
-                ]
-            raptor_chunk_global(
-                input_chunk_dirs=raptor_input_dirs,
-                output_chunk_dir=self._raptor_dir,
-                config=legacy_cfg,
-                skip_existing=not refresh.clear_raptor_chunk_data,
-                update_existing=refresh.update_raptor_chunk_data,
-                sync_deleted=refresh.update_raptor_chunk_data,
-            )
-
     def _load_index_chunks_from_legacy_dirs(self, *, legacy_cfg) -> list[Chunk]:
         base_dirs: list[Path] = []
         if legacy_cfg.second_rec_enabled:
@@ -801,20 +662,6 @@ class IndexingService:
         chunks.extend(self._load_legacy_chunks_from_dirs(base_dirs))
         if self._second_rec_vc_dir.exists():
             chunks.extend(self._load_legacy_chunks_from_dirs([self._second_rec_vc_dir]))
-        if legacy_cfg.prop_enabled and legacy_cfg.second_rec_enabled:
-            chunks.extend(
-                self._load_legacy_chunks_from_dirs(
-                    [
-                        self._prop_docs_dir,
-                        self._prop_sheets_dir,
-                        self._prop_hatenablog_dir,
-                        self._prop_crafters_colony_dir,
-                        self._prop_notion_dir,
-                    ]
-                )
-            )
-        if legacy_cfg.raptor_enabled:
-            chunks.extend(self._load_legacy_chunks_from_dirs([self._raptor_dir]))
         return chunks
 
     def _load_legacy_chunks_from_dirs(self, chunk_dirs: list[Path]) -> list[Chunk]:
@@ -861,12 +708,7 @@ class IndexingService:
         ).strip()
         stage = str(metadata.get("chunk_stage") or "").strip()
         chunk_id = self._to_int(metadata.get("chunk_id"), fallback=fallback_index)
-        raptor_level = str(metadata.get("raptor_level") or "")
-        raptor_cluster = str(metadata.get("raptor_cluster_id") or "")
-        return stable_hash(
-            f"{source_type}|{source_name}|{stage}|{chunk_id}|{raptor_level}|"
-            f"{raptor_cluster}|{text[:256]}"
-        )
+        return stable_hash(f"{source_type}|{source_name}|{stage}|{chunk_id}|{text[:256]}")
 
     def _legacy_chunk_to_domain_chunk(
         self,
@@ -1308,111 +1150,6 @@ class IndexingService:
             "ローカルフォールバック回答" in text
             or text.endswith("回答生成に失敗しました。")
         )
-
-    def _load_or_build_proposition_chunks(
-        self,
-        *,
-        second_chunks: list[Chunk],
-        enabled: bool,
-        should_update: bool,
-        force: bool,
-        selected: set[str],
-    ) -> list[Chunk]:
-        if not enabled or not second_chunks:
-            return []
-        stage_name = "proposition"
-        if not force and not should_update and self._stage_exists(self._prop_dir):
-            return self._load_stage_chunks(self._prop_dir)
-        if selected and stage_name not in selected and self._stage_exists(self._prop_dir):
-            return self._load_stage_chunks(self._prop_dir)
-
-        chunks: list[Chunk] = []
-        out_index = 0
-        for chunk in second_chunks:
-            sentences = [
-                sentence.strip()
-                for sentence in re.split(r"[。\n]+", chunk.text or "")
-                if sentence.strip()
-            ]
-            for sentence in sentences:
-                metadata = dict(chunk.metadata)
-                metadata["chunk_stage"] = "proposition"
-                metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
-                metadata["chunk_id"] = out_index
-                chunks.append(
-                    Chunk(
-                        id=stable_hash(f"{chunk.id}:prop:{out_index}:{sentence[:64]}"),
-                        document_id=chunk.document_id,
-                        text=sentence,
-                        index=out_index,
-                        metadata=metadata,
-                    )
-                )
-                out_index += 1
-        self._write_stage_chunks(self._prop_dir, chunks)
-        return chunks
-
-    def _load_or_build_raptor_chunks(
-        self,
-        *,
-        source_chunks: list[Chunk],
-        enabled: bool,
-        should_update: bool,
-        force: bool,
-        selected: set[str],
-    ) -> list[Chunk]:
-        if not enabled or not source_chunks:
-            return []
-        stage_name = "raptor"
-        if not force and not should_update and self._stage_exists(self._raptor_dir):
-            return self._load_stage_chunks(self._raptor_dir)
-        if selected and stage_name not in selected and self._stage_exists(self._raptor_dir):
-            return self._load_stage_chunks(self._raptor_dir)
-
-        grouped: dict[str, list[Chunk]] = defaultdict(list)
-        for chunk in source_chunks:
-            grouped[chunk.document_id].append(chunk)
-
-        out: list[Chunk] = []
-        out_index = 0
-        for document_id, chunks in grouped.items():
-            merged = " ".join(chunk.text.strip() for chunk in chunks[:5] if chunk.text.strip())
-            if not merged:
-                continue
-            summary = merged[:512]
-            metadata = dict(chunks[0].metadata)
-            metadata["chunk_stage"] = "raptor"
-            metadata["chunk_id"] = out_index
-            out.append(
-                Chunk(
-                    id=stable_hash(f"{document_id}:raptor:{out_index}:{summary[:64]}"),
-                    document_id=document_id,
-                    text=summary,
-                    index=out_index,
-                    metadata=metadata,
-                )
-            )
-            out_index += 1
-        self._write_stage_chunks(self._raptor_dir, out)
-        return out
-
-    @staticmethod
-    def _compose_index_chunks(
-        *,
-        first_chunks: list[Chunk],
-        second_chunks: list[Chunk],
-        proposition_chunks: list[Chunk],
-        raptor_chunks: list[Chunk],
-        second_enabled: bool,
-        proposition_enabled: bool,
-        raptor_enabled: bool,
-    ) -> list[Chunk]:
-        chunks = list(second_chunks if second_enabled and second_chunks else first_chunks)
-        if proposition_enabled and proposition_chunks:
-            chunks.extend(proposition_chunks)
-        if raptor_enabled and raptor_chunks:
-            chunks.extend(raptor_chunks)
-        return chunks
 
     def _build_keyword_indexes_payload(
         self,

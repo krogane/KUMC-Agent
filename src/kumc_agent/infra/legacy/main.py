@@ -15,9 +15,6 @@ from kumc_agent.infra.legacy.pipeline.rag_pipeline import GenerationCancelled, R
 from kumc_agent.infra.legacy.pipeline.prompts import ChatHistoryEntry
 from kumc_agent.infra.legacy.config import AppConfig, EmbeddingFactory
 from kumc_agent.infra.legacy.pipeline.function_calling import FunctionRoutingDecision, decide_tools
-from kumc_agent.infra.legacy.pipeline.llm_clients import (
-    generate_with_llama_config,
-)
 from kumc_agent.infra.legacy.vc import VoiceMeetingManager
 
 
@@ -432,21 +429,6 @@ def _warmup_answer_llm() -> None:
             "Warmup: answer LLM skipped (Gemini API warmup is disabled)."
         )
         return
-    if provider == "llama":
-        generate_with_llama_config(
-            messages=[
-                {"role": "system", "content": "You are a warmup assistant."},
-                {"role": "user", "content": "hello"},
-            ],
-            model_path=APP_CONFIG.llama_model_path,
-            ctx_size=APP_CONFIG.llama_ctx_size,
-            threads=APP_CONFIG.llama_threads,
-            gpu_layers=APP_CONFIG.llama_gpu_layers,
-            temperature=APP_CONFIG.temperature,
-            max_output_tokens=_warmup_max_tokens(APP_CONFIG.max_output_tokens),
-            stop=["\n---"],
-        )
-        return
     raise ValueError(f"Unsupported llm_provider: {APP_CONFIG.llm_provider}")
 
 
@@ -455,22 +437,6 @@ def _warmup_no_rag_llm() -> None:
     if provider == "gemini":
         logger.info(
             "Warmup: no-rag LLM skipped (Gemini API warmup is disabled)."
-        )
-        return
-    if provider == "llama":
-        generate_with_llama_config(
-            messages=[
-                {"role": "system", "content": "You are a warmup assistant."},
-                {"role": "user", "content": "hello"},
-            ],
-            model_path=APP_CONFIG.no_rag_llama_model_path,
-            ctx_size=APP_CONFIG.no_rag_llama_ctx_size,
-            threads=APP_CONFIG.llama_threads,
-            gpu_layers=APP_CONFIG.llama_gpu_layers,
-            temperature=APP_CONFIG.no_rag_temperature,
-            max_output_tokens=_warmup_max_tokens(
-                APP_CONFIG.no_rag_max_output_tokens
-            ),
         )
         return
     raise ValueError(
@@ -485,23 +451,6 @@ def _warmup_refusal_llm() -> None:
             "Warmup: refusal LLM skipped (Gemini API warmup is disabled)."
         )
         return
-    if provider == "llama":
-        generate_with_llama_config(
-            messages=[
-                {"role": "system", "content": "You are a refusal warmup assistant."},
-                {"role": "user", "content": "hello"},
-            ],
-            model_path=APP_CONFIG.refusal_llama_model_path,
-            ctx_size=APP_CONFIG.refusal_llama_ctx_size,
-            threads=APP_CONFIG.llama_threads,
-            gpu_layers=APP_CONFIG.llama_gpu_layers,
-            temperature=APP_CONFIG.refusal_temperature,
-            max_output_tokens=_warmup_max_tokens(
-                APP_CONFIG.refusal_max_output_tokens
-            ),
-            stop=["\n---"],
-        )
-        return
     raise ValueError(
         f"Unsupported refusal_llm_provider: {APP_CONFIG.refusal_llm_provider}"
     )
@@ -509,24 +458,7 @@ def _warmup_refusal_llm() -> None:
 
 def _warmup_rag_idea_llm() -> None:
     provider = (APP_CONFIG.llm_provider or "").lower()
-    if provider != "llama":
-        logger.info("Warmup: rag-idea LLM skipped (provider=%s).", provider)
-        return
-    generate_with_llama_config(
-        messages=[
-            {"role": "system", "content": "You are a creative warmup assistant."},
-            {"role": "user", "content": "hello"},
-        ],
-        model_path=APP_CONFIG.llama_model_path,
-        ctx_size=APP_CONFIG.llama_ctx_size,
-        threads=APP_CONFIG.llama_threads,
-        gpu_layers=APP_CONFIG.llama_gpu_layers,
-        temperature=APP_CONFIG.rag_idea_temperature,
-        max_output_tokens=_warmup_max_tokens(
-            APP_CONFIG.max_output_tokens
-        ),
-        stop=["\n---"],
-    )
+    logger.info("Warmup: rag-idea LLM skipped (provider=%s).", provider)
 
 
 def _warmup_models(*, trigger: str) -> None:

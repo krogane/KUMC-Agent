@@ -14,22 +14,19 @@ from kumc_agent.infra.llm.gemini_rate_limit import wait_for_gemini_rate_limit
 ## コンフィグ ##
 # Embedding Model Settings
 DEFAULT_EMBEDDING_MODEL: str = "embeddinggemma-300M-Q8_0.gguf"
-DEFAULT_RAPTOR_EMBEDDING_MODEL: str = "multilingual-e5-large-f16.gguf"
 DEFAULT_CROSS_ENCODER_MODEL: str = ""
-DEFAULT_LLM_MODEL_DIR: str = "app/model/llm"
 DEFAULT_EMBEDDING_MODEL_DIR: str = "app/model/embedding"
 DEFAULT_CROSS_ENCODER_MODEL_DIR: str = "app/model/cross-encoder"
 DEFAULT_WHISPER_MODEL_DIR: str = "app/model/whisper"
 DEFAULT_PDF_OCR_MODEL: str = "app/model/ocr/tencent/HunyuanOCR"
 
 # Answering LLM Settings
-DEFAULT_LLM_PROVIDER: str = "llama" # gemini or llama
+DEFAULT_LLM_PROVIDER: str = "gemini"
 DEFAULT_GENAI_MODEL: str = "gemini-3-flash-preview" # gemini
 DEFAULT_TEMPERATURE: float = 0.0
 DEFAULT_THINKING_LEVEL: str = "minimal"
 DEFAULT_GEMINI_REQUESTS_PER_MINUTE: int = 60
 DEFAULT_GEMINI_SUMMARY_REQUESTS_PER_MINUTE: int = DEFAULT_GEMINI_REQUESTS_PER_MINUTE
-DEFAULT_LLAMA_CTX_SIZE: int = 4096 # llama
 DEFAULT_MAX_OUTPUT_TOKENS: int = 512
 DEFAULT_CHAT_HISTORY_ENABLED: bool = False
 DEFAULT_CHAT_HISTORY_MAX_TURNS: int = 5
@@ -43,12 +40,9 @@ _REQUIRED_PROMPT_ENV_NAMES: tuple[str, ...] = (
     "PROMPT_CIRCLE_BASIC_INFO",
     "PROMPT_SYSTEM_RULES",
     "PROMPT_LLM_CHUNK_SYSTEM_PROMPT",
-    "PROMPT_RAPTOR_SUMMARY_SYSTEM_PROMPT",
-    "PROMPT_PROPOSITION_CHUNK_TEMPLATE",
     "PROMPT_SUMMERY_CHUNK_MESSAGES_TEMPLATE",
     "PROMPT_SUMMERY_CHUNK_SHEETS_TEMPLATE",
     "PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE",
-    "PROMPT_RAPTOR_SUMMARY_TEMPLATE",
     "PROMPT_OUTPUT_INSTRUCTIONS_COMMON",
     "PROMPT_OUTPUT_INSTRUCTIONS_RAG",
     "PROMPT_OUTPUT_INSTRUCTIONS_RAG_IDEA",
@@ -71,13 +65,6 @@ _REQUIRED_PROMPT_ENV_NAMES: tuple[str, ...] = (
     "PROMPT_GEMINI_HEADER_OUTPUT_FORMAT",
     "PROMPT_GEMINI_HEADER_INSTRUCTIONS",
     "PROMPT_GEMINI_HEADER_QUESTION",
-    "PROMPT_LLAMA_HEADER_QUESTION",
-    "PROMPT_LLAMA_HEADER_PREVIOUS_ATTEMPT",
-    "PROMPT_LLAMA_HEADER_CIRCLE_INFO",
-    "PROMPT_LLAMA_HEADER_CAPABILITIES",
-    "PROMPT_LLAMA_HEADER_CONTEXT",
-    "PROMPT_LLAMA_HEADER_OUTPUT_FORMAT",
-    "PROMPT_LLAMA_HEADER_INSTRUCTIONS",
     "PROMPT_MATERIAL_SEARCH_SELECTOR_SYSTEM",
     "PROMPT_MATERIAL_SEARCH_SELECTOR_USER_TEMPLATE",
 )
@@ -160,7 +147,6 @@ DEFAULT_SYSTEM_RULES: Sequence[str] = _DailySystemRules()
 # No-RAG Answer LLM Settings
 DEFAULT_NO_RAG_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_NO_RAG_GENAI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_NO_RAG_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_NO_RAG_TEMPERATURE: float = DEFAULT_TEMPERATURE
 DEFAULT_NO_RAG_MAX_OUTPUT_TOKENS: int = DEFAULT_MAX_OUTPUT_TOKENS
 DEFAULT_NO_RAG_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
@@ -168,16 +154,13 @@ DEFAULT_NO_RAG_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
 # Refusal Answer LLM Settings
 DEFAULT_REFUSAL_LLM_PROVIDER: str = DEFAULT_NO_RAG_LLM_PROVIDER
 DEFAULT_REFUSAL_GENAI_MODEL: str = DEFAULT_NO_RAG_GENAI_MODEL
-DEFAULT_REFUSAL_LLAMA_MODEL: str = ""
-DEFAULT_REFUSAL_LLAMA_CTX_SIZE: int = DEFAULT_NO_RAG_LLAMA_CTX_SIZE
 DEFAULT_REFUSAL_TEMPERATURE: float = DEFAULT_NO_RAG_TEMPERATURE
 DEFAULT_REFUSAL_MAX_OUTPUT_TOKENS: int = DEFAULT_NO_RAG_MAX_OUTPUT_TOKENS
 DEFAULT_REFUSAL_THINKING_LEVEL: str = DEFAULT_NO_RAG_THINKING_LEVEL
 
 # Function Calling (RAG routing) Settings
-DEFAULT_FUNCTION_CALL_PROVIDER: str = "gemini"  # gemini or llama_cpp
+DEFAULT_FUNCTION_CALL_PROVIDER: str = "gemini"
 DEFAULT_FUNCTION_CALL_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_FUNCTION_CALL_LLAMA_MODEL: str = ""
 DEFAULT_FUNCTION_CALL_TEMPERATURE: float = 0.0
 DEFAULT_FUNCTION_CALL_MAX_NEW_TOKENS: int = 64
 DEFAULT_FUNCTION_CALL_MAX_RETRIES: int = 2
@@ -192,8 +175,6 @@ DEFAULT_MATERIAL_SEARCH_SUMMARY_MISSING_FIRST_REC_TOP_K: int = 3
 DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_RETRIES: int = 2
 DEFAULT_MATERIAL_SEARCH_SELECTOR_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL: str = "gemma-3n-E2B-it-IQ4_XS.gguf"
-DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_MATERIAL_SEARCH_SELECTOR_TEMPERATURE: float = 0.0
 DEFAULT_MATERIAL_SEARCH_SELECTOR_MAX_OUTPUT_TOKENS: int = 128
 DEFAULT_MATERIAL_SEARCH_SELECTOR_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
@@ -210,10 +191,8 @@ DEFAULT_SECOND_REC_CHUNK_OVERLAP: int = 32
 # Summery Chunking Settings
 DEFAULT_SUMMERY_ENABLED: bool = True
 DEFAULT_SUMMERY_CHARACTERS: int = 200
-DEFAULT_SUMMERY_PROVIDER: str = "llama"
+DEFAULT_SUMMERY_PROVIDER: str = "gemini"
 DEFAULT_SUMMERY_GEMINI_MODEL: str = "gemini-3-flash-preview"
-DEFAULT_SUMMERY_LLAMA_MODEL: str = "gemma-3n-E2B-it-IQ4_XS.gguf"
-DEFAULT_SUMMERY_LLAMA_CTX_SIZE: int = 2048
 DEFAULT_SUMMERY_MAX_OUTPUT_TOKENS: int = 1024
 DEFAULT_SUMMERY_TEMPERATURE: float = 0.2
 DEFAULT_SUMMERY_MAX_RETRIES: int = 2
@@ -222,43 +201,11 @@ DEFAULT_SUMMERY_BATCH_SIZE: int = 1
 def get_llm_chunk_system_prompt() -> str:
     return get_required_prompt_env("PROMPT_LLM_CHUNK_SYSTEM_PROMPT")
 
-# Proposition Chunking Settings
-DEFAULT_PROP_ENABLED: bool = False
-DEFAULT_PROP_PROVIDER: str = "llama"
-DEFAULT_PROP_GEMINI_MODEL: str = "gemini-3-flash-preview"
-DEFAULT_PROP_LLAMA_MODEL: str = "gemma-3n-E2B-it-IQ4_XS.gguf"
-DEFAULT_PROP_TEMPERATURE: float = 0.2
-DEFAULT_PROP_LLAMA_CTX_SIZE: int = 2048
-DEFAULT_PROP_MAX_OUTPUT_TOKENS: int = 4096
-DEFAULT_PROP_MAX_RETRIES: int = 2
-
-# RAPTOR Settings
-DEFAULT_RAPTOR_ENABLED: bool = False
-DEFAULT_RAPTOR_SUMMERY_PROVIDER: str = "llama"
-DEFAULT_RAPTOR_SUMMERY_GEMINI_MODEL: str = "gemini-3-flash-preview"
-DEFAULT_RAPTOR_SUMMERY_LLAMA_MODEL: str = "gemma-3n-E2B-it-IQ4_XS.gguf"
-DEFAULT_RAPTOR_SUMMERY_TEMPERATURE: float = 0.2
-DEFAULT_RAPTOR_SUMMERY_LLAMA_CTX_SIZE: int = 4096
-DEFAULT_RAPTOR_CLUSTER_MAX_TOKENS: int = 1024
-DEFAULT_RAPTOR_SUMMERY_MAX_TOKENS: int = 256
-DEFAULT_RAPTOR_STOP_CHUNK_COUNT: int = 20
-DEFAULT_RAPTOR_K_MAX: int = 8
-DEFAULT_RAPTOR_K_SELECTION: str = "elbow"
-DEFAULT_RAPTOR_SUMMERY_MAX_RETRIES: int = 2
-def get_raptor_summary_system_prompt() -> str:
-    return get_required_prompt_env("PROMPT_RAPTOR_SUMMARY_SYSTEM_PROMPT")
-
-# CPU/GPU Settings
-DEFAULT_LLAMA_GPU_LAYERS: int = 0
-DEFAULT_LLAMA_THREADS: int = 4
-
 # Clear Data Settings
 DEFAULT_CLEAR_RAW_DATA: bool = False
 DEFAULT_CLEAR_FIRST_REC_CHUNK_DATA: bool = False
 DEFAULT_CLEAR_SECOND_REC_CHUNK_DATA: bool = False
 DEFAULT_CLEAR_SUMMERY_CHUNK_DATA: bool = False
-DEFAULT_CLEAR_PROP_CHUNK_DATA: bool = False
-DEFAULT_CLEAR_RAPTOR_CHUNK_DATA: bool = False
 
 # Incremental Update Settings
 DEFAULT_UPDATE_RAW_DATA: bool = True
@@ -266,8 +213,6 @@ DEFAULT_UPDATE_FIRST_REC_CHUNK_DATA: bool = True
 DEFAULT_UPDATE_SECOND_REC_CHUNK_DATA: bool = True
 DEFAULT_UPDATE_SPARSE_SECOND_REC_CHUNK_DATA: bool = True
 DEFAULT_UPDATE_SUMMERY_CHUNK_DATA: bool = True
-DEFAULT_UPDATE_PROP_CHUNK_DATA: bool = True
-DEFAULT_UPDATE_RAPTOR_CHUNK_DATA: bool = True
 
 # Retrieval Settings
 DEFAULT_TOP_K: int = 5
@@ -346,8 +291,6 @@ DEFAULT_VC_SUMMARY_PREVIOUS_MAX: int = 2
 DEFAULT_VC_SUMMARY_TARGET_CHARACTERS: int = 100
 DEFAULT_VC_SUMMARY_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_VC_SUMMARY_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_VC_SUMMARY_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
-DEFAULT_VC_SUMMARY_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_VC_SUMMARY_TEMPERATURE: float = 0.2
 DEFAULT_VC_SUMMARY_MAX_OUTPUT_TOKENS: int = 256
 DEFAULT_VC_SUMMARY_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
@@ -360,15 +303,11 @@ DEFAULT_VC_MINUTES_HISTORY_SUMMARY_MAX: int = 2
 DEFAULT_VC_MINUTES_IMAGE_BATCH_SIZE: int = 10
 DEFAULT_VC_MINUTES_EDIT_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_VC_MINUTES_EDIT_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
-DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_VC_MINUTES_EDIT_TEMPERATURE: float = 0.2
 DEFAULT_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS: int = 512
 DEFAULT_VC_MINUTES_EDIT_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
 DEFAULT_VC_FINAL_SUMMARY_LLM_PROVIDER: str = DEFAULT_LLM_PROVIDER
 DEFAULT_VC_FINAL_SUMMARY_GEMINI_MODEL: str = DEFAULT_GENAI_MODEL
-DEFAULT_VC_FINAL_SUMMARY_LLAMA_MODEL: str = DEFAULT_SUMMERY_LLAMA_MODEL
-DEFAULT_VC_FINAL_SUMMARY_LLAMA_CTX_SIZE: int = DEFAULT_LLAMA_CTX_SIZE
 DEFAULT_VC_FINAL_SUMMARY_TEMPERATURE: float = 0.2
 DEFAULT_VC_FINAL_SUMMARY_MAX_OUTPUT_TOKENS: int = 512
 DEFAULT_VC_FINAL_SUMMARY_THINKING_LEVEL: str = DEFAULT_THINKING_LEVEL
@@ -538,13 +477,6 @@ def render_prompt_template(template_env_name: str, **kwargs: object) -> str:
         ) from exc
 
 
-def build_proposition_chunk_prompt(*, text: str) -> str:
-    return render_prompt_template(
-        "PROMPT_PROPOSITION_CHUNK_TEMPLATE",
-        text=text,
-    )
-
-
 def build_summery_chunk_prompt(
     *,
     text: str,
@@ -579,14 +511,6 @@ def build_summery_chunk_prompt(
     )
 
 
-def build_raptor_summary_prompt(*, text: str, target_tokens: int) -> str:
-    return render_prompt_template(
-        "PROMPT_RAPTOR_SUMMARY_TEMPLATE",
-        target_tokens=target_tokens,
-        text=text,
-    )
-
-
 @dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
@@ -595,8 +519,6 @@ class AppConfig:
     second_rec_chunk_dir: Path
     sparse_second_rec_chunk_dir: Path
     summery_chunk_dir: Path
-    prop_chunk_dir: Path
-    raptor_chunk_dir: Path
     index_dir: Path
     discord_bot_token: str = ""
     discord_guild_allow_list: tuple[int, ...] = ()
@@ -614,7 +536,6 @@ class AppConfig:
     crafters_colony_max_articles: int = DEFAULT_CRAFTERS_COLONY_MAX_ARTICLES
     pdf_ocr_model_path: str = DEFAULT_PDF_OCR_MODEL
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
-    raptor_embedding_model: str = DEFAULT_RAPTOR_EMBEDDING_MODEL
     cross_encoder_model_path: str = DEFAULT_CROSS_ENCODER_MODEL
     first_rec_chunk_size: int = DEFAULT_FIRST_REC_CHUNK_SIZE
     first_rec_chunk_overlap: int = DEFAULT_FIRST_REC_CHUNK_OVERLAP
@@ -625,39 +546,27 @@ class AppConfig:
     summery_characters: int = DEFAULT_SUMMERY_CHARACTERS
     summery_provider: str = DEFAULT_SUMMERY_PROVIDER
     summery_gemini_model: str = DEFAULT_SUMMERY_GEMINI_MODEL
-    summery_llama_model: str = DEFAULT_SUMMERY_LLAMA_MODEL
-    summery_llama_model_path: str = ""
-    summery_llama_ctx_size: int = DEFAULT_SUMMERY_LLAMA_CTX_SIZE
     summery_temperature: float = DEFAULT_SUMMERY_TEMPERATURE
     summery_max_output_tokens: int = DEFAULT_SUMMERY_MAX_OUTPUT_TOKENS
     summery_max_retries: int = DEFAULT_SUMMERY_MAX_RETRIES
     summery_batch_size: int = DEFAULT_SUMMERY_BATCH_SIZE
     llm_provider: str = DEFAULT_LLM_PROVIDER
     genai_model: str = DEFAULT_GENAI_MODEL
-    llama_model_path: str = ""
-    llama_ctx_size: int = DEFAULT_LLAMA_CTX_SIZE
-    llama_gpu_layers: int = DEFAULT_LLAMA_GPU_LAYERS
-    llama_threads: int = DEFAULT_LLAMA_THREADS
     temperature: float = DEFAULT_TEMPERATURE
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     thinking_level: str = DEFAULT_THINKING_LEVEL
     no_rag_llm_provider: str = DEFAULT_NO_RAG_LLM_PROVIDER
     no_rag_genai_model: str = DEFAULT_NO_RAG_GENAI_MODEL
-    no_rag_llama_model_path: str = ""
-    no_rag_llama_ctx_size: int = DEFAULT_NO_RAG_LLAMA_CTX_SIZE
     no_rag_temperature: float = DEFAULT_NO_RAG_TEMPERATURE
     no_rag_max_output_tokens: int = DEFAULT_NO_RAG_MAX_OUTPUT_TOKENS
     no_rag_thinking_level: str = DEFAULT_NO_RAG_THINKING_LEVEL
     refusal_llm_provider: str = DEFAULT_REFUSAL_LLM_PROVIDER
     refusal_genai_model: str = DEFAULT_REFUSAL_GENAI_MODEL
-    refusal_llama_model_path: str = ""
-    refusal_llama_ctx_size: int = DEFAULT_REFUSAL_LLAMA_CTX_SIZE
     refusal_temperature: float = DEFAULT_REFUSAL_TEMPERATURE
     refusal_max_output_tokens: int = DEFAULT_REFUSAL_MAX_OUTPUT_TOKENS
     refusal_thinking_level: str = DEFAULT_REFUSAL_THINKING_LEVEL
     function_call_provider: str = DEFAULT_FUNCTION_CALL_PROVIDER
     function_call_gemini_model: str = DEFAULT_FUNCTION_CALL_GEMINI_MODEL
-    function_call_llama_model_path: str = ""
     function_call_temperature: float = DEFAULT_FUNCTION_CALL_TEMPERATURE
     function_call_max_new_tokens: int = DEFAULT_FUNCTION_CALL_MAX_NEW_TOKENS
     function_call_max_retries: int = DEFAULT_FUNCTION_CALL_MAX_RETRIES
@@ -682,13 +591,6 @@ class AppConfig:
     )
     material_search_selector_gemini_model: str = (
         DEFAULT_MATERIAL_SEARCH_SELECTOR_GEMINI_MODEL
-    )
-    material_search_selector_llama_model: str = (
-        DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL
-    )
-    material_search_selector_llama_model_path: str = ""
-    material_search_selector_llama_ctx_size: int = (
-        DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE
     )
     material_search_selector_temperature: float = (
         DEFAULT_MATERIAL_SEARCH_SELECTOR_TEMPERATURE
@@ -754,15 +656,6 @@ class AppConfig:
     command_prefix: str = DEFAULT_COMMAND_PREFIX
     index_command_prefix: str = DEFAULT_INDEX_COMMAND_PREFIX
     system_rules: Sequence[str] = DEFAULT_SYSTEM_RULES
-    prop_enabled: bool = DEFAULT_PROP_ENABLED
-    prop_provider: str = DEFAULT_PROP_PROVIDER
-    prop_gemini_model: str = DEFAULT_PROP_GEMINI_MODEL
-    prop_llama_model: str = DEFAULT_PROP_LLAMA_MODEL
-    prop_llama_model_path: str = ""
-    prop_llama_ctx_size: int = DEFAULT_PROP_LLAMA_CTX_SIZE
-    prop_temperature: float = DEFAULT_PROP_TEMPERATURE
-    prop_max_output_tokens: int = DEFAULT_PROP_MAX_OUTPUT_TOKENS
-    prop_max_retries: int = DEFAULT_PROP_MAX_RETRIES
     auto_index_enabled: bool = DEFAULT_AUTO_INDEX_ENABLED
     auto_index_weekdays: tuple[int, ...] = ()
     auto_index_hour: int = 0
@@ -804,9 +697,6 @@ class AppConfig:
     )
     vc_summary_llm_provider: str = DEFAULT_VC_SUMMARY_LLM_PROVIDER
     vc_summary_gemini_model: str = DEFAULT_VC_SUMMARY_GEMINI_MODEL
-    vc_summary_llama_model: str = DEFAULT_VC_SUMMARY_LLAMA_MODEL
-    vc_summary_llama_model_path: str = ""
-    vc_summary_llama_ctx_size: int = DEFAULT_VC_SUMMARY_LLAMA_CTX_SIZE
     vc_summary_temperature: float = DEFAULT_VC_SUMMARY_TEMPERATURE
     vc_summary_max_output_tokens: int = (
         DEFAULT_VC_SUMMARY_MAX_OUTPUT_TOKENS
@@ -821,9 +711,6 @@ class AppConfig:
     vc_minutes_image_batch_size: int = DEFAULT_VC_MINUTES_IMAGE_BATCH_SIZE
     vc_minutes_edit_llm_provider: str = DEFAULT_VC_MINUTES_EDIT_LLM_PROVIDER
     vc_minutes_edit_gemini_model: str = DEFAULT_VC_MINUTES_EDIT_GEMINI_MODEL
-    vc_minutes_edit_llama_model: str = DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL
-    vc_minutes_edit_llama_model_path: str = ""
-    vc_minutes_edit_llama_ctx_size: int = DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE
     vc_minutes_edit_temperature: float = DEFAULT_VC_MINUTES_EDIT_TEMPERATURE
     vc_minutes_edit_max_output_tokens: int = (
         DEFAULT_VC_MINUTES_EDIT_MAX_OUTPUT_TOKENS
@@ -833,11 +720,6 @@ class AppConfig:
         DEFAULT_VC_FINAL_SUMMARY_LLM_PROVIDER
     )
     vc_final_summary_gemini_model: str = DEFAULT_VC_FINAL_SUMMARY_GEMINI_MODEL
-    vc_final_summary_llama_model: str = DEFAULT_VC_FINAL_SUMMARY_LLAMA_MODEL
-    vc_final_summary_llama_model_path: str = ""
-    vc_final_summary_llama_ctx_size: int = (
-        DEFAULT_VC_FINAL_SUMMARY_LLAMA_CTX_SIZE
-    )
     vc_final_summary_temperature: float = (
         DEFAULT_VC_FINAL_SUMMARY_TEMPERATURE
     )
@@ -847,25 +729,10 @@ class AppConfig:
     vc_final_summary_thinking_level: str = (
         DEFAULT_VC_FINAL_SUMMARY_THINKING_LEVEL
     )
-    raptor_enabled: bool = DEFAULT_RAPTOR_ENABLED
-    raptor_cluster_max_tokens: int = DEFAULT_RAPTOR_CLUSTER_MAX_TOKENS
-    raptor_stop_chunk_count: int = DEFAULT_RAPTOR_STOP_CHUNK_COUNT
-    raptor_k_max: int = DEFAULT_RAPTOR_K_MAX
-    raptor_k_selection: str = DEFAULT_RAPTOR_K_SELECTION
-    raptor_summery_max_tokens: int = DEFAULT_RAPTOR_SUMMERY_MAX_TOKENS
-    raptor_summery_provider: str = DEFAULT_RAPTOR_SUMMERY_PROVIDER
-    raptor_summery_gemini_model: str = DEFAULT_RAPTOR_SUMMERY_GEMINI_MODEL
-    raptor_summery_llama_model: str = DEFAULT_RAPTOR_SUMMERY_LLAMA_MODEL
-    raptor_summery_llama_model_path: str = ""
-    raptor_summery_llama_ctx_size: int = DEFAULT_RAPTOR_SUMMERY_LLAMA_CTX_SIZE
-    raptor_summery_temperature: float = DEFAULT_RAPTOR_SUMMERY_TEMPERATURE
-    raptor_summery_max_retries: int = DEFAULT_RAPTOR_SUMMERY_MAX_RETRIES
     clear_raw_data: bool = DEFAULT_CLEAR_RAW_DATA
     clear_first_rec_chunk_data: bool = DEFAULT_CLEAR_FIRST_REC_CHUNK_DATA
     clear_second_rec_chunk_data: bool = DEFAULT_CLEAR_SECOND_REC_CHUNK_DATA
     clear_summery_chunk_data: bool = DEFAULT_CLEAR_SUMMERY_CHUNK_DATA
-    clear_prop_chunk_data: bool = DEFAULT_CLEAR_PROP_CHUNK_DATA
-    clear_raptor_chunk_data: bool = DEFAULT_CLEAR_RAPTOR_CHUNK_DATA
     update_raw_data: bool = DEFAULT_UPDATE_RAW_DATA
     update_first_rec_chunk_data: bool = DEFAULT_UPDATE_FIRST_REC_CHUNK_DATA
     update_second_rec_chunk_data: bool = DEFAULT_UPDATE_SECOND_REC_CHUNK_DATA
@@ -873,18 +740,14 @@ class AppConfig:
         DEFAULT_UPDATE_SPARSE_SECOND_REC_CHUNK_DATA
     )
     update_summery_chunk_data: bool = DEFAULT_UPDATE_SUMMERY_CHUNK_DATA
-    update_prop_chunk_data: bool = DEFAULT_UPDATE_PROP_CHUNK_DATA
-    update_raptor_chunk_data: bool = DEFAULT_UPDATE_RAPTOR_CHUNK_DATA
 
     @classmethod
     def from_here(
         cls,
         *,
         embedding_model: str | None = None,
-        raptor_embedding_model: str | None = None,
         cross_encoder_model_path: str | None = None,
         embedding_model_dir: str | None = None,
-        llm_model_dir: str | None = None,
         whisper_model_dir: str | None = None,
         cross_encoder_model_dir: str | None = None,
         first_rec_chunk_size: int | None = None,
@@ -896,8 +759,6 @@ class AppConfig:
         summery_characters: int | None = None,
         summery_provider: str | None = None,
         summery_gemini_model: str | None = None,
-        summery_llama_model: str | None = None,
-        summery_llama_ctx_size: int | None = None,
         summery_temperature: float | None = None,
         summery_max_output_tokens: int | None = None,
         summery_max_retries: int | None = None,
@@ -917,30 +778,21 @@ class AppConfig:
         crafters_colony_max_pages: int | None = None,
         crafters_colony_max_articles: int | None = None,
         pdf_ocr_model: str | None = None,
-        llama_model: str | None = None,
-        llama_ctx_size: int | None = None,
-        llama_gpu_layers: int | None = None,
-        llama_threads: int | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         thinking_level: str | None = None,
         no_rag_llm_provider: str | None = None,
         no_rag_genai_model: str | None = None,
-        no_rag_llama_model: str | None = None,
-        no_rag_llama_ctx_size: int | None = None,
         no_rag_temperature: float | None = None,
         no_rag_max_output_tokens: int | None = None,
         no_rag_thinking_level: str | None = None,
         refusal_llm_provider: str | None = None,
         refusal_genai_model: str | None = None,
-        refusal_llama_model: str | None = None,
-        refusal_llama_ctx_size: int | None = None,
         refusal_temperature: float | None = None,
         refusal_max_output_tokens: int | None = None,
         refusal_thinking_level: str | None = None,
         function_call_provider: str | None = None,
         function_call_gemini_model: str | None = None,
-        function_call_llama_model: str | None = None,
         function_call_temperature: float | None = None,
         function_call_max_new_tokens: int | None = None,
         function_call_max_retries: int | None = None,
@@ -986,54 +838,27 @@ class AppConfig:
         special_channel_custom_instruction: str | None = None,
         answer_record_log_enabled: bool | None = None,
         answer_record_log_path: str | None = None,
-        prop_enabled: bool | None = None,
-        prop_provider: str | None = None,
-        prop_gemini_model: str | None = None,
-        prop_llama_model: str | None = None,
-        prop_llama_ctx_size: int | None = None,
-        prop_temperature: float | None = None,
-        prop_max_output_tokens: int | None = None,
-        prop_max_retries: int | None = None,
         auto_index_enabled: bool | None = None,
         auto_index_weekdays: str | None = None,
         auto_index_time: str | None = None,
         warmup_interval_minutes: int | None = None,
         index_update_estimate_min_minutes: int | None = None,
         index_update_estimate_max_minutes: int | None = None,
-        raptor_enabled: bool | None = None,
-        raptor_cluster_max_tokens: int | None = None,
-        raptor_summery_max_tokens: int | None = None,
-        raptor_stop_chunk_count: int | None = None,
-        raptor_k_max: int | None = None,
-        raptor_k_selection: str | None = None,
-        raptor_summery_provider: str | None = None,
-        raptor_summery_gemini_model: str | None = None,
-        raptor_summery_llama_model: str | None = None,
-        raptor_summery_llama_ctx_size: int | None = None,
-        raptor_summery_temperature: float | None = None,
-        raptor_summery_max_retries: int | None = None,
         clear_raw_data: bool | None = None,
         clear_first_rec_chunk_data: bool | None = None,
         clear_second_rec_chunk_data: bool | None = None,
         clear_summery_chunk_data: bool | None = None,
-        clear_prop_chunk_data: bool | None = None,
-        clear_raptor_chunk_data: bool | None = None,
         update_raw_data: bool | None = None,
         update_first_rec_chunk_data: bool | None = None,
         update_second_rec_chunk_data: bool | None = None,
         update_sparse_second_rec_chunk_data: bool | None = None,
         update_summery_chunk_data: bool | None = None,
-        update_prop_chunk_data: bool | None = None,
-        update_raptor_chunk_data: bool | None = None,
         command_prefix: str | None = None,
         system_rules: Sequence[str] | None = None,
         base_dir: Path | None = None,
     ) -> "AppConfig":
         resolved_base = base_dir or Path(__file__).resolve().parents[2]
         ensure_required_prompt_envs()
-        llm_model_dir_value = llm_model_dir or os.getenv(
-            "LLM_MODEL_DIR", DEFAULT_LLM_MODEL_DIR
-        )
         embedding_model_dir_value = embedding_model_dir or os.getenv(
             "EMBEDDING_MODEL_DIR", DEFAULT_EMBEDDING_MODEL_DIR
         )
@@ -1044,7 +869,6 @@ class AppConfig:
             "WHISPER_MODEL_DIR", DEFAULT_WHISPER_MODEL_DIR
         )
 
-        llm_model_dir_path = _resolve_dir(llm_model_dir_value, base_dir=resolved_base)
         embedding_model_dir_path = _resolve_dir(
             embedding_model_dir_value, base_dir=resolved_base
         )
@@ -1067,56 +891,6 @@ class AppConfig:
             base_dir=resolved_base,
         )
 
-        raw_raptor_embedding_model_name = (
-            raptor_embedding_model
-            if raptor_embedding_model is not None
-            else os.getenv(
-                "RAPTOR_EMBEDDING_MODEL", DEFAULT_RAPTOR_EMBEDDING_MODEL
-            )
-        )
-        if not raw_raptor_embedding_model_name:
-            raw_raptor_embedding_model_name = raw_embedding_model_name
-        resolved_raptor_embedding_model = _resolve_model_path(
-            model_name=raw_raptor_embedding_model_name,
-            model_dir=embedding_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_llama_model_name = (
-            llama_model
-            if llama_model is not None
-            else os.getenv("LLAMA_MODEL") or os.getenv("LLAMA_MODEL_PATH", "")
-        )
-        resolved_llama_model_path = _resolve_model_path(
-            model_name=raw_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_no_rag_llama_model_name = (
-            no_rag_llama_model
-            if no_rag_llama_model is not None
-            else os.getenv("NO_RAG_LLAMA_MODEL", "")
-        )
-        if not raw_no_rag_llama_model_name:
-            raw_no_rag_llama_model_name = raw_llama_model_name
-        resolved_no_rag_llama_model_path = _resolve_model_path(
-            model_name=raw_no_rag_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-        raw_refusal_llama_model_name = (
-            refusal_llama_model
-            if refusal_llama_model is not None
-            else os.getenv("REFUSAL_LLAMA_MODEL", DEFAULT_REFUSAL_LLAMA_MODEL)
-        )
-        if not raw_refusal_llama_model_name:
-            raw_refusal_llama_model_name = raw_no_rag_llama_model_name
-        resolved_refusal_llama_model_path = _resolve_model_path(
-            model_name=raw_refusal_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
         raw_pdf_ocr_model_name = (
             pdf_ocr_model
             if pdf_ocr_model is not None
@@ -1140,26 +914,6 @@ class AppConfig:
             )
         )
 
-        raw_function_call_llama_model_name = (
-            function_call_llama_model
-            if function_call_llama_model is not None
-            else os.getenv("FUNCTION_CALL_LLAMA_MODEL", DEFAULT_FUNCTION_CALL_LLAMA_MODEL)
-        )
-        resolved_function_call_llama_model_path = _resolve_model_path(
-            model_name=raw_function_call_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-        raw_material_search_selector_llama_model_name = os.getenv(
-            "MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL",
-            DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_MODEL,
-        )
-        resolved_material_search_selector_llama_model_path = _resolve_model_path(
-            model_name=raw_material_search_selector_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
         raw_cross_encoder_model_name = (
             cross_encoder_model_path
             if cross_encoder_model_path is not None
@@ -1171,70 +925,6 @@ class AppConfig:
             base_dir=resolved_base,
         )
 
-        raw_prop_llama_model_name = (
-            prop_llama_model
-            if prop_llama_model is not None
-            else os.getenv("PROP_LLAMA_MODEL", DEFAULT_PROP_LLAMA_MODEL)
-        )
-        resolved_prop_llama_model_path = _resolve_model_path(
-            model_name=raw_prop_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_summery_llama_model_name = (
-            summery_llama_model
-            if summery_llama_model is not None
-            else os.getenv("SUMMERY_LLAMA_MODEL", DEFAULT_SUMMERY_LLAMA_MODEL)
-        )
-        resolved_summery_llama_model_path = _resolve_model_path(
-            model_name=raw_summery_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_raptor_summery_llama_model_name = (
-            raptor_summery_llama_model
-            if raptor_summery_llama_model is not None
-            else os.getenv(
-                "RAPTOR_SUMMERY_LLAMA_MODEL", DEFAULT_RAPTOR_SUMMERY_LLAMA_MODEL
-            )
-        )
-        resolved_raptor_summery_llama_model_path = _resolve_model_path(
-            model_name=raw_raptor_summery_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_vc_summary_llama_model_name = os.getenv(
-            "VC_SUMMARY_LLAMA_MODEL",
-            DEFAULT_VC_SUMMARY_LLAMA_MODEL,
-        )
-        resolved_vc_summary_llama_model_path = _resolve_model_path(
-            model_name=raw_vc_summary_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_vc_minutes_edit_llama_model_name = os.getenv(
-            "VC_MINUTES_EDIT_LLAMA_MODEL",
-            DEFAULT_VC_MINUTES_EDIT_LLAMA_MODEL,
-        )
-        resolved_vc_minutes_edit_llama_model_path = _resolve_model_path(
-            model_name=raw_vc_minutes_edit_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
-
-        raw_vc_final_summary_llama_model_name = os.getenv(
-            "VC_FINAL_SUMMARY_LLAMA_MODEL",
-            DEFAULT_VC_FINAL_SUMMARY_LLAMA_MODEL,
-        )
-        resolved_vc_final_summary_llama_model_path = _resolve_model_path(
-            model_name=raw_vc_final_summary_llama_model_name,
-            model_dir=llm_model_dir_path,
-            base_dir=resolved_base,
-        )
         raw_vc_transcribe_model_name = os.getenv(
             "VC_TRANSCRIBE_MODEL",
             DEFAULT_VC_TRANSCRIBE_MODEL,
@@ -1245,14 +935,8 @@ class AppConfig:
             base_dir=resolved_base,
         )
 
-        prop_provider_value = prop_provider or os.getenv(
-            "PROP_PROVIDER", DEFAULT_PROP_PROVIDER
-        )
         summery_provider_value = summery_provider or os.getenv(
             "SUMMERY_PROVIDER", DEFAULT_SUMMERY_PROVIDER
-        )
-        raptor_summery_provider_value = raptor_summery_provider or os.getenv(
-            "RAPTOR_SUMMERY_PROVIDER", DEFAULT_RAPTOR_SUMMERY_PROVIDER
         )
         no_rag_provider_value = no_rag_llm_provider or os.getenv(
             "NO_RAG_LLM_PROVIDER", DEFAULT_NO_RAG_LLM_PROVIDER
@@ -1276,23 +960,10 @@ class AppConfig:
             "VC_FINAL_SUMMARY_LLM_PROVIDER",
             DEFAULT_VC_FINAL_SUMMARY_LLM_PROVIDER,
         )
-        prop_gemini_model_value = (
-            prop_gemini_model
-            if prop_gemini_model is not None
-            else os.getenv("PROP_GEMINI_MODEL", DEFAULT_PROP_GEMINI_MODEL)
-        )
         summery_gemini_model_value = (
             summery_gemini_model
             if summery_gemini_model is not None
             else os.getenv("SUMMERY_GEMINI_MODEL", DEFAULT_SUMMERY_GEMINI_MODEL)
-        )
-        raptor_summery_gemini_model_value = (
-            raptor_summery_gemini_model
-            if raptor_summery_gemini_model is not None
-            else os.getenv(
-                "RAPTOR_SUMMERY_GEMINI_MODEL",
-                DEFAULT_RAPTOR_SUMMERY_GEMINI_MODEL,
-            )
         )
         no_rag_gemini_model_value = (
             no_rag_genai_model
@@ -1447,8 +1118,6 @@ class AppConfig:
             / "data"
             / "sparse_second_rec_chunk",
             summery_chunk_dir=resolved_base / "app" / "data" / "summery_chunk",
-            prop_chunk_dir=resolved_base / "app" / "data" / "prop_chunk",
-            raptor_chunk_dir=resolved_base / "app" / "data" / "raptor_chunk",
             index_dir=resolved_base / "app" / "data" / "index",
             discord_bot_token=discord_bot_token
             if discord_bot_token is not None
@@ -1537,7 +1206,6 @@ class AppConfig:
             ),
             pdf_ocr_model_path=resolved_pdf_ocr_model_path,
             embedding_model=resolved_embedding_model,
-            raptor_embedding_model=resolved_raptor_embedding_model,
             cross_encoder_model_path=resolved_cross_encoder_model_path,
             first_rec_chunk_size=first_rec_chunk_size
             if first_rec_chunk_size is not None
@@ -1592,16 +1260,6 @@ class AppConfig:
             ),
             summery_provider=summery_provider_value,
             summery_gemini_model=summery_gemini_model_value,
-            summery_llama_model=raw_summery_llama_model_name,
-            summery_llama_model_path=resolved_summery_llama_model_path,
-            summery_llama_ctx_size=summery_llama_ctx_size
-            if summery_llama_ctx_size is not None
-            else int(
-                os.getenv(
-                    "SUMMERY_LLAMA_CTX_SIZE",
-                    str(DEFAULT_SUMMERY_LLAMA_CTX_SIZE),
-                )
-            ),
             summery_temperature=summery_temperature
             if summery_temperature is not None
             else float(
@@ -1649,16 +1307,6 @@ class AppConfig:
             llm_provider=llm_provider
             or os.getenv("LLM_PROVIDER", DEFAULT_LLM_PROVIDER),
             genai_model=genai_model or os.getenv("GEMINI_MODEL", DEFAULT_GENAI_MODEL),
-            llama_model_path=resolved_llama_model_path,
-            llama_ctx_size=llama_ctx_size
-            if llama_ctx_size is not None
-            else int(os.getenv("LLAMA_CTX_SIZE", str(DEFAULT_LLAMA_CTX_SIZE))),
-            llama_gpu_layers=llama_gpu_layers
-            if llama_gpu_layers is not None
-            else int(os.getenv("LLAMA_GPU_LAYERS", str(DEFAULT_LLAMA_GPU_LAYERS))),
-            llama_threads=llama_threads
-            if llama_threads is not None
-            else int(os.getenv("LLAMA_THREADS", str(DEFAULT_LLAMA_THREADS))),
             temperature=temperature
             if temperature is not None
             else float(os.getenv("TEMPERATURE", str(DEFAULT_TEMPERATURE))),
@@ -1670,15 +1318,6 @@ class AppConfig:
             else os.getenv("THINKING_LEVEL", DEFAULT_THINKING_LEVEL),
             no_rag_llm_provider=no_rag_provider_value,
             no_rag_genai_model=no_rag_gemini_model_value,
-            no_rag_llama_model_path=resolved_no_rag_llama_model_path,
-            no_rag_llama_ctx_size=no_rag_llama_ctx_size
-            if no_rag_llama_ctx_size is not None
-            else int(
-                os.getenv(
-                    "NO_RAG_LLAMA_CTX_SIZE",
-                    str(DEFAULT_NO_RAG_LLAMA_CTX_SIZE),
-                )
-            ),
             no_rag_temperature=no_rag_temperature
             if no_rag_temperature is not None
             else float(
@@ -1701,15 +1340,6 @@ class AppConfig:
             ),
             refusal_llm_provider=refusal_provider_value,
             refusal_genai_model=refusal_gemini_model_value,
-            refusal_llama_model_path=resolved_refusal_llama_model_path,
-            refusal_llama_ctx_size=refusal_llama_ctx_size
-            if refusal_llama_ctx_size is not None
-            else int(
-                os.getenv(
-                    "REFUSAL_LLAMA_CTX_SIZE",
-                    str(DEFAULT_REFUSAL_LLAMA_CTX_SIZE),
-                )
-            ),
             refusal_temperature=refusal_temperature
             if refusal_temperature is not None
             else float(
@@ -1732,7 +1362,6 @@ class AppConfig:
             ),
             function_call_provider=function_call_provider_value,
             function_call_gemini_model=function_call_gemini_model_value,
-            function_call_llama_model_path=resolved_function_call_llama_model_path,
             function_call_temperature=function_call_temperature
             if function_call_temperature is not None
             else float(
@@ -1832,17 +1461,6 @@ class AppConfig:
             ),
             material_search_selector_llm_provider=material_search_selector_provider_value,
             material_search_selector_gemini_model=material_search_selector_gemini_model_value,
-            material_search_selector_llama_model=raw_material_search_selector_llama_model_name,
-            material_search_selector_llama_model_path=resolved_material_search_selector_llama_model_path,
-            material_search_selector_llama_ctx_size=max(
-                1,
-                int(
-                    os.getenv(
-                        "MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE",
-                        str(DEFAULT_MATERIAL_SEARCH_SELECTOR_LLAMA_CTX_SIZE),
-                    )
-                ),
-            ),
             material_search_selector_temperature=float(
                 os.getenv(
                     "MATERIAL_SEARCH_SELECTOR_TEMPERATURE",
@@ -2132,45 +1750,6 @@ class AppConfig:
             if command_prefix is not None
             else os.getenv("COMMAND_PREFIX", DEFAULT_COMMAND_PREFIX),
             system_rules=system_rules if system_rules is not None else DEFAULT_SYSTEM_RULES,
-            prop_enabled=prop_enabled
-            if prop_enabled is not None
-            else _env_bool(os.getenv("PROP_ENABLED"), DEFAULT_PROP_ENABLED),
-            prop_provider=prop_provider_value,
-            prop_gemini_model=prop_gemini_model_value,
-            prop_llama_model=raw_prop_llama_model_name,
-            prop_llama_model_path=resolved_prop_llama_model_path,
-            prop_llama_ctx_size=prop_llama_ctx_size
-            if prop_llama_ctx_size is not None
-            else int(
-                os.getenv(
-                    "PROP_LLAMA_CTX_SIZE",
-                    str(DEFAULT_PROP_LLAMA_CTX_SIZE),
-                )
-            ),
-            prop_temperature=prop_temperature
-            if prop_temperature is not None
-            else float(
-                os.getenv("PROP_TEMPERATURE", str(DEFAULT_PROP_TEMPERATURE))
-            ),
-            prop_max_output_tokens=prop_max_output_tokens
-            if prop_max_output_tokens is not None
-            else int(
-                os.getenv(
-                    "PROP_MAX_OUTPUT_TOKENS",
-                    str(DEFAULT_PROP_MAX_OUTPUT_TOKENS),
-                )
-            ),
-            prop_max_retries=max(
-                1,
-                prop_max_retries
-                if prop_max_retries is not None
-                else int(
-                    os.getenv(
-                        "PROP_MAX_RETRIES",
-                        str(DEFAULT_PROP_MAX_RETRIES),
-                    )
-                ),
-            ),
             auto_index_enabled=auto_index_enabled
             if auto_index_enabled is not None
             else _env_bool(
@@ -2272,17 +1851,6 @@ class AppConfig:
             ),
             vc_summary_llm_provider=vc_summary_provider_value,
             vc_summary_gemini_model=vc_summary_gemini_model_value,
-            vc_summary_llama_model=raw_vc_summary_llama_model_name,
-            vc_summary_llama_model_path=resolved_vc_summary_llama_model_path,
-            vc_summary_llama_ctx_size=max(
-                256,
-                int(
-                    os.getenv(
-                        "VC_SUMMARY_LLAMA_CTX_SIZE",
-                        str(DEFAULT_VC_SUMMARY_LLAMA_CTX_SIZE),
-                    )
-                ),
-            ),
             vc_summary_temperature=float(
                 os.getenv(
                     "VC_SUMMARY_TEMPERATURE",
@@ -2356,17 +1924,6 @@ class AppConfig:
             ),
             vc_minutes_edit_llm_provider=vc_minutes_edit_provider_value,
             vc_minutes_edit_gemini_model=vc_minutes_edit_gemini_model_value,
-            vc_minutes_edit_llama_model=raw_vc_minutes_edit_llama_model_name,
-            vc_minutes_edit_llama_model_path=resolved_vc_minutes_edit_llama_model_path,
-            vc_minutes_edit_llama_ctx_size=max(
-                256,
-                int(
-                    os.getenv(
-                        "VC_MINUTES_EDIT_LLAMA_CTX_SIZE",
-                        str(DEFAULT_VC_MINUTES_EDIT_LLAMA_CTX_SIZE),
-                    )
-                ),
-            ),
             vc_minutes_edit_temperature=float(
                 os.getenv(
                     "VC_MINUTES_EDIT_TEMPERATURE",
@@ -2388,17 +1945,6 @@ class AppConfig:
             ),
             vc_final_summary_llm_provider=vc_final_summary_provider_value,
             vc_final_summary_gemini_model=vc_final_summary_gemini_model_value,
-            vc_final_summary_llama_model=raw_vc_final_summary_llama_model_name,
-            vc_final_summary_llama_model_path=resolved_vc_final_summary_llama_model_path,
-            vc_final_summary_llama_ctx_size=max(
-                256,
-                int(
-                    os.getenv(
-                        "VC_FINAL_SUMMARY_LLAMA_CTX_SIZE",
-                        str(DEFAULT_VC_FINAL_SUMMARY_LLAMA_CTX_SIZE),
-                    )
-                ),
-            ),
             vc_final_summary_temperature=float(
                 os.getenv(
                     "VC_FINAL_SUMMARY_TEMPERATURE",
@@ -2417,70 +1963,6 @@ class AppConfig:
             vc_final_summary_thinking_level=os.getenv(
                 "VC_FINAL_SUMMARY_THINKING_LEVEL",
                 DEFAULT_VC_FINAL_SUMMARY_THINKING_LEVEL,
-            ),
-            raptor_enabled=raptor_enabled
-            if raptor_enabled is not None
-            else _env_bool(os.getenv("RAPTOR_ENABLED"), DEFAULT_RAPTOR_ENABLED),
-            raptor_cluster_max_tokens=raptor_cluster_max_tokens
-            if raptor_cluster_max_tokens is not None
-            else int(
-                os.getenv(
-                    "RAPTOR_CLUSTER_MAX_TOKENS",
-                    str(DEFAULT_RAPTOR_CLUSTER_MAX_TOKENS),
-                )
-            ),
-            raptor_summery_max_tokens=raptor_summery_max_tokens
-            if raptor_summery_max_tokens is not None
-            else int(
-                os.getenv(
-                    "RAPTOR_SUMMERY_MAX_TOKENS",
-                    str(DEFAULT_RAPTOR_SUMMERY_MAX_TOKENS),
-                )
-            ),
-            raptor_stop_chunk_count=raptor_stop_chunk_count
-            if raptor_stop_chunk_count is not None
-            else int(
-                os.getenv(
-                    "RAPTOR_STOP_CHUNK_COUNT",
-                    str(DEFAULT_RAPTOR_STOP_CHUNK_COUNT),
-                )
-            ),
-            raptor_k_max=raptor_k_max
-            if raptor_k_max is not None
-            else int(os.getenv("RAPTOR_K_MAX", str(DEFAULT_RAPTOR_K_MAX))),
-            raptor_k_selection=raptor_k_selection
-            if raptor_k_selection is not None
-            else os.getenv("RAPTOR_K_SELECTION", DEFAULT_RAPTOR_K_SELECTION),
-            raptor_summery_provider=raptor_summery_provider_value,
-            raptor_summery_gemini_model=raptor_summery_gemini_model_value,
-            raptor_summery_llama_model=raw_raptor_summery_llama_model_name,
-            raptor_summery_llama_model_path=resolved_raptor_summery_llama_model_path,
-            raptor_summery_llama_ctx_size=raptor_summery_llama_ctx_size
-            if raptor_summery_llama_ctx_size is not None
-            else int(
-                os.getenv(
-                    "RAPTOR_SUMMERY_LLAMA_CTX_SIZE",
-                    str(DEFAULT_RAPTOR_SUMMERY_LLAMA_CTX_SIZE),
-                )
-            ),
-            raptor_summery_temperature=raptor_summery_temperature
-            if raptor_summery_temperature is not None
-            else float(
-                os.getenv(
-                    "RAPTOR_SUMMERY_TEMPERATURE",
-                    str(DEFAULT_RAPTOR_SUMMERY_TEMPERATURE),
-                )
-            ),
-            raptor_summery_max_retries=max(
-                1,
-                raptor_summery_max_retries
-                if raptor_summery_max_retries is not None
-                else int(
-                    os.getenv(
-                        "RAPTOR_SUMMERY_MAX_RETRIES",
-                        str(DEFAULT_RAPTOR_SUMMERY_MAX_RETRIES),
-                    )
-                ),
             ),
             clear_raw_data=clear_raw_data
             if clear_raw_data is not None
@@ -2502,17 +1984,6 @@ class AppConfig:
             else _env_bool(
                 os.getenv("CLEAR_SUMMERY_CHUNK_DATA"),
                 DEFAULT_CLEAR_SUMMERY_CHUNK_DATA,
-            ),
-            clear_prop_chunk_data=clear_prop_chunk_data
-            if clear_prop_chunk_data is not None
-            else _env_bool(
-                os.getenv("CLEAR_PROP_CHUNK_DATA"), DEFAULT_CLEAR_PROP_CHUNK_DATA
-            ),
-            clear_raptor_chunk_data=clear_raptor_chunk_data
-            if clear_raptor_chunk_data is not None
-            else _env_bool(
-                os.getenv("CLEAR_RAPTOR_CHUNK_DATA"),
-                DEFAULT_CLEAR_RAPTOR_CHUNK_DATA,
             ),
             update_raw_data=update_raw_data
             if update_raw_data is not None
@@ -2540,18 +2011,6 @@ class AppConfig:
             else _env_bool(
                 os.getenv("UPDATE_SUMMERY_CHUNK_DATA"),
                 DEFAULT_UPDATE_SUMMERY_CHUNK_DATA,
-            ),
-            update_prop_chunk_data=update_prop_chunk_data
-            if update_prop_chunk_data is not None
-            else _env_bool(
-                os.getenv("UPDATE_PROP_CHUNK_DATA"),
-                DEFAULT_UPDATE_PROP_CHUNK_DATA,
-            ),
-            update_raptor_chunk_data=update_raptor_chunk_data
-            if update_raptor_chunk_data is not None
-            else _env_bool(
-                os.getenv("UPDATE_RAPTOR_CHUNK_DATA"),
-                DEFAULT_UPDATE_RAPTOR_CHUNK_DATA,
             ),
         )
 

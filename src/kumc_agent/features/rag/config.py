@@ -26,13 +26,6 @@ class RagPromptTextSettings:
     gemini_header_output_format: str = "# 出力形式"
     gemini_header_instructions: str = "## 指示"
     gemini_header_question: str = "# ユーザーの質問"
-    llama_header_question: str = "### Question"
-    llama_header_previous_attempt: str = "### Previous attempt (Question/Answer)"
-    llama_header_circle_info: str = "### サークルの基本情報"
-    llama_header_capabilities: str = "### チャットボット自身の機能情報"
-    llama_header_context: str = "### Context"
-    llama_header_output_format: str = "### Output format"
-    llama_header_instructions: str = "## 指示"
 
 
 @dataclass(frozen=True)
@@ -50,7 +43,6 @@ class RagConfig:
     recency_mode: str
     rag_generation: RagGenerationSettings
     no_rag_generation: RagGenerationSettings
-    refusal_generation: RagGenerationSettings
     material_search_max_names: int = 3
     parent_doc_enabled: bool = True
     parent_chunk_cap: int = 2
@@ -61,3 +53,4 @@ class RagConfig:
     prompt_additional_turns: int = 10
     material_full_text_char_limit: int = 3000
     fast_model_notice: str = "※負荷軽減のために軽量モードを使用しました。"
+    rrf_k: int = 60
