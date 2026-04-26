@@ -716,6 +716,11 @@ def _to_runtime_config(
                         features["retrieval"]["sparse_top_k"],
                     )
                 ),
+                sparse_normalized_ratio=(
+                    None
+                    if features["retrieval"].get("sparse_normalized_ratio") is None
+                    else float(features["retrieval"].get("sparse_normalized_ratio"))
+                ),
                 rerank_pool_size=int(features["retrieval"]["rerank_pool_size"]),
                 rrf_k=int(features["retrieval"].get("rrf_k", 60)),
                 mmr_lambda=float(features["retrieval"]["mmr_lambda"]),

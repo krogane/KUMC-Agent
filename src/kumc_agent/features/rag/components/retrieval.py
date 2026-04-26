@@ -73,6 +73,7 @@ class RetrievalComponent:
         dense_top_k: int,
         sparse_top_k: int,
         sparse_initial_sparse_top_k: int | None = None,
+        sparse_normalized_ratio: float | None = None,
         recency_mode: str = "off",
         recency_weight_soft: float = 0.20,
         recency_weight_hard: float = 0.45,
@@ -88,6 +89,9 @@ class RetrievalComponent:
             if sparse_initial_sparse_top_k is None
             else int(sparse_initial_sparse_top_k),
         )
+        if sparse_normalized_ratio is not None:
+            ratio = max(0.0, min(1.0, float(sparse_normalized_ratio)))
+            sparse_initial_limit = int(round(float(sparse_limit) * ratio))
 
         dense_hits = []
         sparse_hits = []
@@ -113,7 +117,7 @@ class RetrievalComponent:
                     sparse_hits = sparse_future.result()
                 except Exception:
                     logger.exception("Sparse retrieval failed.")
-                    sparse_hits = []
+                sparse_hits = []
         elif dense_limit > 0:
             dense_hits = self._retrieve_dense_hits(query=query, top_k=dense_limit)
         elif sparse_limit > 0:
@@ -123,17 +127,25 @@ class RetrievalComponent:
                 sparse_top_k=sparse_initial_limit,
             )
 
+        dense_hits = self._apply_recency_to_dense_hits(
+            dense_hits,
+            mode=recency_mode,
+            recency_weight_soft=recency_weight_soft,
+            recency_weight_hard=recency_weight_hard,
+            recency_half_life_days=recency_half_life_days,
+        )
+        sparse_hits = self._apply_recency_to_sparse_hits(
+            sparse_hits,
+            mode=recency_mode,
+            recency_weight_soft=recency_weight_soft,
+            recency_weight_hard=recency_weight_hard,
+            recency_half_life_days=recency_half_life_days,
+        )
         scored = self._merge_scores(
             dense_hits=dense_hits,
             sparse_hits=sparse_hits,
             rrf_k=rrf_k,
         )
-        _ = (
-            recency_mode,
-            recency_weight_soft,
-            recency_weight_hard,
-            recency_half_life_days,
-        )  # Recency is applied in RagService during rerank scoring.
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         _ = mmr_lambda  # Applied explicitly in RagService after rerank stage.
         return [item.chunk for item in ranked]
@@ -454,6 +466,59 @@ class RetrievalComponent:
                 seen.add(chunk.id)
                 merged.append((chunk, score))
         return merged
+
+    @classmethod
+    def _apply_recency_to_dense_hits(
+        cls,
+        dense_hits,
+        *,
+        mode: str,
+        recency_weight_soft: float,
+        recency_weight_hard: float,
+        recency_half_life_days: float,
+    ) -> list[_ScoredChunk]:
+        scored = [
+            _ScoredChunk(chunk=item.chunk, score=float(getattr(item, "score", 0.0)))
+            for item in dense_hits
+        ]
+        normalized_mode = str(mode or "off").strip().lower()
+        if normalized_mode not in {"soft", "hard"}:
+            return scored
+        adjusted = cls._apply_recency(
+            scored,
+            mode=mode,
+            recency_weight_soft=recency_weight_soft,
+            recency_weight_hard=recency_weight_hard,
+            recency_half_life_days=recency_half_life_days,
+        )
+        return sorted(adjusted, key=lambda item: item.score, reverse=True)
+
+    @classmethod
+    def _apply_recency_to_sparse_hits(
+        cls,
+        sparse_hits: list[tuple[Chunk, float]],
+        *,
+        mode: str,
+        recency_weight_soft: float,
+        recency_weight_hard: float,
+        recency_half_life_days: float,
+    ) -> list[tuple[Chunk, float]]:
+        scored = [
+            _ScoredChunk(chunk=chunk, score=float(score))
+            for chunk, score in sparse_hits
+        ]
+        adjusted = cls._apply_recency(
+            scored,
+            mode=mode,
+            recency_weight_soft=recency_weight_soft,
+            recency_weight_hard=recency_weight_hard,
+            recency_half_life_days=recency_half_life_days,
+        )
+        normalized_mode = str(mode or "off").strip().lower()
+        if normalized_mode not in {"soft", "hard"}:
+            return sparse_hits
+        adjusted.sort(key=lambda item: item.score, reverse=True)
+        return [(item.chunk, item.score) for item in adjusted]
 
     @staticmethod
     def _merge_scores(

@@ -31,6 +31,8 @@ from kumc_agent.features.rag.config import (
 )
 from kumc_agent.features.rag.components.generation import GenerationComponent
 from kumc_agent.features.rag.components.entry_routing import EntryQueryRouter
+from kumc_agent.features.rag.components.answer_filter import AnswerFilterComponent
+from kumc_agent.features.rag.components.query_synthesis import QuerySynthesizer
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
 from kumc_agent.features.rag.components.routing import QueryRouter, RoutingTaskConfig
 from kumc_agent.features.rag.service import RagService
@@ -187,6 +189,20 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             gemini_header_question=config.rag.prompt_texts.gemini_header_question,
         ),
     )
+    query_synthesizer = QuerySynthesizer(
+        llm=rag_llm,
+        prompts=prompt_repo,
+        temperature=config.rag.routing.temperature,
+        max_output_tokens=min(512, config.rag.generation.rag.max_output_tokens),
+        max_retries=config.rag.routing.max_retries,
+    )
+    answer_filter = AnswerFilterComponent(
+        llm=rag_llm,
+        prompts=prompt_repo,
+        temperature=0.0,
+        max_output_tokens=min(512, config.rag.generation.rag.max_output_tokens),
+        max_retries=config.rag.routing.max_retries,
+    )
 
     router = QueryRouter(
         routing_enabled=config.rag.routing.enabled,
@@ -278,6 +294,9 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             material_search_max_names=config.rag.routing.material_search_max_names,
             parent_doc_enabled=config.features.retrieval.parent_doc_enabled,
             parent_chunk_cap=config.features.retrieval.parent_chunk_cap,
+            sparse_normalized_ratio=(
+                config.features.retrieval.sparse_normalized_ratio
+            ),
             material_full_text_char_limit=(
                 config.features.retrieval.material_full_text_char_limit
             ),
@@ -287,11 +306,19 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             prompt_default_turns=config.rag.history.prompt_default_turns,
             prompt_additional_turns=config.rag.history.prompt_additional_turns,
             fast_model_notice=config.rag.fast_model_notice,
+            allowed_guild_ids=tuple(
+                str(value) for value in config.security.discord_guild_allow_list
+            ),
+            admin_user_ids=tuple(
+                str(value) for value in config.security.maintenance_command_author_ids
+            ),
         ),
         router=router,
         retrieval=retrieval_component,
         generation=generation_component,
         reranker=reranker,
+        query_synthesizer=query_synthesizer,
+        answer_filter=answer_filter,
     )
 
     indexing_service = IndexingService(

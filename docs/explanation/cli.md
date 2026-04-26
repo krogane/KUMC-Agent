@@ -60,8 +60,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の�
 - `sources`: 回答の根拠になった情報源
 - `metadata`: ルーティング判断、高速モード、その他の付加情報
 
-ここでは `metadata` から `contexts` を削除しています。
-`contexts` は検索で集めた本文断片など、サイズが大きくなりやすい情報だと考えられます。
+ここでは `metadata` から `contexts`、`llm_prompt`、`raw` を削除しています。
+`contexts` は検索で集めた本文断片、`llm_prompt` は内部プロンプト、`raw` はモデルの生出力であり、サイズが大きくなったり内部情報を含んだりする可能性があります。
 CLI の出力を軽くし、ツール連携で扱いやすくするために除外しています。
 
 この payload では、`routing_decision` や `fast_mode` のような診断情報はトップレベルには置きません。
@@ -134,10 +134,11 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --query "KUMCの�
 `chat` と違い、回答文だけではなく、情報源やメタデータを含む JSON を出力します。
 `--query` は複数回指定できます。
 複数指定した場合は、それぞれの質問に対する結果を配列として返します。
+Drive / Discord など権限付きソースを検索対象に含める場合は、呼び出し元の権限情報として `--user-id`、`--guild-id`、`--role-id`、`--admin` を渡せます。
 
 また、このコマンドでは履歴や追加メモリを無効化する指定が入っています。
 そのため、外部ツールから安定した RAG 結果を得る用途に向いています。
-ルーティング判断や高速モードのような診断情報が必要な場合は、トップレベルではなく `metadata` の中を確認します。
+ルーティング判断、高速モード、合成クエリ、回答フィルタリング結果のような診断情報が必要な場合は、トップレベルではなく `metadata` の中を確認します。
 
 ### `index build` / `index update`
 

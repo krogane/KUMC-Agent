@@ -125,6 +125,7 @@ class RetrievalSection:
     dense_top_k: int
     sparse_top_k: int
     sparse_initial_sparse_top_k: int
+    sparse_normalized_ratio: float | None
     rerank_pool_size: int
     rrf_k: int
     mmr_lambda: float

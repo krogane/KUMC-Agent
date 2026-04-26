@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from kumc_agent.domain.models.answer import Answer
+from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.features.rag.service import RagService
 
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
@@ -21,6 +22,7 @@ class ChatRequest:
     append_sources_to_response: bool = True
     extra_mode_instruction: str | None = None
     disable_history: bool = False
+    access_context: AccessContext | None = None
 
 
 class ChatAnswerUsecase:
@@ -39,4 +41,5 @@ class ChatAnswerUsecase:
             append_sources_to_response=request.append_sources_to_response,
             extra_mode_instruction=request.extra_mode_instruction,
             disable_history=request.disable_history,
+            access_context=request.access_context,
         )

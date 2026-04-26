@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from kumc_agent.frontends.console.repl import run_repl
+from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.chat.entry import ChatEntryRequest
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 def _build_tool_rag_payload(answer: object) -> dict[str, object]:
     metadata = dict(getattr(answer, "metadata", {}) or {})
-    metadata.pop("contexts", None)
+    for key in ("contexts", "llm_prompt", "raw"):
+        metadata.pop(key, None)
     return {
         "answer": getattr(answer, "text", ""),
         "route": getattr(answer, "route", ""),
@@ -108,6 +110,10 @@ def _build_parser() -> argparse.ArgumentParser:
     tool_rag_parser.add_argument("--question-author", default=None)
     tool_rag_parser.add_argument("--history-scope", default=None)
     tool_rag_parser.add_argument("--force-fast-mode", action="store_true")
+    tool_rag_parser.add_argument("--user-id", default="")
+    tool_rag_parser.add_argument("--guild-id", default="")
+    tool_rag_parser.add_argument("--role-id", action="append", default=None)
+    tool_rag_parser.add_argument("--admin", action="store_true")
 
     index_parser = subparsers.add_parser("index", help="Index operations")
     index_sub = index_parser.add_subparsers(dest="index_command", required=True)
@@ -442,7 +448,6 @@ def main() -> None:
         if args.depth == "deep":
             from kumc_agent.apps.agentic import build_agentic_app_context
             from kumc_agent.domain.models.agentic import AgenticSearchRequest
-            from kumc_agent.domain.models.retrieval import AccessContext
 
             agentic = build_agentic_app_context()
             response = agentic.agentic_search.search(
@@ -472,7 +477,7 @@ def main() -> None:
             )
             return
         from kumc_agent.apps.retrieval import build_retrieval_app_context
-        from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
+        from kumc_agent.domain.models.retrieval import RetrievalQuery
 
         retrieval = build_retrieval_app_context()
         response = retrieval.ask.ask(
@@ -505,7 +510,6 @@ def main() -> None:
 
     if args.command == "work":
         from kumc_agent.apps.workflow import build_workflow_app_context
-        from kumc_agent.domain.models.retrieval import AccessContext
         from kumc_agent.domain.models.workflow import WorkRequest
 
         workflow = build_workflow_app_context()
@@ -528,7 +532,6 @@ def main() -> None:
 
     if args.command == "approval":
         from kumc_agent.apps.workflow import build_workflow_app_context
-        from kumc_agent.domain.models.retrieval import AccessContext
 
         workflow = build_workflow_app_context()
         response = workflow.workflow.approval(
@@ -548,7 +551,6 @@ def main() -> None:
 
     if args.command == "automation":
         from kumc_agent.apps.automation import build_automation_app_context
-        from kumc_agent.domain.models.retrieval import AccessContext
 
         automation = build_automation_app_context()
         access = AccessContext(
@@ -617,6 +619,12 @@ def main() -> None:
         )
 
         if len(queries) == 1:
+            access_context = AccessContext(
+                user_id=str(args.user_id or ""),
+                guild_id=str(args.guild_id or ""),
+                role_ids=tuple(args.role_id or ()),
+                is_admin=bool(args.admin),
+            )
             answer = context.chat_answer.execute(
                 ChatRequest(
                     query=queries[0],
@@ -627,11 +635,18 @@ def main() -> None:
                     routing_history_override=[],
                     generation_history_override=[],
                     force_disable_additional_memory=True,
+                    access_context=access_context,
                 )
             )
             payload = _build_tool_rag_payload(answer)
             print(json.dumps(payload, ensure_ascii=False))
         else:
+            access_context = AccessContext(
+                user_id=str(args.user_id or ""),
+                guild_id=str(args.guild_id or ""),
+                role_ids=tuple(args.role_id or ()),
+                is_admin=bool(args.admin),
+            )
             results: list[dict[str, object]] = []
             for query in queries:
                 answer = context.chat_answer.execute(
@@ -644,6 +659,7 @@ def main() -> None:
                         routing_history_override=[],
                         generation_history_override=[],
                         force_disable_additional_memory=True,
+                        access_context=access_context,
                     )
                 )
                 result = _build_tool_rag_payload(answer)

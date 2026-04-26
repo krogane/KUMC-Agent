@@ -47,6 +47,7 @@ class RagConfig:
     parent_doc_enabled: bool = True
     parent_chunk_cap: int = 2
     answer_json_max_retries: int = 2
+    sparse_normalized_ratio: float | None = None
     history_enabled: bool = False
     history_max_turns: int = 5
     prompt_default_turns: int = 3
@@ -54,3 +55,5 @@ class RagConfig:
     material_full_text_char_limit: int = 3000
     fast_model_notice: str = "※負荷軽減のために軽量モードを使用しました。"
     rrf_k: int = 60
+    allowed_guild_ids: tuple[str, ...] = tuple()
+    admin_user_ids: tuple[str, ...] = tuple()

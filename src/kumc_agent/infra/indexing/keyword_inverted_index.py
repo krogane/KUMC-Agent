@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,8 +23,14 @@ KEYWORD_INDEX_SCHEMA_VERSION = 1
 KEYWORD_CORPUS_SPARSE = "sparse"
 KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
+KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
 
 _BM25_EPSILON = 0.25
+_MATERIAL_DATE_RE = re.compile(
+    r"(?P<y>\d{4})\D{0,3}(?P<m>\d{1,2})\D{0,3}(?P<d>\d{1,2})"
+)
+_MATERIAL_SEPARATORS_RE = re.compile(r"[\s/\\_.\-:：,，、]+")
+_MATERIAL_NOISE_RE = re.compile(r"[^0-9a-zぁ-んァ-ン一-龠々ー]+")
 
 
 @dataclass(frozen=True)
@@ -316,6 +324,48 @@ def tokenize_sparse_doc(
             return []
         return [token for token in text.split() if token]
     return sudachi_tokenize(doc.page_content)
+
+
+def normalize_material_name_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = text.replace("\\", "/")
+    text = _MATERIAL_DATE_RE.sub(
+        lambda match: (
+            f"{int(match.group('y')):04d}"
+            f"{int(match.group('m')):02d}"
+            f"{int(match.group('d')):02d}"
+        ),
+        text,
+    )
+    text = _MATERIAL_SEPARATORS_RE.sub(" ", text).strip()
+    text = _MATERIAL_NOISE_RE.sub("", text)
+    return text
+
+
+def tokenize_material_name_text(value: str) -> list[str]:
+    normalized = normalize_material_name_text(value)
+    if not normalized:
+        return []
+    tokens: list[str] = [normalized]
+    tokens.extend(part for part in normalized.split() if part)
+    compact = "".join(normalized.split())
+    if compact and compact != normalized:
+        tokens.append(compact)
+    length = len(compact)
+    for ngram_size in (2, 3, 4):
+        if length < ngram_size:
+            continue
+        for index in range(0, length - ngram_size + 1):
+            tokens.append(compact[index : index + ngram_size])
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
 
 
 def _build_posting_map(

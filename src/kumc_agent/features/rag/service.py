@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -14,9 +13,16 @@ import unicodedata
 
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.chunk import Chunk
+from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.domain.models.routing import RoutingDecision
+from kumc_agent.features.rag.access import RagAccessFilter
 from kumc_agent.features.rag.config import RagConfig, RagGenerationSettings
+from kumc_agent.features.rag.components.answer_filter import AnswerFilterComponent
 from kumc_agent.features.rag.components.generation import GenerationComponent
+from kumc_agent.features.rag.components.query_synthesis import (
+    QuerySynthesizer,
+    QuerySynthesisResult,
+)
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
 from kumc_agent.features.rag.components.routing import QueryRouter
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
@@ -27,6 +33,7 @@ ChatHistoryEntry = tuple[str, str, Sequence[str]]
 _MATERIAL_SEARCH_EXCLUDED_SOURCE_TYPES = frozenset(
     {"messages", "discord_message", "x_posts"}
 )
+_KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
 _MATERIAL_NAME_SEPARATORS_RE = re.compile(r"[\s/\\_.\-:：,，、]+")
 _MATERIAL_NAME_NOISE_RE = re.compile(r"[^0-9a-zぁ-んァ-ン一-龠々ー]+")
 _MATERIAL_DATE_RE = re.compile(
@@ -55,12 +62,20 @@ class RagService:
         retrieval: RetrievalComponent,
         generation: GenerationComponent,
         reranker: CrossEncoderReranker | None,
+        query_synthesizer: QuerySynthesizer | None = None,
+        answer_filter: AnswerFilterComponent | None = None,
     ) -> None:
         self._config = config
         self._router = router
         self._retrieval = retrieval
         self._generation = generation
         self._reranker = reranker
+        self._query_synthesizer = query_synthesizer
+        self._answer_filter = answer_filter
+        self._access_filter = RagAccessFilter(
+            allowed_guild_ids=config.allowed_guild_ids,
+            admin_user_ids=config.admin_user_ids,
+        )
         self._chat_histories: dict[str, deque[ChatHistoryEntry]] = {}
 
     def answer(
@@ -76,6 +91,7 @@ class RagService:
         append_sources_to_response: bool = True,
         extra_mode_instruction: str | None = None,
         disable_history: bool = False,
+        access_context: AccessContext | None = None,
     ) -> Answer:
         cleaned_query = (query or "").strip()
         if not cleaned_query:
@@ -121,31 +137,43 @@ class RagService:
                 history_scope=history_scope,
             )
 
+        synthesis = self._synthesize_retrieval_query(
+            query=cleaned_query,
+            decision=decision,
+            history=generation_history,
+            force_fast_mode=force_fast_mode,
+        )
+        retrieval_query = synthesis.synthetic_query or cleaned_query
+
         self._prepare_reranker_runtime(force_fast_mode=force_fast_mode)
         effective_recency_mode = self._resolve_recency_mode(decision.recency_mode)
         material_route = bool(decision.material_names)
         if material_route:
             chunks = self._retrieve_material_route_chunks(
-                query=cleaned_query,
+                query=retrieval_query,
                 decision=decision,
                 recency_mode=effective_recency_mode,
                 force_fast_mode=force_fast_mode,
+                access_context=access_context,
             )
         else:
             chunks = self._retrieve_chunks(
-                query=cleaned_query,
+                query=retrieval_query,
                 decision=decision,
                 force_fast_mode=force_fast_mode,
                 recency_mode=effective_recency_mode,
                 excluded_source_types=None,
+                access_context=access_context,
             )
+        chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
 
         chunks = self._rank_and_select_chunks(
-            query=cleaned_query,
+            query=retrieval_query,
             chunks=chunks,
             recency_mode=effective_recency_mode,
             force_fast_mode=force_fast_mode,
         )
+        chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
 
         if not chunks:
             no_rag_generation = self._resolve_generation_settings(
@@ -162,10 +190,12 @@ class RagService:
                 extra_mode_instruction=extra_mode_instruction,
                 json_max_retries=self._config.answer_json_max_retries,
             )
+            answer = self._apply_answer_filter(query=cleaned_query, answer=answer)
             return self._finalize_answer(
                 query=cleaned_query,
                 answer=answer,
                 routing_decision=decision,
+                query_synthesis=synthesis,
                 force_fast_mode=force_fast_mode,
                 history_scope=history_scope,
                 disable_history=disable_history,
@@ -190,13 +220,59 @@ class RagService:
         )
         if material_route:
             answer = replace(answer, route="material_search")
+        answer = self._apply_answer_filter(query=cleaned_query, answer=answer)
         return self._finalize_answer(
             query=cleaned_query,
             answer=answer,
             routing_decision=decision,
+            query_synthesis=synthesis,
             force_fast_mode=force_fast_mode,
             history_scope=history_scope,
             disable_history=disable_history,
+        )
+
+    def _synthesize_retrieval_query(
+        self,
+        *,
+        query: str,
+        decision: RoutingDecision,
+        history: Sequence[ChatHistoryEntry] | None,
+        force_fast_mode: bool,
+    ) -> QuerySynthesisResult:
+        if force_fast_mode or self._query_synthesizer is None:
+            return QuerySynthesisResult(query, used=False, fallback=False)
+        return self._query_synthesizer.synthesize(
+            query=query,
+            history=history,
+            additional_queries=decision.additional_queries,
+            use_additional_memory=decision.use_additional_memory,
+        )
+
+    def _apply_answer_filter(self, *, query: str, answer: Answer) -> Answer:
+        if self._answer_filter is None:
+            return answer
+        result = self._answer_filter.evaluate(answer_text=answer.text)
+        metadata = dict(answer.metadata)
+        metadata["answer_filter"] = {
+            "action": result.action,
+            "reason_code": result.reason_code,
+            "fallback": result.fallback,
+        }
+        if not result.refused:
+            return replace(answer, metadata=metadata)
+
+        refusal_text = self._answer_filter.generate_refusal(query=query)
+        return Answer(
+            text=refusal_text,
+            route=answer.route,
+            sources=[],
+            metadata={
+                "answer_filter": {
+                    "action": result.action,
+                    "reason_code": result.reason_code,
+                    "fallback": result.fallback,
+                }
+            },
         )
 
     def _resolve_generation_settings(
@@ -219,55 +295,15 @@ class RagService:
         force_fast_mode: bool,
         recency_mode: str,
         excluded_source_types: set[str] | None,
+        access_context: AccessContext | None,
     ) -> list[Chunk]:
-        if force_fast_mode or not decision.additional_queries:
-            return self._retrieve_single_query_chunks(
-                query=query,
-                recency_mode=recency_mode,
-                excluded_source_types=excluded_source_types,
-            )
-
-        query_candidates = [query, *decision.additional_queries]
-        normalized_queries = [str(value or "").strip() for value in query_candidates]
-        normalized_queries = [value for value in normalized_queries if value]
-        if not normalized_queries:
-            return []
-        if len(normalized_queries) == 1:
-            return self._retrieve_single_query_chunks(
-                query=normalized_queries[0],
-                recency_mode=recency_mode,
-                excluded_source_types=excluded_source_types,
-            )
-
-        max_workers = max(1, min(len(normalized_queries), 4))
-        results_by_index: dict[int, list[Chunk]] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    self._retrieve_single_query_chunks,
-                    query=retrieval_query,
-                    recency_mode=recency_mode,
-                    excluded_source_types=excluded_source_types,
-                ): index
-                for index, retrieval_query in enumerate(normalized_queries)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                retrieval_query = normalized_queries[index]
-                try:
-                    results_by_index[index] = future.result()
-                except Exception:
-                    logger.exception(
-                        "Query retrieval failed for transformed query: %s",
-                        retrieval_query,
-                    )
-                    results_by_index[index] = []
-
-        merged: dict[str, Chunk] = {}
-        for index in range(len(normalized_queries)):
-            for chunk in results_by_index.get(index, []):
-                merged[chunk.id] = chunk
-        return list(merged.values())
+        _ = decision, force_fast_mode
+        return self._retrieve_single_query_chunks(
+            query=query,
+            recency_mode=recency_mode,
+            excluded_source_types=excluded_source_types,
+            access_context=access_context,
+        )
 
     def _retrieve_single_query_chunks(
         self,
@@ -275,12 +311,14 @@ class RagService:
         query: str,
         recency_mode: str,
         excluded_source_types: set[str] | None,
+        access_context: AccessContext | None,
     ) -> list[Chunk]:
         chunks = self._retrieval.retrieve(
             query,
             dense_top_k=self._config.dense_top_k,
             sparse_top_k=self._config.sparse_top_k,
             sparse_initial_sparse_top_k=self._config.sparse_initial_sparse_top_k,
+            sparse_normalized_ratio=self._config.sparse_normalized_ratio,
             recency_mode=recency_mode,
             recency_weight_soft=self._config.recency_weight_soft,
             recency_weight_hard=self._config.recency_weight_hard,
@@ -288,10 +326,11 @@ class RagService:
             mmr_lambda=self._config.mmr_lambda,
             rrf_k=self._config.rrf_k,
         )
-        return self._filter_chunks_by_source_type(
+        chunks = self._filter_chunks_by_source_type(
             chunks,
             excluded_source_types=excluded_source_types,
         )
+        return self._filter_chunks_by_access(chunks, access_context=access_context)
 
     def _retrieve_material_route_chunks(
         self,
@@ -300,12 +339,14 @@ class RagService:
         decision: RoutingDecision,
         recency_mode: str,
         force_fast_mode: bool,
+        access_context: AccessContext | None = None,
     ) -> list[Chunk]:
         excluded_source_types = set(_MATERIAL_SEARCH_EXCLUDED_SOURCE_TYPES)
         matched_entries = self._match_material_entries(
             material_names=decision.material_names,
             query=query,
             excluded_source_types=excluded_source_types,
+            access_context=access_context,
         )
         if not matched_entries:
             dense_name_contexts = self._material_name_dense_fallback_contexts(
@@ -313,6 +354,7 @@ class RagService:
                 query=query,
                 excluded_source_types=excluded_source_types,
                 force_fast_mode=force_fast_mode,
+                access_context=access_context,
             )
             if dense_name_contexts:
                 return dense_name_contexts
@@ -322,6 +364,7 @@ class RagService:
                 force_fast_mode=force_fast_mode,
                 recency_mode=recency_mode,
                 excluded_source_types=excluded_source_types,
+                access_context=access_context,
             )
 
         material_keys = {
@@ -333,6 +376,7 @@ class RagService:
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
             recency_mode=recency_mode,
+            access_context=access_context,
         )
         if not searched:
             direct_contexts = self._build_material_context_chunks(
@@ -340,6 +384,7 @@ class RagService:
                 entries=matched_entries,
                 searched_chunks=[],
                 force_fast_mode=force_fast_mode,
+                access_context=access_context,
             )
             if direct_contexts:
                 return direct_contexts
@@ -348,6 +393,7 @@ class RagService:
                 query=query,
                 excluded_source_types=excluded_source_types,
                 force_fast_mode=force_fast_mode,
+                access_context=access_context,
             )
             if dense_name_contexts:
                 return dense_name_contexts
@@ -357,6 +403,7 @@ class RagService:
                 force_fast_mode=force_fast_mode,
                 recency_mode=recency_mode,
                 excluded_source_types=excluded_source_types,
+                access_context=access_context,
             )
 
         contexts = self._build_material_context_chunks(
@@ -364,6 +411,7 @@ class RagService:
             entries=matched_entries,
             searched_chunks=searched,
             force_fast_mode=force_fast_mode,
+            access_context=access_context,
         )
         if contexts:
             return contexts
@@ -372,6 +420,7 @@ class RagService:
             query=query,
             excluded_source_types=excluded_source_types,
             force_fast_mode=force_fast_mode,
+            access_context=access_context,
         )
         if dense_name_contexts:
             return dense_name_contexts
@@ -381,6 +430,7 @@ class RagService:
             force_fast_mode=force_fast_mode,
             recency_mode=recency_mode,
             excluded_source_types=excluded_source_types,
+            access_context=access_context,
         )
 
     def _rank_and_select_chunks(
@@ -397,10 +447,7 @@ class RagService:
         ranked = list(chunks)
         if self._reranker is not None and ranked and not force_fast_mode:
             scored = self._reranker.score_documents(query=query, chunks=ranked)
-            scored = self._apply_recency_scores(
-                scored=scored,
-                recency_mode=recency_mode,
-            )
+            _ = recency_mode
             scored.sort(key=lambda item: (-item[0], item[1]))
             ranked = [chunk for _, _, chunk in scored]
 
@@ -752,6 +799,26 @@ class RagService:
             filtered.append(chunk)
         return filtered
 
+    def _filter_chunks_by_access(
+        self,
+        chunks: Sequence[Chunk],
+        *,
+        access_context: AccessContext | None,
+    ) -> list[Chunk]:
+        return self._access_filter.filter_chunks(chunks, access=access_context)
+
+    def _allow_material_entry(
+        self,
+        entry: _MaterialCatalogEntry,
+        *,
+        access_context: AccessContext | None,
+    ) -> bool:
+        metadata = {
+            "source_type": entry.source_type,
+            "source_file_name": entry.source_key,
+        }
+        return self._access_filter.allow_metadata(metadata, access=access_context)
+
     def _normalize_material_name(self, value: str) -> str:
         variants = self._material_name_variants(value)
         return variants[0] if variants else ""
@@ -884,6 +951,7 @@ class RagService:
         material_names: Sequence[str],
         query: str,
         excluded_source_types: set[str],
+        access_context: AccessContext | None = None,
     ) -> list[_MaterialCatalogEntry]:
         max_names = max(1, int(self._config.material_search_max_names))
         excluded = self._normalize_source_type_filters(excluded_source_types)
@@ -907,9 +975,18 @@ class RagService:
             entry
             for entry in self._material_catalog_entries()
             if str(entry.source_type or "").strip().lower() not in excluded
+            and self._allow_material_entry(entry, access_context=access_context)
         ]
         if not entries:
             return []
+
+        keyword_matches = self._match_material_entries_by_keyword_index(
+            normalized_names=normalized_names,
+            entries=entries,
+            limit=max_names,
+        )
+        if keyword_matches:
+            return keyword_matches
 
         def aliases(entry: _MaterialCatalogEntry) -> tuple[str, ...]:
             values = [entry.canonical_name, *entry.aliases]
@@ -953,10 +1030,79 @@ class RagService:
             query=query,
             entries=deduped_partial_matches,
             excluded_source_types=excluded_source_types,
+            access_context=access_context,
         )
         if selected is not None:
             return [selected]
         return deduped_partial_matches[:max_names]
+
+    def _match_material_entries_by_keyword_index(
+        self,
+        *,
+        normalized_names: Sequence[tuple[str, ...]],
+        entries: Sequence[_MaterialCatalogEntry],
+        limit: int,
+    ) -> list[_MaterialCatalogEntry]:
+        try:
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                load_keyword_index,
+                tokenize_material_name_text,
+            )
+        except Exception:
+            return []
+        keyword_index = load_keyword_index(
+            index_dir=self._retrieval.index_dir,
+            corpus_name=_KEYWORD_CORPUS_MATERIAL_NAMES,
+        )
+        if keyword_index is None or not keyword_index.docs:
+            return []
+
+        entries_by_id = {entry.material_id: entry for entry in entries}
+        selected_ids: list[str] = []
+        seen_selected: set[str] = set()
+        for name_variants in normalized_names:
+            tokens: list[str] = []
+            for name in name_variants:
+                tokens.extend(tokenize_material_name_text(name))
+            if not tokens:
+                continue
+            scores = keyword_index.get_scores(tokens)
+            if scores is None or len(scores) == 0:
+                continue
+            query_token_set = set(tokens)
+
+            def _rank_key(index: int) -> tuple[int, float]:
+                doc = keyword_index.docs[index]
+                doc_tokens = set(tokenize_material_name_text(doc.page_content))
+                overlap = len(query_token_set & doc_tokens)
+                return (overlap, float(scores[index]))
+
+            ranked = sorted(
+                range(len(keyword_index.docs)),
+                key=_rank_key,
+                reverse=True,
+            )
+            best_id = ""
+            for idx in ranked:
+                score = float(scores[idx])
+                doc = keyword_index.docs[idx]
+                doc_token_set = set(tokenize_material_name_text(doc.page_content))
+                overlap = len(query_token_set & doc_token_set)
+                if score == 0.0 and overlap <= 0:
+                    break
+                metadata = getattr(doc, "metadata", {}) or {}
+                material_id = str(metadata.get("material_id") or "").strip()
+                if material_id not in entries_by_id:
+                    continue
+                best_id = material_id
+                break
+            if not best_id or best_id in seen_selected:
+                continue
+            seen_selected.add(best_id)
+            selected_ids.append(best_id)
+            if len(selected_ids) >= max(1, int(limit)):
+                break
+        return [entries_by_id[material_id] for material_id in selected_ids]
 
     def _dedupe_material_entries(
         self,
@@ -982,6 +1128,7 @@ class RagService:
         query: str,
         entries: Sequence[_MaterialCatalogEntry],
         excluded_source_types: set[str],
+        access_context: AccessContext | None = None,
     ) -> _MaterialCatalogEntry | None:
         cleaned_query = (query or "").strip()
         if not cleaned_query or len(entries) <= 1:
@@ -997,6 +1144,7 @@ class RagService:
             sparse_top_k=max(1, self._config.sparse_top_k),
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
+            access_context=access_context,
         )
         if not ranked:
             return None
@@ -1016,10 +1164,12 @@ class RagService:
         query: str,
         excluded_source_types: set[str],
         force_fast_mode: bool,
+        access_context: AccessContext | None = None,
     ) -> list[Chunk]:
         selected = self._select_material_entry_by_dense_name(
             material_names=material_names,
             excluded_source_types=excluded_source_types,
+            access_context=access_context,
         )
         if selected is None:
             return []
@@ -1028,6 +1178,7 @@ class RagService:
             entries=[selected],
             searched_chunks=[],
             force_fast_mode=force_fast_mode,
+            access_context=access_context,
         )
 
     def _select_material_entry_by_dense_name(
@@ -1035,6 +1186,7 @@ class RagService:
         *,
         material_names: Sequence[str],
         excluded_source_types: set[str],
+        access_context: AccessContext | None = None,
     ) -> _MaterialCatalogEntry | None:
         dense_ranker = getattr(self._retrieval, "rank_texts_by_dense", None)
         if not callable(dense_ranker):
@@ -1045,6 +1197,7 @@ class RagService:
             entry
             for entry in self._material_catalog_entries()
             if str(entry.source_type or "").strip().lower() not in excluded
+            and self._allow_material_entry(entry, access_context=access_context)
         ]
         if not entries:
             return None
@@ -1094,6 +1247,7 @@ class RagService:
         material_keys: set[tuple[str, str]],
         excluded_source_types: set[str],
         recency_mode: str,
+        access_context: AccessContext | None = None,
     ) -> list[Chunk]:
         chunks = self._retrieve_filtered_candidates(
             query=query,
@@ -1102,6 +1256,7 @@ class RagService:
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
             recency_mode=recency_mode,
+            access_context=access_context,
         )
         if chunks:
             return chunks
@@ -1112,6 +1267,7 @@ class RagService:
             material_keys=material_keys,
             excluded_source_types=excluded_source_types,
             recency_mode=recency_mode,
+            access_context=access_context,
         )
 
     def _retrieve_filtered_candidates(
@@ -1123,6 +1279,7 @@ class RagService:
         material_keys: set[tuple[str, str]] | None,
         excluded_source_types: set[str] | None,
         recency_mode: str = "off",
+        access_context: AccessContext | None = None,
     ) -> list[Chunk]:
         results: list[Chunk] = []
         seen: set[tuple[object, ...]] = set()
@@ -1135,12 +1292,17 @@ class RagService:
                 query,
                 dense_top_k=dense_k,
                 sparse_top_k=sparse_k,
+                sparse_normalized_ratio=self._config.sparse_normalized_ratio,
                 recency_mode=effective_recency_mode,
                 recency_weight_soft=self._config.recency_weight_soft,
                 recency_weight_hard=self._config.recency_weight_hard,
                 recency_half_life_days=self._config.recency_half_life_days,
                 mmr_lambda=self._config.mmr_lambda,
                 rrf_k=self._config.rrf_k,
+            )
+            candidates = self._filter_chunks_by_access(
+                candidates,
+                access_context=access_context,
             )
             for chunk in candidates:
                 if not self._chunk_matches_material_keys(
@@ -1165,8 +1327,8 @@ class RagService:
         entries: Sequence[_MaterialCatalogEntry],
         searched_chunks: Sequence[Chunk],
         force_fast_mode: bool,
+        access_context: AccessContext | None = None,
     ) -> list[Chunk]:
-        _ = query
         if not entries:
             return []
 
@@ -1194,6 +1356,8 @@ class RagService:
         for key in ordered_keys:
             entry = entry_by_key.get(key)
             if entry is None:
+                continue
+            if not self._allow_material_entry(entry, access_context=access_context):
                 continue
             representative_metadata = self._representative_metadata_for_material(
                 material_key=key,
@@ -1409,6 +1573,7 @@ class RagService:
         query: str,
         answer: Answer,
         routing_decision: RoutingDecision,
+        query_synthesis: QuerySynthesisResult,
         force_fast_mode: bool,
         history_scope: str | int | None,
         disable_history: bool,
@@ -1423,6 +1588,11 @@ class RagService:
             "include_capabilities_info": routing_decision.include_capabilities_info,
             "use_additional_memory": routing_decision.use_additional_memory,
             "additional_queries": list(routing_decision.additional_queries),
+        }
+        metadata["query_synthesis"] = {
+            "synthetic_query": query_synthesis.synthetic_query,
+            "used": query_synthesis.used,
+            "fallback": query_synthesis.fallback,
         }
         metadata["fast_mode"] = force_fast_mode
         finalized = replace(answer, text=text, metadata=metadata)

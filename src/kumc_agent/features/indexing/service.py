@@ -23,6 +23,10 @@ from kumc_agent.utils.hashing import stable_hash
 KEYWORD_CORPUS_SPARSE = "sparse"
 KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
+KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
+_MATERIAL_NAME_INDEX_EXCLUDED_SOURCE_TYPES = frozenset(
+    {"messages", "discord_message", "x_posts"}
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,8 +149,9 @@ class IndexingService:
         self._faiss_index.build(chunks=index_chunks, embeddings=embeddings)
         self._bm25_index.build(index_chunks)
 
-        self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
         self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
+        self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
+        self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
 
         return IndexBuildResult(
             loaded_sources=loaded_sources,
@@ -765,6 +770,7 @@ class IndexingService:
             from langchain_core.documents import Document as LangDocument
             from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
             from kumc_agent.infra.indexing.keyword_inverted_index import (
+                KEYWORD_CORPUS_MATERIAL_NAMES,
                 KEYWORD_CORPUS_SECOND_REC_SPARSE,
                 KEYWORD_CORPUS_SPARSE,
                 KEYWORD_CORPUS_SPARSE_SECOND_REC,
@@ -863,6 +869,58 @@ class IndexingService:
                 k1=legacy_cfg.sparse_bm25_k1,
                 b=legacy_cfg.sparse_bm25_b,
             )
+
+    def _build_material_name_keyword_index(self, *, legacy_cfg) -> None:
+        try:
+            from langchain_core.documents import Document as LangDocument
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                KEYWORD_CORPUS_MATERIAL_NAMES,
+                build_and_save_keyword_index,
+                tokenize_material_name_text,
+            )
+            from kumc_agent.infra.indexing.material_catalog import (
+                load_material_catalog,
+            )
+        except Exception:
+            logger.exception("Material-name keyword index dependencies are unavailable.")
+            return
+
+        docs: list[LangDocument] = []
+        for entry in load_material_catalog(legacy_cfg.index_dir):
+            source_type = str(entry.source_type or "").strip().lower()
+            if source_type in _MATERIAL_NAME_INDEX_EXCLUDED_SOURCE_TYPES:
+                continue
+            texts: list[str] = []
+            seen: set[str] = set()
+            for value in (entry.canonical_name, entry.source_key, *entry.aliases):
+                text = str(value or "").strip()
+                if not text or text.casefold() in seen:
+                    continue
+                seen.add(text.casefold())
+                texts.append(text)
+            if not texts:
+                continue
+            docs.append(
+                LangDocument(
+                    page_content="\n".join(texts),
+                    metadata={
+                        "material_id": entry.material_id,
+                        "source_type": entry.source_type,
+                        "source_key": entry.source_key,
+                        "canonical_name": entry.canonical_name,
+                        "aliases": list(entry.aliases),
+                    },
+                )
+            )
+
+        build_and_save_keyword_index(
+            index_dir=legacy_cfg.index_dir,
+            corpus_name=KEYWORD_CORPUS_MATERIAL_NAMES,
+            docs=docs,
+            tokenize_doc=lambda doc: tokenize_material_name_text(doc.page_content),
+            k1=legacy_cfg.sparse_bm25_k1,
+            b=legacy_cfg.sparse_bm25_b,
+        )
 
     def _build_material_catalog_legacy(self, *, legacy_cfg) -> None:
         try:

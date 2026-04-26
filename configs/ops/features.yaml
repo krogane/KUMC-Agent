@@ -29,6 +29,7 @@ features:
     dense_top_k: 15
     sparse_top_k: 15
     sparse_initial_sparse_top_k: 15
+    sparse_normalized_ratio: 1.0
     rerank_pool_size: 20
     rrf_k: 60
     mmr_lambda: 0.75
