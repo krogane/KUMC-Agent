@@ -64,6 +64,14 @@ _METADATA_KEYS = (
     "notion_created_time",
     "notion_last_edited_time",
     "x_author_handle",
+    "minecraft_wiki_title",
+    "minecraft_wiki_page_id",
+    "minecraft_wiki_revision_id",
+    "canonical_url",
+    "heading_path",
+    "visibility",
+    "access_scope",
+    "checksum",
 )
 
 
@@ -74,7 +82,7 @@ def _extract_drive_file_id(filename: str) -> str | None:
     return prefix or None
 
 
-def _load_drive_metadata(source_path: Path) -> dict[str, str]:
+def _load_drive_metadata(source_path: Path) -> dict[str, object]:
     meta_path = source_path.with_suffix(source_path.suffix + ".meta.json")
     if not meta_path.exists():
         return {}
@@ -89,7 +97,7 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
         logger.warning("Invalid metadata sidecar %s: expected object", meta_path.name)
         return {}
 
-    metadata: dict[str, str] = {}
+    metadata: dict[str, object] = {}
     for key in (
         "drive_file_id",
         "drive_file_name",
@@ -109,9 +117,17 @@ def _load_drive_metadata(source_path: Path) -> dict[str, str]:
         "notion_url",
         "notion_created_time",
         "notion_last_edited_time",
+        "minecraft_wiki_title",
+        "minecraft_wiki_page_id",
+        "minecraft_wiki_revision_id",
+        "canonical_url",
+        "visibility",
+        "checksum",
     ):
         value = data.get(key)
         if isinstance(value, str) and value:
+            metadata[key] = value
+        elif key == "access_scope" and isinstance(value, dict):
             metadata[key] = value
     return metadata
 
@@ -120,7 +136,7 @@ def _build_base_metadata(
     *,
     source_file_name: str,
     source_type: str,
-    drive_metadata: dict[str, str],
+    drive_metadata: dict[str, object],
     fallback_drive_file_id: str | None,
 ) -> dict[str, object]:
     drive_file_id = drive_metadata.get("drive_file_id") or fallback_drive_file_id or ""
@@ -159,6 +175,13 @@ def _build_base_metadata(
         "notion_url": drive_metadata.get("notion_url", ""),
         "notion_created_time": drive_metadata.get("notion_created_time", ""),
         "notion_last_edited_time": drive_metadata.get("notion_last_edited_time", ""),
+        "minecraft_wiki_title": drive_metadata.get("minecraft_wiki_title", ""),
+        "minecraft_wiki_page_id": drive_metadata.get("minecraft_wiki_page_id", ""),
+        "minecraft_wiki_revision_id": drive_metadata.get("minecraft_wiki_revision_id", ""),
+        "canonical_url": drive_metadata.get("canonical_url", ""),
+        "visibility": drive_metadata.get("visibility", ""),
+        "access_scope": drive_metadata.get("access_scope", ""),
+        "checksum": drive_metadata.get("checksum", ""),
     }
     metadata["source_date"] = infer_source_date(metadata=metadata)
     return metadata
@@ -561,6 +584,11 @@ def recursive_chunk_dir(
         for doc in docs:
             metadata = dict(base_metadata)
             metadata["chunk_id"] = output_index
+            if source_type == "minecraft_wiki":
+                metadata["heading_path"] = _minecraft_heading_path(
+                    title=str(metadata.get("minecraft_wiki_title") or path.stem),
+                    text=doc,
+                )
             metadata = _with_stage(metadata, stage)
             output_chunks.append(Chunk(text=doc, metadata=metadata))
             output_index += 1
@@ -1080,6 +1108,18 @@ def summery_chunk_jsonl_dir(
 def _strip_chunk_metadata(metadata: dict[str, object]) -> dict[str, object]:
     cleaned = {k: metadata.get(k, "") for k in _METADATA_KEYS}
     return cleaned
+
+
+def _minecraft_heading_path(*, title: str, text: str) -> list[str]:
+    headings = [
+        match.group(2).strip()
+        for match in re.finditer(r"(?m)^(#{1,6})\s+(.+)$", text or "")
+        if match.group(2).strip()
+    ]
+    base = [title.strip()] if title.strip() else []
+    if not headings:
+        return base
+    return base + headings[:3]
 
 
 def _normalize_chunk_id(value: object) -> int | None:

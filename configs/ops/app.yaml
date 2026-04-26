@@ -183,9 +183,13 @@ integrations:
     database_ids: []
   minecraft_wiki:
     page_titles: []
-    api_url: "https://minecraft.wiki/api.php"
-    page_url_base: "https://minecraft.wiki/w/"
+    api_url: "https://ja.minecraft.wiki/api.php"
+    page_url_base: "https://ja.minecraft.wiki/w/"
     max_pages: 20
+    rate_limit_per_minute: 30
+    request_interval_seconds: 1.0
+    namespaces: [0]
+    full_backfill_enabled: false
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000
@@ -193,3 +197,33 @@ integrations:
   gemini_summary_requests_per_minute: 2000
   gemini_ragas_requests_per_minute: 2000
   gemini_ragas_embedding_requests_per_minute: 200
+
+minecraft_wiki_rag:
+  chunking:
+    first_recursive_chunk_size: 1400
+    first_recursive_chunk_overlap: 160
+    second_recursive_chunk_size: 420
+    second_recursive_chunk_overlap: 80
+    summary_characters: 260
+    summary_batch_size: 16
+    summary_llm_provider: "gemini"
+    summary_gemini_model: "gemini-2.5-flash-lite"
+    summary_temperature: 0.0
+    summary_max_output_tokens: 1024
+    summary_thinking_level: "minimal"
+  retrieval:
+    top_k: 8
+    dense_top_k: 24
+    sparse_top_k: 24
+    sparse_initial_sparse_top_k: 12
+    sparse_normalized_ratio: 0.5
+    rerank_pool_size: 20
+    rrf_k: 60
+    mmr_lambda: 0.72
+    parent_doc_enabled: true
+    parent_chunk_cap: 2
+    sudachi_mode: "B"
+    sparse_bm25_k1: 1.5
+    sparse_bm25_b: 0.75
+    sparse_use_normalized_form: true
+    sparse_remove_symbols: false

@@ -136,6 +136,13 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --query "KUMCの�
 複数指定した場合は、それぞれの質問に対する結果を配列として返します。
 Drive / Discord など権限付きソースを検索対象に含める場合は、呼び出し元の権限情報として `--user-id`、`--guild-id`、`--role-id`、`--admin` を渡せます。
 
+Minecraft Wiki RAG を明示的に使う場合は、`--scope minecraft_wiki` を指定します。
+この経路では日本語版 Minecraft Wiki の index だけを検索対象にし、payload の `route` は `minecraft_wiki_rag` になります。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli tool rag --scope minecraft_wiki --query "丸石の入手方法は？"
+```
+
 また、このコマンドでは履歴や追加メモリを無効化する指定が入っています。
 そのため、外部ツールから安定した RAG 結果を得る用途に向いています。
 ルーティング判断、高速モード、合成クエリ、回答フィルタリング結果のような診断情報が必要な場合は、トップレベルではなく `metadata` の中を確認します。

@@ -312,6 +312,26 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             admin_user_ids=tuple(
                 str(value) for value in config.security.maintenance_command_author_ids
             ),
+            minecraft_wiki_top_k=config.minecraft_wiki_rag.retrieval.top_k,
+            minecraft_wiki_dense_top_k=config.minecraft_wiki_rag.retrieval.dense_top_k,
+            minecraft_wiki_sparse_top_k=config.minecraft_wiki_rag.retrieval.sparse_top_k,
+            minecraft_wiki_sparse_initial_sparse_top_k=(
+                config.minecraft_wiki_rag.retrieval.sparse_initial_sparse_top_k
+            ),
+            minecraft_wiki_sparse_normalized_ratio=(
+                config.minecraft_wiki_rag.retrieval.sparse_normalized_ratio
+            ),
+            minecraft_wiki_rerank_pool_size=(
+                config.minecraft_wiki_rag.retrieval.rerank_pool_size
+            ),
+            minecraft_wiki_rrf_k=config.minecraft_wiki_rag.retrieval.rrf_k,
+            minecraft_wiki_mmr_lambda=config.minecraft_wiki_rag.retrieval.mmr_lambda,
+            minecraft_wiki_parent_doc_enabled=(
+                config.minecraft_wiki_rag.retrieval.parent_doc_enabled
+            ),
+            minecraft_wiki_parent_chunk_cap=(
+                config.minecraft_wiki_rag.retrieval.parent_chunk_cap
+            ),
         ),
         router=router,
         retrieval=retrieval_component,

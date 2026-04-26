@@ -80,6 +80,7 @@ class RetrievalComponent:
         recency_half_life_days: float = 45.0,
         mmr_lambda: float = 0.75,
         rrf_k: int = 60,
+        source_type_filter: set[str] | None = None,
     ) -> list[Chunk]:
         dense_limit = max(0, int(dense_top_k))
         sparse_limit = max(0, int(sparse_top_k))
@@ -141,6 +142,14 @@ class RetrievalComponent:
             recency_weight_hard=recency_weight_hard,
             recency_half_life_days=recency_half_life_days,
         )
+        dense_hits = self._filter_dense_hits_by_source_type(
+            dense_hits,
+            source_type_filter=source_type_filter,
+        )
+        sparse_hits = self._filter_sparse_hits_by_source_type(
+            sparse_hits,
+            source_type_filter=source_type_filter,
+        )
         scored = self._merge_scores(
             dense_hits=dense_hits,
             sparse_hits=sparse_hits,
@@ -149,6 +158,37 @@ class RetrievalComponent:
         ranked = sorted(scored, key=lambda item: item.score, reverse=True)
         _ = mmr_lambda  # Applied explicitly in RagService after rerank stage.
         return [item.chunk for item in ranked]
+
+    @staticmethod
+    def _filter_dense_hits_by_source_type(
+        hits,
+        *,
+        source_type_filter: set[str] | None,
+    ):
+        if not source_type_filter:
+            return hits
+        allowed = {str(value).strip().lower() for value in source_type_filter}
+        return [
+            hit
+            for hit in hits
+            if str(hit.chunk.metadata.get("source_type") or "").strip().lower()
+            in allowed
+        ]
+
+    @staticmethod
+    def _filter_sparse_hits_by_source_type(
+        hits: list[tuple[Chunk, float]],
+        *,
+        source_type_filter: set[str] | None,
+    ) -> list[tuple[Chunk, float]]:
+        if not source_type_filter:
+            return hits
+        allowed = {str(value).strip().lower() for value in source_type_filter}
+        return [
+            (chunk, score)
+            for chunk, score in hits
+            if str(chunk.metadata.get("source_type") or "").strip().lower() in allowed
+        ]
 
     def _retrieve_dense_hits(self, *, query: str, top_k: int):
         if top_k <= 0:

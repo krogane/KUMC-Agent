@@ -649,6 +649,8 @@ class GenerationComponent:
             ref = self._discord_url_for_selection(chunk=chunk, sub_index=sub_index)
             if ref:
                 return ref
+        if source_type == "minecraft_wiki":
+            return _minecraft_wiki_ref_from_metadata(metadata)
         ref = _x_url_from_metadata(metadata)
         if ref:
             return ref
@@ -1042,6 +1044,30 @@ def _notion_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     url = str(metadata.get("notion_url") or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return None
+    return url
+
+
+def _minecraft_wiki_ref_from_metadata(
+    metadata: dict[str, object] | None,
+) -> str | None:
+    if not metadata:
+        return None
+    url = str(metadata.get("canonical_url") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    title = str(metadata.get("minecraft_wiki_title") or "").strip()
+    heading_path = metadata.get("heading_path")
+    heading = ""
+    if isinstance(heading_path, list):
+        heading_values = [str(value).strip() for value in heading_path if str(value).strip()]
+        if len(heading_values) >= 2:
+            heading = " > ".join(heading_values[1:])
+    elif heading_path:
+        heading = str(heading_path).strip()
+    if title and heading:
+        return f"{title} - {heading}: {url}"
+    if title:
+        return f"{title}: {url}"
     return url
 
 

@@ -92,6 +92,7 @@ class RagService:
         extra_mode_instruction: str | None = None,
         disable_history: bool = False,
         access_context: AccessContext | None = None,
+        route_override: str | None = None,
     ) -> Answer:
         cleaned_query = (query or "").strip()
         if not cleaned_query:
@@ -113,6 +114,17 @@ class RagService:
             question_author=question_author,
             history=routing_history,
         )
+        if str(route_override or "").strip().lower() in {
+            "minecraft_wiki",
+            "minecraft_wiki_rag",
+        }:
+            decision = replace(
+                decision,
+                target_model="minecraft_wiki",
+                material_names=[],
+                additional_queries=[],
+                recency_mode="off",
+            )
         if force_disable_additional_memory and decision.use_additional_memory:
             decision = replace(decision, use_additional_memory=False)
         if force_fast_mode:
@@ -120,7 +132,9 @@ class RagService:
                 decision,
                 material_names=[],
                 additional_queries=[],
+                fast_mode=True,
             )
+        effective_fast_mode = bool(force_fast_mode or decision.fast_mode)
 
         if generation_history_override is not None:
             generation_history = list(generation_history_override)
@@ -137,15 +151,27 @@ class RagService:
                 history_scope=history_scope,
             )
 
+        if decision.target_model == "minecraft_wiki":
+            return self._answer_minecraft_wiki(
+                query=cleaned_query,
+                decision=decision,
+                generation_history=generation_history,
+                effective_fast_mode=effective_fast_mode,
+                history_scope=history_scope,
+                disable_history=disable_history,
+                append_sources_to_response=append_sources_to_response,
+                access_context=access_context,
+            )
+
         synthesis = self._synthesize_retrieval_query(
             query=cleaned_query,
             decision=decision,
             history=generation_history,
-            force_fast_mode=force_fast_mode,
+            force_fast_mode=effective_fast_mode,
         )
         retrieval_query = synthesis.synthetic_query or cleaned_query
 
-        self._prepare_reranker_runtime(force_fast_mode=force_fast_mode)
+        self._prepare_reranker_runtime(force_fast_mode=effective_fast_mode)
         effective_recency_mode = self._resolve_recency_mode(decision.recency_mode)
         material_route = bool(decision.material_names)
         if material_route:
@@ -153,14 +179,14 @@ class RagService:
                 query=retrieval_query,
                 decision=decision,
                 recency_mode=effective_recency_mode,
-                force_fast_mode=force_fast_mode,
+                force_fast_mode=effective_fast_mode,
                 access_context=access_context,
             )
         else:
             chunks = self._retrieve_chunks(
                 query=retrieval_query,
                 decision=decision,
-                force_fast_mode=force_fast_mode,
+                force_fast_mode=effective_fast_mode,
                 recency_mode=effective_recency_mode,
                 excluded_source_types=None,
                 access_context=access_context,
@@ -171,7 +197,7 @@ class RagService:
             query=retrieval_query,
             chunks=chunks,
             recency_mode=effective_recency_mode,
-            force_fast_mode=force_fast_mode,
+            force_fast_mode=effective_fast_mode,
         )
         chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
 
@@ -196,7 +222,7 @@ class RagService:
                 answer=answer,
                 routing_decision=decision,
                 query_synthesis=synthesis,
-                force_fast_mode=force_fast_mode,
+                force_fast_mode=effective_fast_mode,
                 history_scope=history_scope,
                 disable_history=disable_history,
             )
@@ -226,7 +252,77 @@ class RagService:
             answer=answer,
             routing_decision=decision,
             query_synthesis=synthesis,
-            force_fast_mode=force_fast_mode,
+            force_fast_mode=effective_fast_mode,
+            history_scope=history_scope,
+            disable_history=disable_history,
+        )
+
+    def _answer_minecraft_wiki(
+        self,
+        *,
+        query: str,
+        decision: RoutingDecision,
+        generation_history: Sequence[ChatHistoryEntry] | None,
+        effective_fast_mode: bool,
+        history_scope: str | int | None,
+        disable_history: bool,
+        append_sources_to_response: bool,
+        access_context: AccessContext | None,
+    ) -> Answer:
+        synthesis = QuerySynthesisResult(query, used=False, fallback=False)
+        self._prepare_reranker_runtime(force_fast_mode=effective_fast_mode)
+        chunks = self._retrieve_minecraft_wiki_chunks(
+            query=query,
+            force_fast_mode=effective_fast_mode,
+            access_context=access_context,
+        )
+        chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
+        chunks = self._rank_and_select_minecraft_wiki_chunks(
+            query=query,
+            chunks=chunks,
+            force_fast_mode=effective_fast_mode,
+        )
+        chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
+
+        if not chunks:
+            answer = Answer(
+                text="日本語版Minecraft Wikiの根拠が見つからなかったため、回答できません。",
+                route="minecraft_wiki_rag",
+                sources=[],
+                metadata={"reason": "minecraft_wiki_context_not_found"},
+            )
+            return self._finalize_answer(
+                query=query,
+                answer=answer,
+                routing_decision=decision,
+                query_synthesis=synthesis,
+                force_fast_mode=effective_fast_mode,
+                history_scope=history_scope,
+                disable_history=disable_history,
+            )
+
+        rag_generation = self._resolve_generation_settings(target_model="rag")
+        answer = self._generation.generate_rag_answer(
+            query=query,
+            chunks=chunks,
+            history=generation_history if decision.use_additional_memory else [],
+            provider=rag_generation.provider,
+            include_capabilities_info=False,
+            temperature=rag_generation.temperature,
+            max_output_tokens=rag_generation.max_output_tokens,
+            answer_prompt_name="answer_minecraft_wiki",
+            append_sources_to_response=append_sources_to_response,
+            extra_mode_instruction=None,
+            json_max_retries=self._config.answer_json_max_retries,
+            force_all_sources=True,
+        )
+        answer = replace(answer, route="minecraft_wiki_rag")
+        return self._finalize_answer(
+            query=query,
+            answer=answer,
+            routing_decision=decision,
+            query_synthesis=synthesis,
+            force_fast_mode=effective_fast_mode,
             history_scope=history_scope,
             disable_history=disable_history,
         )
@@ -287,6 +383,52 @@ class RagService:
             base = self._config.rag_generation
         return base
 
+    def _minecraft_wiki_top_k(self) -> int:
+        return int(self._config.minecraft_wiki_top_k or self._config.top_k)
+
+    def _minecraft_wiki_dense_top_k(self) -> int:
+        return int(self._config.minecraft_wiki_dense_top_k or self._config.dense_top_k)
+
+    def _minecraft_wiki_sparse_top_k(self) -> int:
+        return int(self._config.minecraft_wiki_sparse_top_k or self._config.sparse_top_k)
+
+    def _minecraft_wiki_sparse_initial_sparse_top_k(self) -> int:
+        return int(
+            self._config.minecraft_wiki_sparse_initial_sparse_top_k
+            or self._config.sparse_initial_sparse_top_k
+        )
+
+    def _minecraft_wiki_sparse_normalized_ratio(self) -> float | None:
+        if self._config.minecraft_wiki_sparse_normalized_ratio is not None:
+            return self._config.minecraft_wiki_sparse_normalized_ratio
+        return self._config.sparse_normalized_ratio
+
+    def _minecraft_wiki_rerank_pool_size(self) -> int:
+        return int(
+            self._config.minecraft_wiki_rerank_pool_size
+            or self._config.rerank_pool_size
+        )
+
+    def _minecraft_wiki_rrf_k(self) -> int:
+        return int(self._config.minecraft_wiki_rrf_k or self._config.rrf_k)
+
+    def _minecraft_wiki_mmr_lambda(self) -> float:
+        if self._config.minecraft_wiki_mmr_lambda is not None:
+            return float(self._config.minecraft_wiki_mmr_lambda)
+        return float(self._config.mmr_lambda)
+
+    def _minecraft_wiki_parent_doc_enabled(self) -> bool:
+        if self._config.minecraft_wiki_parent_doc_enabled is not None:
+            return bool(self._config.minecraft_wiki_parent_doc_enabled)
+        return bool(self._config.parent_doc_enabled)
+
+    def _minecraft_wiki_parent_chunk_cap(self) -> int:
+        return int(
+            self._config.minecraft_wiki_parent_chunk_cap
+            if self._config.minecraft_wiki_parent_chunk_cap is not None
+            else self._config.parent_chunk_cap
+        )
+
     def _retrieve_chunks(
         self,
         *,
@@ -331,6 +473,74 @@ class RagService:
             excluded_source_types=excluded_source_types,
         )
         return self._filter_chunks_by_access(chunks, access_context=access_context)
+
+    def _retrieve_minecraft_wiki_chunks(
+        self,
+        *,
+        query: str,
+        force_fast_mode: bool,
+        access_context: AccessContext | None,
+    ) -> list[Chunk]:
+        _ = force_fast_mode
+        chunks = self._retrieval.retrieve(
+            query,
+            dense_top_k=self._minecraft_wiki_dense_top_k(),
+            sparse_top_k=self._minecraft_wiki_sparse_top_k(),
+            sparse_initial_sparse_top_k=(
+                self._minecraft_wiki_sparse_initial_sparse_top_k()
+            ),
+            sparse_normalized_ratio=self._minecraft_wiki_sparse_normalized_ratio(),
+            recency_mode="off",
+            recency_weight_soft=0.0,
+            recency_weight_hard=0.0,
+            recency_half_life_days=self._config.recency_half_life_days,
+            mmr_lambda=self._minecraft_wiki_mmr_lambda(),
+            rrf_k=self._minecraft_wiki_rrf_k(),
+            source_type_filter={"minecraft_wiki"},
+        )
+        chunks = [
+            chunk
+            for chunk in chunks
+            if str(chunk.metadata.get("source_type") or "").strip().lower()
+            == "minecraft_wiki"
+        ]
+        return self._filter_chunks_by_access(chunks, access_context=access_context)
+
+    def _rank_and_select_minecraft_wiki_chunks(
+        self,
+        *,
+        query: str,
+        chunks: list[Chunk],
+        force_fast_mode: bool,
+    ) -> list[Chunk]:
+        if not chunks:
+            return []
+
+        ranked = list(chunks)
+        if self._reranker is not None and ranked and not force_fast_mode:
+            pool_size = max(0, int(self._minecraft_wiki_rerank_pool_size()))
+            rerank_pool = ranked[:pool_size] if pool_size > 0 else ranked
+            scored = self._reranker.score_documents(query=query, chunks=rerank_pool)
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            ranked = [chunk for _, _, chunk in scored]
+
+        ranked = self._apply_parent_chunk_cap_with_limit(
+            ranked,
+            cap=self._minecraft_wiki_parent_chunk_cap(),
+        )
+
+        if not force_fast_mode:
+            ranked = self._retrieval.reorder_with_mmr(
+                query=query,
+                chunks=ranked,
+                mmr_lambda=self._minecraft_wiki_mmr_lambda(),
+            )
+
+        selected = ranked[: max(0, int(self._minecraft_wiki_top_k()))]
+        return self._append_parent_chunks_with_enabled(
+            selected,
+            parent_doc_enabled=self._minecraft_wiki_parent_doc_enabled(),
+        )
 
     def _retrieve_material_route_chunks(
         self,
@@ -574,9 +784,19 @@ class RagService:
         return None
 
     def _apply_parent_chunk_cap(self, chunks: list[Chunk]) -> list[Chunk]:
+        return self._apply_parent_chunk_cap_with_limit(
+            chunks,
+            cap=int(self._config.parent_chunk_cap),
+        )
+
+    def _apply_parent_chunk_cap_with_limit(
+        self,
+        chunks: list[Chunk],
+        *,
+        cap: int,
+    ) -> list[Chunk]:
         if not chunks:
             return []
-        cap = int(self._config.parent_chunk_cap)
         if cap <= 0:
             return chunks
 
@@ -593,6 +813,12 @@ class RagService:
 
     def _parent_cap_key(self, chunk: Chunk) -> tuple[object, ...]:
         metadata = chunk.metadata or {}
+        if str(metadata.get("source_type") or "").strip().lower() == "minecraft_wiki":
+            return (
+                "minecraft_wiki",
+                metadata.get("minecraft_wiki_page_id") or metadata.get("source_file_name") or "",
+                metadata.get("parent_chunk_id") or metadata.get("chunk_id") or chunk.id,
+            )
         parent_id = self._normalize_chunk_id(metadata.get("parent_chunk_id"))
         if parent_id is None:
             return ("self", self._chunk_doc_key(chunk))
@@ -605,7 +831,18 @@ class RagService:
         self,
         chunks: list[Chunk],
     ) -> list[Chunk]:
-        if not chunks or not self._config.parent_doc_enabled:
+        return self._append_parent_chunks_with_enabled(
+            chunks,
+            parent_doc_enabled=self._config.parent_doc_enabled,
+        )
+
+    def _append_parent_chunks_with_enabled(
+        self,
+        chunks: list[Chunk],
+        *,
+        parent_doc_enabled: bool,
+    ) -> list[Chunk]:
+        if not chunks or not parent_doc_enabled:
             return chunks
 
         ordered: list[Chunk] = []
@@ -732,7 +969,11 @@ class RagService:
         metadata: dict[str, object],
         chunk_id: int,
     ) -> tuple[object, ...] | None:
-        source = metadata.get("drive_file_id") or metadata.get("source_file_name")
+        source = (
+            metadata.get("drive_file_id")
+            or metadata.get("minecraft_wiki_page_id")
+            or metadata.get("source_file_name")
+        )
         if not source:
             return None
         source_type = metadata.get("source_type") or ""
@@ -1583,12 +1824,17 @@ class RagService:
             text = f"{self._config.fast_model_notice}\n\n{text}"
         metadata = dict(answer.metadata)
         metadata["routing_decision"] = {
+            "target_model": routing_decision.target_model,
             "recency_mode": routing_decision.recency_mode,
             "material_names": list(routing_decision.material_names),
             "include_capabilities_info": routing_decision.include_capabilities_info,
             "use_additional_memory": routing_decision.use_additional_memory,
-            "additional_queries": list(routing_decision.additional_queries),
+            "fast_mode": routing_decision.fast_mode,
         }
+        if routing_decision.target_model != "minecraft_wiki":
+            metadata["routing_decision"]["additional_queries"] = list(
+                routing_decision.additional_queries
+            )
         metadata["query_synthesis"] = {
             "synthetic_query": query_synthesis.synthetic_query,
             "used": query_synthesis.used,

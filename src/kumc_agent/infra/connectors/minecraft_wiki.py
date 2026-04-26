@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
+import time
 from urllib.parse import urlencode, quote
 from urllib.request import urlopen
 
@@ -25,12 +27,17 @@ class MinecraftWikiConnector:
     api_url: str
     page_url_base: str
     max_pages: int
+    rate_limit_per_minute: int = 30
+    request_interval_seconds: float = 1.0
+    namespaces: tuple[int, ...] = (0,)
+    full_backfill_enabled: bool = False
 
     source_kind: str = "minecraft_wiki"
+    _last_request_monotonic: float = field(default=0.0, init=False, repr=False)
 
     async def backfill(self, scope: BackfillScope) -> AsyncIterator[SourceRawItem]:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
-        titles = list(scope.source_ids or self.page_titles)
+        titles = self._resolve_backfill_titles(scope)
         if scope.limit is not None:
             titles = titles[: max(0, scope.limit)]
         if self.max_pages > 0:
@@ -85,12 +92,62 @@ class MinecraftWikiConnector:
         text, metadata = self._download_page(clean_title)
         if not text.strip():
             return None
+        metadata["checksum"] = stable_hash(text)
         path.write_text(text, encoding="utf-8")
         meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
         return self._raw_item(title=clean_title, text=text, metadata=metadata)
 
+    def _resolve_backfill_titles(self, scope: BackfillScope) -> list[str]:
+        explicit_titles = list(scope.source_ids or ())
+        if explicit_titles:
+            return [title for title in explicit_titles if str(title).strip()]
+        configured_titles = list(self.page_titles)
+        if configured_titles:
+            return [title for title in configured_titles if str(title).strip()]
+        if not self.full_backfill_enabled:
+            return []
+        return self._list_all_page_titles()
+
+    def _list_all_page_titles(self) -> list[str]:
+        titles: list[str] = []
+        namespaces = self.namespaces or (0,)
+        for namespace in namespaces:
+            apcontinue = ""
+            while True:
+                params = {
+                    "action": "query",
+                    "list": "allpages",
+                    "apnamespace": str(int(namespace)),
+                    "aplimit": "max",
+                    "format": "json",
+                    "formatversion": "2",
+                }
+                if apcontinue:
+                    params["apcontinue"] = apcontinue
+                payload = self._request_json(params)
+                query = payload.get("query") if isinstance(payload, dict) else None
+                pages = query.get("allpages") if isinstance(query, dict) else None
+                if isinstance(pages, list):
+                    for page in pages:
+                        if not isinstance(page, dict):
+                            continue
+                        title = str(page.get("title") or "").strip()
+                        if title:
+                            titles.append(title)
+                            if self.max_pages > 0 and len(titles) >= self.max_pages:
+                                return titles
+                cont = payload.get("continue") if isinstance(payload, dict) else None
+                apcontinue = (
+                    str(cont.get("apcontinue") or "").strip()
+                    if isinstance(cont, dict)
+                    else ""
+                )
+                if not apcontinue:
+                    break
+        return titles
+
     def _download_page(self, title: str) -> tuple[str, dict[str, object]]:
-        query = urlencode(
+        payload = self._request_json(
             {
                 "action": "parse",
                 "page": title,
@@ -99,22 +156,82 @@ class MinecraftWikiConnector:
                 "formatversion": "2",
             }
         )
-        with urlopen(f"{self.api_url}?{query}", timeout=20) as response:  # nosec B310
-            payload = json.loads(response.read().decode("utf-8"))
         parse = payload.get("parse") if isinstance(payload, dict) else None
         if not isinstance(parse, dict):
             return "", {}
-        text = str(parse.get("wikitext") or "")
+        revision_metadata = self._revision_metadata(title=title)
+        text = _normalize_wikitext(str(parse.get("wikitext") or ""))
         page_id = str(parse.get("pageid") or title)
         metadata = {
             "minecraft_wiki_title": str(parse.get("title") or title),
             "minecraft_wiki_page_id": page_id,
-            "minecraft_wiki_revision_id": str(parse.get("revid") or ""),
-            "canonical_url": self.page_url_base.rstrip("/") + "/" + quote(title.replace(" ", "_")),
+            "minecraft_wiki_revision_id": str(
+                revision_metadata.get("revid") or parse.get("revid") or ""
+            ),
+            "canonical_url": str(
+                revision_metadata.get("canonicalurl")
+                or self.page_url_base.rstrip("/") + "/" + quote(title.replace(" ", "_"))
+            ),
+            "source_kind": "minecraft_wiki",
             "source_type": "minecraft_wiki",
+            "access_scope": {"visibility": "public"},
             "visibility": "public",
         }
+        if revision_metadata.get("timestamp"):
+            metadata["updated_at"] = str(revision_metadata["timestamp"])
         return text, metadata
+
+    def _revision_metadata(self, *, title: str) -> dict[str, object]:
+        payload = self._request_json(
+            {
+                "action": "query",
+                "titles": title,
+                "prop": "revisions|info",
+                "rvprop": "ids|timestamp",
+                "inprop": "url",
+                "format": "json",
+                "formatversion": "2",
+            }
+        )
+        query = payload.get("query") if isinstance(payload, dict) else None
+        pages = query.get("pages") if isinstance(query, dict) else None
+        if not isinstance(pages, list) or not pages:
+            return {}
+        page = pages[0]
+        if not isinstance(page, dict):
+            return {}
+        revisions = page.get("revisions")
+        revision = revisions[0] if isinstance(revisions, list) and revisions else {}
+        if not isinstance(revision, dict):
+            revision = {}
+        metadata: dict[str, object] = {
+            "pageid": page.get("pageid"),
+            "canonicalurl": page.get("canonicalurl") or page.get("fullurl"),
+            "revid": revision.get("revid"),
+            "timestamp": revision.get("timestamp"),
+        }
+        return {key: value for key, value in metadata.items() if value}
+
+    def _request_json(self, params: dict[str, str]) -> dict[str, object]:
+        self._wait_for_rate_limit()
+        query = urlencode(params)
+        with urlopen(f"{self.api_url}?{query}", timeout=20) as response:  # nosec B310
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload if isinstance(payload, dict) else {}
+
+    def _wait_for_rate_limit(self) -> None:
+        interval = max(0.0, float(self.request_interval_seconds))
+        if self.rate_limit_per_minute > 0:
+            interval = max(interval, 60.0 / float(self.rate_limit_per_minute))
+        if interval <= 0.0:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_request_monotonic
+        wait_seconds = interval - elapsed
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now = time.monotonic()
+        object.__setattr__(self, "_last_request_monotonic", now)
 
     def _raw_item(
         self,
@@ -137,7 +254,12 @@ class MinecraftWikiConnector:
             access_scope=AccessScope(visibility="public"),
             raw_path=str(self.raw_dir / f"{_safe_name(title)}.md"),
             checksum=stable_hash(text),
-            metadata={**metadata, "source_type": "minecraft_wiki"},
+            metadata={
+                **metadata,
+                "source_kind": "minecraft_wiki",
+                "source_type": "minecraft_wiki",
+                "visibility": "public",
+            },
         )
 
 
@@ -155,3 +277,48 @@ def _read_json(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         return {}
     return {str(key): value for key, value in payload.items()}
+
+
+def _normalize_wikitext(text: str) -> str:
+    cleaned = text or ""
+    cleaned = re.sub(r"(?is)<ref[^>/]*/>", "", cleaned)
+    cleaned = re.sub(r"(?is)<ref[^>]*>.*?</ref>", "", cleaned)
+    cleaned = re.sub(r"(?is)<!--.*?-->", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*\[\[カテゴリ:[^\]]+\]\]\s*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*\[\[Category:[^\]]+\]\]\s*$", "", cleaned)
+    cleaned = _strip_balanced_templates(cleaned)
+    cleaned = re.sub(r"(?m)^(={2,6})\s*(.*?)\s*\1\s*$", _heading_to_markdown, cleaned)
+    cleaned = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", cleaned)
+    cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
+    cleaned = re.sub(r"\[https?://[^\s\]]+\s+([^\]]+)\]", r"\1", cleaned)
+    cleaned = re.sub(r"'''([^']+)'''", r"\1", cleaned)
+    cleaned = re.sub(r"''([^']+)''", r"\1", cleaned)
+    cleaned = re.sub(r"(?m)^\{\|.*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^\|\}.*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^[!|]-?.*$", lambda m: _table_line_to_text(m.group(0)), cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _strip_balanced_templates(text: str) -> str:
+    previous = None
+    cleaned = text
+    pattern = re.compile(r"\{\{[^{}]*\}\}", re.DOTALL)
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = pattern.sub("", cleaned)
+    return cleaned
+
+
+def _heading_to_markdown(match: re.Match[str]) -> str:
+    level = max(1, min(6, len(match.group(1)) - 1))
+    title = match.group(2).strip()
+    return f"{'#' * level} {title}"
+
+
+def _table_line_to_text(line: str) -> str:
+    stripped = line.strip()
+    stripped = stripped.lstrip("!|").strip()
+    stripped = stripped.replace("!!", " | ").replace("||", " | ")
+    stripped = re.sub(r"\s+", " ", stripped)
+    return stripped

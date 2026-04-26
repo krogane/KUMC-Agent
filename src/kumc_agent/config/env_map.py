@@ -168,6 +168,26 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "integrations.minecraft_wiki.max_pages",
         _to_int,
     ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RATE_LIMIT_PER_MINUTE",
+        "integrations.minecraft_wiki.rate_limit_per_minute",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_REQUEST_INTERVAL_SECONDS",
+        "integrations.minecraft_wiki.request_interval_seconds",
+        _to_float,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_NAMESPACES",
+        "integrations.minecraft_wiki.namespaces",
+        _to_int_csv,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_FULL_BACKFILL_ENABLED",
+        "integrations.minecraft_wiki.full_backfill_enabled",
+        _to_bool,
+    ),
     EnvBinding("KUMC_LLM_PROVIDER", "providers.llm.provider", str),
     EnvBinding("KUMC_LLM_GEMINI_MODEL", "providers.llm.gemini_model", str),
     EnvBinding("KUMC_LLM_TEMPERATURE", "providers.llm.temperature", _to_float),
@@ -691,6 +711,56 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "KUMC_RETRIEVAL_SPARSE_REMOVE_SYMBOLS",
         "features.retrieval.sparse_remove_symbols",
         _to_bool,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_FIRST_RECURSIVE_CHUNK_SIZE",
+        "minecraft_wiki_rag.chunking.first_recursive_chunk_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_FIRST_RECURSIVE_CHUNK_OVERLAP",
+        "minecraft_wiki_rag.chunking.first_recursive_chunk_overlap",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_SECOND_RECURSIVE_CHUNK_SIZE",
+        "minecraft_wiki_rag.chunking.second_recursive_chunk_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_SECOND_RECURSIVE_CHUNK_OVERLAP",
+        "minecraft_wiki_rag.chunking.second_recursive_chunk_overlap",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_SUMMARY_CHARACTERS",
+        "minecraft_wiki_rag.chunking.summary_characters",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_TOP_K",
+        "minecraft_wiki_rag.retrieval.top_k",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_DENSE_TOP_K",
+        "minecraft_wiki_rag.retrieval.dense_top_k",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_SPARSE_TOP_K",
+        "minecraft_wiki_rag.retrieval.sparse_top_k",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_RERANK_POOL_SIZE",
+        "minecraft_wiki_rag.retrieval.rerank_pool_size",
+        _to_int,
+    ),
+    EnvBinding(
+        "KUMC_MINECRAFT_WIKI_RAG_PARENT_CHUNK_CAP",
+        "minecraft_wiki_rag.retrieval.parent_chunk_cap",
+        _to_int,
     ),
     EnvBinding(
         "KUMC_MAINTENANCE_COMMAND_AUTHOR_IDS",

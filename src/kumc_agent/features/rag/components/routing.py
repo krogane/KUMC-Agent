@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
 
 _ROUTING_TASK_NAMES = (
+    "target_model",
     "use_additional_memory",
+    "include_capabilities_info",
+    "fast_mode",
     "additional_queries",
     "material_names",
     "recency_mode",
@@ -28,9 +31,12 @@ _ROUTING_TASK_NAMES = (
 
 _ROUTING_BOOL_TASKS = {
     "use_additional_memory",
+    "include_capabilities_info",
+    "fast_mode",
 }
 
 _RECENCY_VALUES = {"off", "soft", "hard"}
+_TARGET_MODELS = {"rag", "no_rag", "minecraft_wiki"}
 _RETRYABLE_GENERATION_STATUS_CODES = {429, 500, 502, 503, 504}
 _RETRYABLE_GENERATION_ERROR_KEYWORDS = {
     "unavailable",
@@ -47,14 +53,20 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
     "あなたは、厳格なルーティング判定エンジンです。\n"
     "与えられる質問は、京大マインクラフト同好会KUMCという大学サークルのアシスタントボットに向けられた質問です。サークル情報も参考に、以下の各フィールドでルーティングを行ってください。JSONのみを返してください。Markdownや説明文は出力しないでください。\n\n"
     "## フィールド一覧:\n"
+    "- target_model: rag | no_rag | minecraft_wiki\n"
     "- material_names: string[] (max {material_search_max_names})\n"
     "- recency_mode: off | soft | hard\n"
     "- use_additional_memory: bool\n"
+    "- include_capabilities_info: bool\n"
+    "- fast_mode: bool\n"
     "- additional_queries: string[] (max 3)\n\n"
     "## 各フィールド・選択肢の説明:\n"
     "- material_names: 質問が特定の資料名に言及している場合は material_names に資料名を最大 {material_search_max_names} 件入れる。資料名を抽出できない場合は material_names=[] のまま返す。material_names が空ならRAG、空でなければ material_search とみなされる。\n"
+    "- target_model: Minecraftの仕様・クラフト・ブロック・Mob・Java版など日本語版Minecraft Wikiで答えるべき質問は minecraft_wiki。その他の資料検索は rag。RAG不要なら no_rag。\n"
     "- recency_mode: 最新情報の重視度。通常は soft。最新の情報が重要な質問は hard。時系列を考慮しなくても良い・過去の資料・出来事について質問している場合は off。\n"
     "- use_additional_memory: 回答に追加のチャット履歴があると望ましい場合（例: 指示語が含まれる・文脈が曖昧・過去のチャットに関連する）は true とする。\n"
+    "- include_capabilities_info: ボット自身の機能説明が必要な場合は true。\n"
+    "- fast_mode: 低遅延・低負荷を優先すべき短い質問では true。\n"
     "- additional_queries: RAG検索に有用な重複しない追加クエリを必要最小限で返す。追加不要な場合は [] とする。\n\n"
     "## サークル情報\n"
     "- 主な活動内容: 週1回（土曜20:00〜）のオンライン例会・メンバー同士のマルチプレイ（サバイバルやHypixelなど）・マップ制作（京大RPGやミニゲーム）・Minecraftサーバー運営・NFなどのイベント出展・新歓の開催・外部団体とのコラボ（コラボ先はStardy・エンドラRTA軍団・北田さんなど）・対面でのご飯会・プログラミング関連（AtCoderやハッカソンへの参加）\n\n"
@@ -117,6 +129,16 @@ class QueryRouter:
         question_author: str | None = None,
         history: Sequence[ChatHistoryEntry] | None = None,
     ) -> RoutingDecision:
+        if self._looks_like_minecraft_wiki_query(query):
+            return RoutingDecision(
+                target_model="minecraft_wiki",
+                recency_mode="off",
+                material_names=[],
+                include_capabilities_info=False,
+                use_additional_memory=bool(history),
+                fast_mode=False,
+                additional_queries=[],
+            )
         if self._routing_enabled:
             try:
                 return self._route_with_task_llms(
@@ -164,10 +186,12 @@ class QueryRouter:
     @staticmethod
     def _default_decision() -> RoutingDecision:
         return RoutingDecision(
+            target_model="rag",
             recency_mode="off",
             material_names=[],
             include_capabilities_info=False,
             use_additional_memory=False,
+            fast_mode=False,
             additional_queries=[],
         )
 
@@ -186,6 +210,13 @@ class QueryRouter:
             context={},
         )
         use_additional_memory = bool(phase_one.get("use_additional_memory", False))
+        include_capabilities_info = bool(
+            phase_one.get("include_capabilities_info", False)
+        )
+        fast_mode = bool(phase_one.get("fast_mode", False))
+        target_model = str(phase_one.get("target_model") or "rag").strip().lower()
+        if target_model not in _TARGET_MODELS:
+            target_model = "rag"
         recency_mode = str(phase_one.get("recency_mode") or "off").strip().lower()
         if recency_mode not in _RECENCY_VALUES:
             recency_mode = "off"
@@ -197,10 +228,44 @@ class QueryRouter:
             additional_queries = []
 
         return RoutingDecision(
+            target_model=target_model,
             recency_mode=recency_mode,
             material_names=material_names,
+            include_capabilities_info=include_capabilities_info,
             use_additional_memory=use_additional_memory,
+            fast_mode=fast_mode,
             additional_queries=additional_queries,
+        )
+
+    @staticmethod
+    def _looks_like_minecraft_wiki_query(query: str) -> bool:
+        normalized = (query or "").strip().lower()
+        if not normalized:
+            return False
+        explicit_markers = (
+            "minecraft wiki",
+            "minecraftのwiki",
+            "マイクラwiki",
+            "マインクラフトwiki",
+            "日本語版minecraft wiki",
+        )
+        if any(marker in normalized for marker in explicit_markers):
+            return True
+        minecraft_markers = ("minecraft", "マイクラ", "マインクラフト")
+        mechanics_markers = (
+            "java版",
+            "クラフト",
+            "レシピ",
+            "エンチャント",
+            "ブロック",
+            "アイテム",
+            "mob",
+            "モブ",
+            "バイオーム",
+            "スポーン",
+        )
+        return any(marker in normalized for marker in minecraft_markers) and any(
+            marker in normalized for marker in mechanics_markers
         )
 
     def _run_tasks_parallel(
@@ -696,6 +761,12 @@ class QueryRouter:
         if task_name in _ROUTING_BOOL_TASKS:
             return self._coerce_bool(value)
 
+        if task_name == "target_model":
+            target_model = str(value or "").strip().lower()
+            if target_model in _TARGET_MODELS:
+                return target_model
+            return None
+
         if task_name == "recency_mode":
             recency_mode = str(value or "").strip().lower()
             if recency_mode in _RECENCY_VALUES:
@@ -716,6 +787,8 @@ class QueryRouter:
     def _default_task_value(self, task_name: str) -> object:
         if task_name in _ROUTING_BOOL_TASKS:
             return False
+        if task_name == "target_model":
+            return "rag"
         if task_name == "recency_mode":
             return "off"
         return []
@@ -724,6 +797,11 @@ class QueryRouter:
         property_schema: dict[str, object]
         if task_name in _ROUTING_BOOL_TASKS:
             property_schema = {"type": "boolean"}
+        elif task_name == "target_model":
+            property_schema = {
+                "type": "string",
+                "enum": ["rag", "no_rag", "minecraft_wiki"],
+            }
         elif task_name == "recency_mode":
             property_schema = {
                 "type": "string",

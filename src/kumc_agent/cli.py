@@ -109,6 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tool_rag_parser.add_argument("--question-author", default=None)
     tool_rag_parser.add_argument("--history-scope", default=None)
+    tool_rag_parser.add_argument(
+        "--scope",
+        default="all",
+        choices=("all", "minecraft_wiki"),
+    )
     tool_rag_parser.add_argument("--force-fast-mode", action="store_true")
     tool_rag_parser.add_argument("--user-id", default="")
     tool_rag_parser.add_argument("--guild-id", default="")
@@ -636,6 +641,9 @@ def main() -> None:
                     generation_history_override=[],
                     force_disable_additional_memory=True,
                     access_context=access_context,
+                    route_override=(
+                        "minecraft_wiki" if args.scope == "minecraft_wiki" else None
+                    ),
                 )
             )
             payload = _build_tool_rag_payload(answer)
@@ -660,6 +668,9 @@ def main() -> None:
                         generation_history_override=[],
                         force_disable_additional_memory=True,
                         access_context=access_context,
+                        route_override=(
+                            "minecraft_wiki" if args.scope == "minecraft_wiki" else None
+                        ),
                     )
                 )
                 result = _build_tool_rag_payload(answer)

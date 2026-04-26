@@ -23,6 +23,7 @@ class ChatRequest:
     extra_mode_instruction: str | None = None
     disable_history: bool = False
     access_context: AccessContext | None = None
+    route_override: str | None = None
 
 
 class ChatAnswerUsecase:
@@ -42,4 +43,5 @@ class ChatAnswerUsecase:
             extra_mode_instruction=request.extra_mode_instruction,
             disable_history=request.disable_history,
             access_context=request.access_context,
+            route_override=request.route_override,
         )

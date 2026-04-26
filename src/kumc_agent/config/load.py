@@ -34,6 +34,9 @@ from kumc_agent.config.schema import (
     IntegrationOpenClawSection,
     IntegrationSection,
     LLMSection,
+    MinecraftWikiRagChunkingSection,
+    MinecraftWikiRagRetrievalSection,
+    MinecraftWikiRagSection,
     MigrationSection,
     ModelSection,
     ObjectStorageSection,
@@ -383,9 +386,65 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
         minecraft_wiki = {}
         integrations["minecraft_wiki"] = minecraft_wiki
     minecraft_wiki.setdefault("page_titles", [])
-    minecraft_wiki.setdefault("api_url", "https://minecraft.wiki/api.php")
-    minecraft_wiki.setdefault("page_url_base", "https://minecraft.wiki/w/")
+    minecraft_wiki.setdefault("api_url", "https://ja.minecraft.wiki/api.php")
+    minecraft_wiki.setdefault("page_url_base", "https://ja.minecraft.wiki/w/")
     minecraft_wiki.setdefault("max_pages", 20)
+    minecraft_wiki.setdefault("rate_limit_per_minute", 30)
+    minecraft_wiki.setdefault("request_interval_seconds", 1.0)
+    minecraft_wiki.setdefault("namespaces", [0])
+    minecraft_wiki.setdefault("full_backfill_enabled", False)
+
+    minecraft_wiki_rag = updated.get("minecraft_wiki_rag")
+    if not isinstance(minecraft_wiki_rag, dict):
+        minecraft_wiki_rag = {}
+        updated["minecraft_wiki_rag"] = minecraft_wiki_rag
+    minecraft_wiki_chunking = minecraft_wiki_rag.get("chunking")
+    if not isinstance(minecraft_wiki_chunking, dict):
+        minecraft_wiki_chunking = {}
+        minecraft_wiki_rag["chunking"] = minecraft_wiki_chunking
+    minecraft_wiki_retrieval = minecraft_wiki_rag.get("retrieval")
+    if not isinstance(minecraft_wiki_retrieval, dict):
+        minecraft_wiki_retrieval = {}
+        minecraft_wiki_rag["retrieval"] = minecraft_wiki_retrieval
+    indexing = updated.get("indexing")
+    indexing_chunking = {}
+    if isinstance(indexing, dict) and isinstance(indexing.get("chunking"), dict):
+        indexing_chunking = indexing["chunking"]
+    for key, fallback in (
+        ("first_recursive_chunk_size", indexing_chunking.get("first_recursive_chunk_size", 1024)),
+        ("first_recursive_chunk_overlap", indexing_chunking.get("first_recursive_chunk_overlap", 128)),
+        ("second_recursive_chunk_size", indexing_chunking.get("second_recursive_chunk_size", 384)),
+        ("second_recursive_chunk_overlap", indexing_chunking.get("second_recursive_chunk_overlap", 64)),
+        ("summary_characters", indexing_chunking.get("summary_characters", 200)),
+        ("summary_batch_size", indexing_chunking.get("summary_batch_size", 1)),
+        ("summary_llm_provider", indexing_chunking.get("summary_llm_provider", "none")),
+        ("summary_gemini_model", indexing_chunking.get("summary_gemini_model", "")),
+        ("summary_temperature", indexing_chunking.get("summary_temperature", 0.0)),
+        ("summary_max_output_tokens", indexing_chunking.get("summary_max_output_tokens", 1024)),
+        ("summary_thinking_level", indexing_chunking.get("summary_thinking_level", "minimal")),
+    ):
+        minecraft_wiki_chunking.setdefault(key, fallback)
+    for key, fallback in (
+        ("top_k", retrieval.get("top_k", 8)),
+        ("dense_top_k", retrieval.get("dense_top_k", 15)),
+        ("sparse_top_k", retrieval.get("sparse_top_k", 15)),
+        (
+            "sparse_initial_sparse_top_k",
+            retrieval.get("sparse_initial_sparse_top_k", retrieval.get("sparse_top_k", 15)),
+        ),
+        ("sparse_normalized_ratio", retrieval.get("sparse_normalized_ratio")),
+        ("rerank_pool_size", retrieval.get("rerank_pool_size", 20)),
+        ("rrf_k", retrieval.get("rrf_k", 60)),
+        ("mmr_lambda", retrieval.get("mmr_lambda", 0.75)),
+        ("parent_doc_enabled", retrieval.get("parent_doc_enabled", True)),
+        ("parent_chunk_cap", retrieval.get("parent_chunk_cap", 2)),
+        ("sudachi_mode", retrieval.get("sudachi_mode", "B")),
+        ("sparse_bm25_k1", retrieval.get("sparse_bm25_k1", 1.5)),
+        ("sparse_bm25_b", retrieval.get("sparse_bm25_b", 0.75)),
+        ("sparse_use_normalized_form", retrieval.get("sparse_use_normalized_form", True)),
+        ("sparse_remove_symbols", retrieval.get("sparse_remove_symbols", True)),
+    ):
+        minecraft_wiki_retrieval.setdefault(key, fallback)
     return updated
 
 
@@ -437,6 +496,7 @@ def _to_runtime_config(
     scheduler = merged["scheduler"]
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
+    minecraft_wiki_rag = merged.get("minecraft_wiki_rag", {})
     rag = merged.get("rag", {})
     indexing = merged.get("indexing", {})
     ops = merged.get("ops", {})
@@ -468,6 +528,23 @@ def _to_runtime_config(
     minecraft_wiki = integrations.get("minecraft_wiki", {})
     if not isinstance(minecraft_wiki, dict):
         minecraft_wiki = {}
+    minecraft_wiki_namespaces_raw = minecraft_wiki.get("namespaces", [0])
+    if isinstance(minecraft_wiki_namespaces_raw, str):
+        minecraft_wiki_namespaces = [
+            int(part.strip())
+            for part in minecraft_wiki_namespaces_raw.split(",")
+            if part.strip()
+        ]
+    elif isinstance(minecraft_wiki_namespaces_raw, list):
+        minecraft_wiki_namespaces = [
+            int(part)
+            for part in minecraft_wiki_namespaces_raw
+            if str(part).strip()
+        ]
+    else:
+        minecraft_wiki_namespaces = [0]
+    if not minecraft_wiki_namespaces:
+        minecraft_wiki_namespaces = [0]
     minecraft_page_titles_raw = minecraft_wiki.get("page_titles", [])
     if isinstance(minecraft_page_titles_raw, str):
         minecraft_page_titles = [
@@ -483,6 +560,14 @@ def _to_runtime_config(
         ]
     else:
         minecraft_page_titles = []
+    if not isinstance(minecraft_wiki_rag, dict):
+        minecraft_wiki_rag = {}
+    minecraft_wiki_rag_chunking = minecraft_wiki_rag.get("chunking", {})
+    if not isinstance(minecraft_wiki_rag_chunking, dict):
+        minecraft_wiki_rag_chunking = {}
+    minecraft_wiki_rag_retrieval = minecraft_wiki_rag.get("retrieval", {})
+    if not isinstance(minecraft_wiki_rag_retrieval, dict):
+        minecraft_wiki_rag_retrieval = {}
 
     special_channel_names_raw = rag_history.get("special_channel_names", ["kumc-agent"])
     if isinstance(special_channel_names_raw, str):
@@ -793,6 +878,194 @@ def _to_runtime_config(
                     features["risk_flags"].get(
                         "image_generation",
                         "approval_required",
+                    )
+                ),
+            ),
+        ),
+        minecraft_wiki_rag=MinecraftWikiRagSection(
+            chunking=MinecraftWikiRagChunkingSection(
+                first_recursive_chunk_size=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "first_recursive_chunk_size",
+                        indexing_chunking.get("first_recursive_chunk_size", 1024),
+                    )
+                ),
+                first_recursive_chunk_overlap=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "first_recursive_chunk_overlap",
+                        indexing_chunking.get("first_recursive_chunk_overlap", 128),
+                    )
+                ),
+                second_recursive_chunk_size=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "second_recursive_chunk_size",
+                        indexing_chunking.get("second_recursive_chunk_size", 384),
+                    )
+                ),
+                second_recursive_chunk_overlap=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "second_recursive_chunk_overlap",
+                        indexing_chunking.get("second_recursive_chunk_overlap", 64),
+                    )
+                ),
+                summary_characters=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_characters",
+                        indexing_chunking.get("summary_characters", 200),
+                    )
+                ),
+                summary_batch_size=max(
+                    1,
+                    int(
+                        minecraft_wiki_rag_chunking.get(
+                            "summary_batch_size",
+                            indexing_chunking.get("summary_batch_size", 1),
+                        )
+                    ),
+                ),
+                summary_llm_provider=str(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_llm_provider",
+                        indexing_chunking.get("summary_llm_provider", "none"),
+                    )
+                ),
+                summary_gemini_model=str(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_gemini_model",
+                        indexing_chunking.get(
+                            "summary_gemini_model",
+                            providers["llm"]["gemini_model"],
+                        ),
+                    )
+                ),
+                summary_temperature=float(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_temperature",
+                        indexing_chunking.get(
+                            "summary_temperature",
+                            providers["llm"]["temperature"],
+                        ),
+                    )
+                ),
+                summary_max_output_tokens=int(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_max_output_tokens",
+                        indexing_chunking.get(
+                            "summary_max_output_tokens",
+                            providers["llm"]["max_output_tokens"],
+                        ),
+                    )
+                ),
+                summary_thinking_level=str(
+                    minecraft_wiki_rag_chunking.get(
+                        "summary_thinking_level",
+                        indexing_chunking.get(
+                            "summary_thinking_level",
+                            providers["llm"]["thinking_level"],
+                        ),
+                    )
+                ),
+            ),
+            retrieval=MinecraftWikiRagRetrievalSection(
+                top_k=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "top_k",
+                        features["retrieval"]["top_k"],
+                    )
+                ),
+                dense_top_k=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "dense_top_k",
+                        features["retrieval"]["dense_top_k"],
+                    )
+                ),
+                sparse_top_k=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_top_k",
+                        features["retrieval"]["sparse_top_k"],
+                    )
+                ),
+                sparse_initial_sparse_top_k=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_initial_sparse_top_k",
+                        features["retrieval"].get(
+                            "sparse_initial_sparse_top_k",
+                            features["retrieval"]["sparse_top_k"],
+                        ),
+                    )
+                ),
+                sparse_normalized_ratio=(
+                    None
+                    if minecraft_wiki_rag_retrieval.get(
+                        "sparse_normalized_ratio",
+                        features["retrieval"].get("sparse_normalized_ratio"),
+                    )
+                    is None
+                    else float(
+                        minecraft_wiki_rag_retrieval.get(
+                            "sparse_normalized_ratio",
+                            features["retrieval"].get("sparse_normalized_ratio"),
+                        )
+                    )
+                ),
+                rerank_pool_size=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "rerank_pool_size",
+                        features["retrieval"]["rerank_pool_size"],
+                    )
+                ),
+                rrf_k=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "rrf_k",
+                        features["retrieval"].get("rrf_k", 60),
+                    )
+                ),
+                mmr_lambda=float(
+                    minecraft_wiki_rag_retrieval.get(
+                        "mmr_lambda",
+                        features["retrieval"]["mmr_lambda"],
+                    )
+                ),
+                parent_doc_enabled=bool(
+                    minecraft_wiki_rag_retrieval.get(
+                        "parent_doc_enabled",
+                        features["retrieval"].get("parent_doc_enabled", True),
+                    )
+                ),
+                parent_chunk_cap=int(
+                    minecraft_wiki_rag_retrieval.get(
+                        "parent_chunk_cap",
+                        features["retrieval"].get("parent_chunk_cap", 2),
+                    )
+                ),
+                sudachi_mode=str(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sudachi_mode",
+                        features["retrieval"].get("sudachi_mode", "B"),
+                    )
+                ),
+                sparse_bm25_k1=float(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_bm25_k1",
+                        features["retrieval"].get("sparse_bm25_k1", 1.5),
+                    )
+                ),
+                sparse_bm25_b=float(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_bm25_b",
+                        features["retrieval"].get("sparse_bm25_b", 0.75),
+                    )
+                ),
+                sparse_use_normalized_form=bool(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_use_normalized_form",
+                        features["retrieval"].get("sparse_use_normalized_form", True),
+                    )
+                ),
+                sparse_remove_symbols=bool(
+                    minecraft_wiki_rag_retrieval.get(
+                        "sparse_remove_symbols",
+                        features["retrieval"].get("sparse_remove_symbols", True),
                     )
                 ),
             ),
@@ -1172,12 +1445,24 @@ def _to_runtime_config(
             minecraft_wiki=IntegrationMinecraftWikiSection(
                 page_titles=minecraft_page_titles,
                 api_url=str(
-                    minecraft_wiki.get("api_url", "https://minecraft.wiki/api.php")
+                    minecraft_wiki.get("api_url", "https://ja.minecraft.wiki/api.php")
                 ),
                 page_url_base=str(
-                    minecraft_wiki.get("page_url_base", "https://minecraft.wiki/w/")
+                    minecraft_wiki.get("page_url_base", "https://ja.minecraft.wiki/w/")
                 ),
                 max_pages=max(0, int(minecraft_wiki.get("max_pages", 20))),
+                rate_limit_per_minute=max(
+                    0,
+                    int(minecraft_wiki.get("rate_limit_per_minute", 30)),
+                ),
+                request_interval_seconds=max(
+                    0.0,
+                    float(minecraft_wiki.get("request_interval_seconds", 1.0)),
+                ),
+                namespaces=minecraft_wiki_namespaces,
+                full_backfill_enabled=bool(
+                    minecraft_wiki.get("full_backfill_enabled", False)
+                ),
             ),
             openai_api_key=str(integrations.get("openai_api_key", "")),
             gemini_api_key=str(integrations.get("gemini_api_key", "")),

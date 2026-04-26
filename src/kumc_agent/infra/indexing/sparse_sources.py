@@ -12,6 +12,7 @@ BASE_SOURCE_DIRS = (
     "hatenablog",
     "crafters_colony",
     "notion",
+    "minecraft_wiki",
 )
 SECOND_REC_SOURCE_DIRS = (
     "docs",
@@ -22,6 +23,7 @@ SECOND_REC_SOURCE_DIRS = (
     "hatenablog",
     "crafters_colony",
     "notion",
+    "minecraft_wiki",
 )
 
 

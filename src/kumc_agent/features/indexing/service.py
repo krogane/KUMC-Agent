@@ -71,6 +71,7 @@ class IndexingService:
         self._raw_hatenablog_dir = self._raw_dir / "hatenablog"
         self._raw_crafters_colony_dir = self._raw_dir / "crafters_colony"
         self._raw_notion_dir = self._raw_dir / "notion"
+        self._raw_minecraft_wiki_dir = self._raw_dir / "minecraft_wiki"
 
         self._first_rec_docs_dir = self._first_rec_dir / "docs"
         self._first_rec_sheets_dir = self._first_rec_dir / "sheets"
@@ -79,6 +80,7 @@ class IndexingService:
         self._first_rec_hatenablog_dir = self._first_rec_dir / "hatenablog"
         self._first_rec_crafters_colony_dir = self._first_rec_dir / "crafters_colony"
         self._first_rec_notion_dir = self._first_rec_dir / "notion"
+        self._first_rec_minecraft_wiki_dir = self._first_rec_dir / "minecraft_wiki"
 
         self._second_rec_docs_dir = self._second_rec_dir / "docs"
         self._second_rec_sheets_dir = self._second_rec_dir / "sheets"
@@ -88,6 +90,7 @@ class IndexingService:
         self._second_rec_hatenablog_dir = self._second_rec_dir / "hatenablog"
         self._second_rec_crafters_colony_dir = self._second_rec_dir / "crafters_colony"
         self._second_rec_notion_dir = self._second_rec_dir / "notion"
+        self._second_rec_minecraft_wiki_dir = self._second_rec_dir / "minecraft_wiki"
 
         self._sparse_second_rec_docs_dir = self._sparse_second_rec_dir / "docs"
         self._sparse_second_rec_sheets_dir = self._sparse_second_rec_dir / "sheets"
@@ -99,6 +102,9 @@ class IndexingService:
             self._sparse_second_rec_dir / "crafters_colony"
         )
         self._sparse_second_rec_notion_dir = self._sparse_second_rec_dir / "notion"
+        self._sparse_second_rec_minecraft_wiki_dir = (
+            self._sparse_second_rec_dir / "minecraft_wiki"
+        )
 
         self._summary_docs_dir = self._summary_dir / "docs"
         self._summary_sheets_dir = self._summary_dir / "sheets"
@@ -107,6 +113,7 @@ class IndexingService:
         self._summary_hatenablog_dir = self._summary_dir / "hatenablog"
         self._summary_crafters_colony_dir = self._summary_dir / "crafters_colony"
         self._summary_notion_dir = self._summary_dir / "notion"
+        self._summary_minecraft_wiki_dir = self._summary_dir / "minecraft_wiki"
 
 
     def build(
@@ -132,9 +139,16 @@ class IndexingService:
         self._storage.save_documents(documents)
 
         legacy_cfg = self._build_legacy_app_config()
+        minecraft_wiki_cfg = self._build_minecraft_wiki_app_config()
         self._ensure_legacy_prompt_env_defaults()
         self._run_legacy_chunk_pipeline(
             legacy_cfg=legacy_cfg,
+            selected=selected,
+            allow_cancel=allow_cancel,
+            cancel_event=cancel_event,
+        )
+        self._run_minecraft_wiki_chunk_pipeline(
+            minecraft_wiki_cfg=minecraft_wiki_cfg,
             selected=selected,
             allow_cancel=allow_cancel,
             cancel_event=cancel_event,
@@ -200,6 +214,7 @@ class IndexingService:
             self._raw_hatenablog_dir,
             self._raw_crafters_colony_dir,
             self._raw_notion_dir,
+            self._raw_minecraft_wiki_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -244,6 +259,64 @@ class IndexingService:
             second_rec_chunk_size=chunking.second_recursive_chunk_size,
             second_rec_chunk_overlap=chunking.second_recursive_chunk_overlap,
             summery_enabled=stages.summary_enabled,
+            summery_characters=chunking.summary_characters,
+            summery_provider=chunking.summary_llm_provider,
+            summery_gemini_model=chunking.summary_gemini_model,
+            summery_temperature=chunking.summary_temperature,
+            summery_max_output_tokens=chunking.summary_max_output_tokens,
+            summery_max_retries=2,
+            summery_batch_size=chunking.summary_batch_size,
+            llm_provider=providers_llm.provider,
+            genai_model=providers_llm.gemini_model,
+            temperature=providers_llm.temperature,
+            max_output_tokens=providers_llm.max_output_tokens,
+            clear_raw_data=refresh.clear_raw_data,
+            clear_first_rec_chunk_data=refresh.clear_first_recursive_chunk_data,
+            clear_second_rec_chunk_data=refresh.clear_second_recursive_chunk_data,
+            clear_summery_chunk_data=refresh.clear_summary_chunk_data,
+            update_raw_data=refresh.update_raw_data,
+            update_first_rec_chunk_data=refresh.update_first_recursive_chunk_data,
+            update_second_rec_chunk_data=refresh.update_second_recursive_chunk_data,
+            update_sparse_second_rec_chunk_data=(
+                refresh.update_sparse_second_recursive_chunk_data
+            ),
+            update_summery_chunk_data=refresh.update_summary_chunk_data,
+            sudachi_mode=retrieval.sudachi_mode,
+            sparse_bm25_k1=retrieval.sparse_bm25_k1,
+            sparse_bm25_b=retrieval.sparse_bm25_b,
+            sparse_use_normalized_form=retrieval.sparse_use_normalized_form,
+            sparse_remove_symbols=retrieval.sparse_remove_symbols,
+        )
+
+    def _build_minecraft_wiki_app_config(self):
+        from kumc_agent.infra.indexing.config import AppConfig as LegacyAppConfig
+
+        chunking = self._runtime.minecraft_wiki_rag.chunking
+        retrieval = self._runtime.minecraft_wiki_rag.retrieval
+        refresh = self._runtime.indexing.refresh
+        integrations = self._runtime.integrations
+        providers_llm = self._runtime.providers.llm
+
+        return LegacyAppConfig(
+            base_dir=self._runtime.base_dir,
+            raw_data_dir=self._raw_dir,
+            first_rec_chunk_dir=self._first_rec_dir,
+            second_rec_chunk_dir=self._second_rec_dir,
+            sparse_second_rec_chunk_dir=self._sparse_second_rec_dir,
+            summery_chunk_dir=self._summary_dir,
+            index_dir=self._runtime.app.index_dir,
+            gemini_api_key=integrations.gemini_api_key,
+            gemini_requests_per_minute=integrations.gemini_requests_per_minute,
+            gemini_summary_requests_per_minute=(
+                integrations.gemini_summary_requests_per_minute
+            ),
+            embedding_model=self._runtime.providers.embeddings.model,
+            first_rec_chunk_size=chunking.first_recursive_chunk_size,
+            first_rec_chunk_overlap=chunking.first_recursive_chunk_overlap,
+            second_rec_enabled=self._runtime.indexing.stages.second_recursive_enabled,
+            second_rec_chunk_size=chunking.second_recursive_chunk_size,
+            second_rec_chunk_overlap=chunking.second_recursive_chunk_overlap,
+            summery_enabled=self._runtime.indexing.stages.summary_enabled,
             summery_characters=chunking.summary_characters,
             summery_provider=chunking.summary_llm_provider,
             summery_gemini_model=chunking.summary_gemini_model,
@@ -632,6 +705,179 @@ class IndexingService:
                 )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
 
+    def _run_minecraft_wiki_chunk_pipeline(
+        self,
+        *,
+        minecraft_wiki_cfg,
+        selected: set[str],
+        allow_cancel: bool,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        from kumc_agent.infra.indexing.chunking import (
+            recursive_chunk_dir,
+            recursive_chunk_jsonl_dir,
+            sparse_chunk_jsonl_dir,
+        )
+        from kumc_agent.infra.indexing.constants import DOCS_SEPARATORS
+
+        if not self._raw_minecraft_wiki_dir.exists():
+            return
+
+        refresh = self._runtime.indexing.refresh
+        stages = self._runtime.indexing.stages
+        chunking = self._runtime.minecraft_wiki_rag.chunking
+
+        if self._should_run_stage(stage_name="first_recursive", selected=selected):
+            recursive_chunk_dir(
+                raw_data_dir=self._raw_minecraft_wiki_dir,
+                chunk_dir=self._first_rec_minecraft_wiki_dir,
+                chunk_size=chunking.first_recursive_chunk_size,
+                chunk_overlap=chunking.first_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                source_type="minecraft_wiki",
+                stage="first_recursive",
+                file_extensions=(".md",),
+                skip_existing=not refresh.clear_first_recursive_chunk_data,
+                update_existing=refresh.update_first_recursive_chunk_data,
+                sync_deleted=refresh.update_first_recursive_chunk_data,
+            )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if (
+            stages.second_recursive_enabled
+            and self._should_run_stage(stage_name="second_recursive", selected=selected)
+            and self._first_rec_minecraft_wiki_dir.exists()
+        ):
+            recursive_chunk_jsonl_dir(
+                input_chunk_dir=self._first_rec_minecraft_wiki_dir,
+                output_chunk_dir=self._second_rec_minecraft_wiki_dir,
+                chunk_size=chunking.second_recursive_chunk_size,
+                chunk_overlap=chunking.second_recursive_chunk_overlap,
+                separators=DOCS_SEPARATORS,
+                stage="second_recursive",
+                skip_existing=not refresh.clear_second_recursive_chunk_data,
+                update_existing=refresh.update_second_recursive_chunk_data,
+                sync_deleted=refresh.update_second_recursive_chunk_data,
+            )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if (
+            stages.sparse_second_recursive_enabled
+            and self._should_run_stage(
+                stage_name="sparse_second_recursive",
+                selected=selected,
+            )
+            and self._second_rec_minecraft_wiki_dir.exists()
+        ):
+            sparse_chunk_jsonl_dir(
+                input_chunk_dir=self._second_rec_minecraft_wiki_dir,
+                output_chunk_dir=self._sparse_second_rec_minecraft_wiki_dir,
+                config=minecraft_wiki_cfg,
+                skip_existing=not refresh.clear_second_recursive_chunk_data,
+                update_existing=refresh.update_sparse_second_recursive_chunk_data,
+                sync_deleted=refresh.update_sparse_second_recursive_chunk_data,
+            )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+        if (
+            stages.summary_enabled
+            and self._should_run_stage(stage_name="summary", selected=selected)
+            and self._first_rec_minecraft_wiki_dir.exists()
+        ):
+            self._build_minecraft_wiki_summary_chunks(
+                input_chunk_dir=self._first_rec_minecraft_wiki_dir,
+                output_chunk_dir=self._summary_minecraft_wiki_dir,
+                skip_existing=not refresh.clear_summary_chunk_data,
+                update_existing=refresh.update_summary_chunk_data,
+                sync_deleted=refresh.update_summary_chunk_data,
+            )
+        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+    def _build_minecraft_wiki_summary_chunks(
+        self,
+        *,
+        input_chunk_dir: Path,
+        output_chunk_dir: Path,
+        skip_existing: bool,
+        update_existing: bool,
+        sync_deleted: bool,
+    ) -> None:
+        from kumc_agent.infra.indexing.chunks import (
+            Chunk as LegacyChunk,
+            load_chunks,
+            write_chunks,
+        )
+
+        output_chunk_dir.mkdir(parents=True, exist_ok=True)
+        expected_output_names: set[str] = set()
+        target_chars = max(80, self._runtime.minecraft_wiki_rag.chunking.summary_characters)
+        for path in sorted(input_chunk_dir.glob("*.jsonl")):
+            out_path = output_chunk_dir / path.name
+            expected_output_names.add(out_path.name)
+            if (
+                skip_existing
+                and out_path.exists()
+                and (not update_existing or out_path.stat().st_mtime >= path.stat().st_mtime)
+            ):
+                continue
+            chunks = load_chunks(path)
+            output_chunks: list[LegacyChunk] = []
+            output_index = 0
+            for chunk in chunks:
+                text = str(chunk.text or "").strip()
+                if not text:
+                    continue
+                metadata = dict(chunk.metadata)
+                parent_chunk_id = metadata.get("chunk_id")
+                if parent_chunk_id is not None:
+                    metadata["parent_chunk_id"] = parent_chunk_id
+                metadata["chunk_id"] = output_index
+                metadata["chunk_stage"] = "summary"
+                output_chunks.append(
+                    LegacyChunk(
+                        text=self._fallback_minecraft_wiki_summary(
+                            text=text,
+                            metadata=metadata,
+                            target_chars=target_chars,
+                        ),
+                        metadata=metadata,
+                    )
+                )
+                output_index += 1
+            write_chunks(out_path, output_chunks)
+        if sync_deleted:
+            expected = expected_output_names
+            for stale in output_chunk_dir.glob("*.jsonl"):
+                if stale.name in expected:
+                    continue
+                try:
+                    stale.unlink()
+                except Exception:
+                    logger.warning("Failed to remove stale Minecraft Wiki summary: %s", stale)
+
+    @staticmethod
+    def _fallback_minecraft_wiki_summary(
+        *,
+        text: str,
+        metadata: dict[str, object],
+        target_chars: int,
+    ) -> str:
+        title = str(metadata.get("minecraft_wiki_title") or "").strip()
+        heading_path = metadata.get("heading_path")
+        heading = ""
+        if isinstance(heading_path, list) and heading_path:
+            heading = " > ".join(str(value) for value in heading_path if str(value).strip())
+        prefix = ""
+        if title:
+            prefix += f"記事名: {title}\n"
+        if heading:
+            prefix += f"見出し: {heading}\n"
+        body = " ".join((text or "").split())
+        limit = max(0, int(target_chars) - len(prefix))
+        if limit and len(body) > limit:
+            body = body[:limit].rstrip() + "..."
+        return (prefix + body).strip()
+
     def _load_index_chunks_from_legacy_dirs(self, *, legacy_cfg) -> list[Chunk]:
         base_dirs: list[Path] = []
         if legacy_cfg.second_rec_enabled:
@@ -642,6 +888,7 @@ class IndexingService:
                     self._second_rec_hatenablog_dir,
                     self._second_rec_crafters_colony_dir,
                     self._second_rec_notion_dir,
+                    self._second_rec_minecraft_wiki_dir,
                 ]
             )
             if self._second_rec_messages_dir.exists():
@@ -656,6 +903,7 @@ class IndexingService:
                     self._first_rec_hatenablog_dir,
                     self._first_rec_crafters_colony_dir,
                     self._first_rec_notion_dir,
+                    self._first_rec_minecraft_wiki_dir,
                 ]
             )
             if self._first_rec_messages_dir.exists():
@@ -667,6 +915,10 @@ class IndexingService:
         chunks.extend(self._load_legacy_chunks_from_dirs(base_dirs))
         if self._second_rec_vc_dir.exists():
             chunks.extend(self._load_legacy_chunks_from_dirs([self._second_rec_vc_dir]))
+        if self._summary_minecraft_wiki_dir.exists():
+            chunks.extend(
+                self._load_legacy_chunks_from_dirs([self._summary_minecraft_wiki_dir])
+            )
         return chunks
 
     def _load_legacy_chunks_from_dirs(self, chunk_dirs: list[Path]) -> list[Chunk]:
@@ -752,6 +1004,27 @@ class IndexingService:
         )
 
     def _chunk_embedding_text_for_dense(self, chunk: Chunk) -> str:
+        metadata = chunk.metadata or {}
+        source_type = str(metadata.get("source_type") or "").strip().lower()
+        if source_type == "minecraft_wiki":
+            title = str(metadata.get("minecraft_wiki_title") or metadata.get("source_title") or "").strip()
+            heading_path = metadata.get("heading_path")
+            if isinstance(heading_path, list):
+                heading = " > ".join(
+                    str(value).strip()
+                    for value in heading_path
+                    if str(value).strip()
+                )
+            else:
+                heading = str(heading_path or "").strip()
+            prefix_lines = []
+            if title:
+                prefix_lines.append(f"記事名: {title}")
+            if heading:
+                prefix_lines.append(f"見出し: {heading}")
+            if prefix_lines:
+                return "\n".join(prefix_lines) + "\n\n" + chunk.text
+            return chunk.text
         from kumc_agent.infra.indexing.chunks import (
             Chunk as LegacyChunk,
             chunk_embedding_text,
@@ -802,6 +1075,7 @@ class IndexingService:
                         self._sparse_second_rec_hatenablog_dir,
                         self._sparse_second_rec_crafters_colony_dir,
                         self._sparse_second_rec_notion_dir,
+                        self._sparse_second_rec_minecraft_wiki_dir,
                     ]
                 ),
                 second_chunks=self._load_legacy_chunks_from_dirs(
@@ -814,6 +1088,7 @@ class IndexingService:
                         self._second_rec_hatenablog_dir,
                         self._second_rec_crafters_colony_dir,
                         self._second_rec_notion_dir,
+                        self._second_rec_minecraft_wiki_dir,
                     ]
                 ),
             )

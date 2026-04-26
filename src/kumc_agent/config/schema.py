@@ -143,6 +143,46 @@ class RetrievalSection:
 
 
 @dataclass(frozen=True)
+class MinecraftWikiRagChunkingSection:
+    first_recursive_chunk_size: int
+    first_recursive_chunk_overlap: int
+    second_recursive_chunk_size: int
+    second_recursive_chunk_overlap: int
+    summary_characters: int
+    summary_batch_size: int
+    summary_llm_provider: str
+    summary_gemini_model: str
+    summary_temperature: float
+    summary_max_output_tokens: int
+    summary_thinking_level: str
+
+
+@dataclass(frozen=True)
+class MinecraftWikiRagRetrievalSection:
+    top_k: int
+    dense_top_k: int
+    sparse_top_k: int
+    sparse_initial_sparse_top_k: int
+    sparse_normalized_ratio: float | None
+    rerank_pool_size: int
+    rrf_k: int
+    mmr_lambda: float
+    parent_doc_enabled: bool
+    parent_chunk_cap: int
+    sudachi_mode: str
+    sparse_bm25_k1: float
+    sparse_bm25_b: float
+    sparse_use_normalized_form: bool
+    sparse_remove_symbols: bool
+
+
+@dataclass(frozen=True)
+class MinecraftWikiRagSection:
+    chunking: MinecraftWikiRagChunkingSection
+    retrieval: MinecraftWikiRagRetrievalSection
+
+
+@dataclass(frozen=True)
 class SourcesSection:
     drive: bool
     discord: bool
@@ -381,6 +421,10 @@ class IntegrationMinecraftWikiSection:
     api_url: str
     page_url_base: str
     max_pages: int
+    rate_limit_per_minute: int
+    request_interval_seconds: float
+    namespaces: list[int]
+    full_backfill_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -453,6 +497,7 @@ class RuntimeConfig:
     scheduler: SchedulerSection
     infrastructure: InfrastructureSection
     features: FeatureSection
+    minecraft_wiki_rag: MinecraftWikiRagSection
     rag: RagSection
     indexing: IndexingSection
     ops: OpsSection

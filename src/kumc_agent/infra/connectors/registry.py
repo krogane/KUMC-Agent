@@ -136,5 +136,15 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             api_url=config.integrations.minecraft_wiki.api_url,
             page_url_base=config.integrations.minecraft_wiki.page_url_base,
             max_pages=config.integrations.minecraft_wiki.max_pages,
+            rate_limit_per_minute=(
+                config.integrations.minecraft_wiki.rate_limit_per_minute
+            ),
+            request_interval_seconds=(
+                config.integrations.minecraft_wiki.request_interval_seconds
+            ),
+            namespaces=tuple(config.integrations.minecraft_wiki.namespaces),
+            full_backfill_enabled=(
+                config.integrations.minecraft_wiki.full_backfill_enabled
+            ),
         )
     return connectors

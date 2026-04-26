@@ -57,3 +57,13 @@ class RagConfig:
     rrf_k: int = 60
     allowed_guild_ids: tuple[str, ...] = tuple()
     admin_user_ids: tuple[str, ...] = tuple()
+    minecraft_wiki_top_k: int | None = None
+    minecraft_wiki_dense_top_k: int | None = None
+    minecraft_wiki_sparse_top_k: int | None = None
+    minecraft_wiki_sparse_initial_sparse_top_k: int | None = None
+    minecraft_wiki_sparse_normalized_ratio: float | None = None
+    minecraft_wiki_rerank_pool_size: int | None = None
+    minecraft_wiki_rrf_k: int | None = None
+    minecraft_wiki_mmr_lambda: float | None = None
+    minecraft_wiki_parent_doc_enabled: bool | None = None
+    minecraft_wiki_parent_chunk_cap: int | None = None
