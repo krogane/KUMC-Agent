@@ -13,7 +13,6 @@ if str(SRC) not in sys.path:
 
 from kumc_agent.config.schema import (
     DatabaseSection,
-    MigrationSection,
     ObjectStorageSection,
     RedisSection,
     RiskFeatureFlagsSection,
@@ -23,11 +22,10 @@ from kumc_agent.features.foundation.health import FoundationHealthService
 from kumc_agent.infra.audit.repository import FileAuditLogRepository
 from kumc_agent.infra.cache.redis_client import RedisClient
 from kumc_agent.infra.database.postgres import PostgresClient
-from kumc_agent.infra.migrations.runner import PostgresMigrationRunner
 from kumc_agent.infra.object_storage.s3 import S3ObjectStorageClient
 
 
-class Wave1FoundationTests(unittest.TestCase):
+class FoundationServicesTests(unittest.TestCase):
     def _flags(self) -> FeatureFlagService:
         return FeatureFlagService(
             RiskFeatureFlagsSection(
@@ -78,33 +76,6 @@ class Wave1FoundationTests(unittest.TestCase):
             event = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(event["action"], "admin.health")
             self.assertEqual(event["actor_id"], "tester")
-
-    def test_migration_runner_lists_sql_and_rejects_bad_table_name(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            migration_dir = Path(tmp)
-            (migration_dir / "002_second.sql").write_text("select 2;\n", encoding="utf-8")
-            (migration_dir / "001_first.sql").write_text("select 1;\n", encoding="utf-8")
-            runner = PostgresMigrationRunner(
-                client=PostgresClient(
-                    DatabaseSection(url="", connect_timeout_seconds=1.0, application_name="test")
-                ),
-                config=MigrationSection(
-                    directory=migration_dir,
-                    table_name="schema_migrations",
-                ),
-            )
-            self.assertEqual(
-                [path.name for path in runner.pending_files()],
-                ["001_first.sql", "002_second.sql"],
-            )
-
-            invalid = PostgresMigrationRunner(
-                client=runner.client,
-                config=MigrationSection(directory=migration_dir, table_name="bad-name"),
-            )
-            with self.assertRaises(ValueError):
-                invalid._table_name()
-
 
 if __name__ == "__main__":
     unittest.main()

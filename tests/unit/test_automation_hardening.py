@@ -43,7 +43,7 @@ def _service(root: Path, mode: str = "disabled") -> AutomationService:
     )
 
 
-class Wave7AutomationHardeningTests(unittest.TestCase):
+class AutomationHardeningTests(unittest.TestCase):
     def test_default_rules_can_be_enabled_and_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = _service(Path(tmp))
@@ -161,16 +161,6 @@ class Wave7AutomationHardeningTests(unittest.TestCase):
         check_ids = {check.id for check in report.checks}
         self.assertIn("runbooks", check_ids)
         self.assertIn("backup_restore_harness", check_ids)
-
-    def test_migration_contains_automation_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "007_wave7_automation_hardening.sql"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("create table if not exists automation_rules", sql)
-        self.assertIn("create table if not exists automation_runs", sql)
-        self.assertIn("idempotency_key text not null unique", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

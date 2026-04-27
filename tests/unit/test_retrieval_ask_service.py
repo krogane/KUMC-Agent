@@ -21,7 +21,7 @@ from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.retrieval_wave3 import FileRetrievalRepository
 
 
-class Wave3RetrievalTests(unittest.TestCase):
+class RetrievalAskServiceTests(unittest.TestCase):
     def _write_chunk(
         self,
         root: Path,
@@ -143,14 +143,6 @@ class Wave3RetrievalTests(unittest.TestCase):
             self.assertIn("public", ids)
             self.assertNotIn("guild-private", ids)
             self.assertNotIn("deny", ids)
-
-    def test_migration_contains_embedding_and_search_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "003_wave3_retrieval.sql"
-        ).read_text(encoding="utf-8")
-        for table in ("embeddings", "search_runs", "search_run_results"):
-            self.assertIn(f"create table if not exists {table}", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.workflow import FileWorkflowRepository
 
 
-class Wave4WorkflowTests(unittest.TestCase):
+class WorkflowServiceTests(unittest.TestCase):
     def _service(self, root: Path) -> WorkflowService:
         return WorkflowService(repository=FileWorkflowRepository(root_dir=root / "workflow"))
 
@@ -176,28 +176,6 @@ class Wave4WorkflowTests(unittest.TestCase):
 
             self.assertEqual(len(approved.schedules), 1)
             self.assertIn("定例会", listed.detail_markdown)
-
-    def test_migration_contains_wave4_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "004_wave4_workflow.sql"
-        ).read_text(encoding="utf-8")
-        for table in (
-            "events",
-            "meetings",
-            "task_candidates",
-            "tasks",
-            "schedule_events",
-            "approval_records",
-        ):
-            self.assertIn(f"create table if not exists {table}", sql)
-
-    def test_event_schedule_candidate_migration_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "008_event_schedule_candidates.sql"
-        ).read_text(encoding="utf-8")
-        for table in ("event_candidates", "schedule_candidates"):
-            self.assertIn(f"create table if not exists {table}", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

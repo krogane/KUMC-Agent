@@ -1,7 +1,7 @@
 # Minecraft Wiki RAG 実装計画
 
 ## 1. 方針
-`docs/design/kumc-agent.md` と `docs/design/minecraft-wiki-rag.md` に従い、Minecraft Wiki RAGを段階実装する。
+`docs/design/kumc-agent.md` と `docs/design/minecraft-wiki-rag.md` に従い、Minecraft Wiki RAGを実装する。
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `features/ingestion`、`features/rag`、`infra/connectors`、`infra/retrieval`、`domain/models` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先するが、Minecraft Version / Minecraft Edition判定、属性フィルタリング、additional_queriesは実装対象から除外する。
 

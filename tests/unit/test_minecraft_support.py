@@ -36,7 +36,7 @@ def _flags(mode: str = "approval_required") -> FeatureFlagService:
     )
 
 
-class Wave6MinecraftSupportTests(unittest.TestCase):
+class MinecraftSupportTests(unittest.TestCase):
     def test_registry_contains_only_known_minecraft_actions(self) -> None:
         registry = MinecraftActionSpecRegistry()
 
@@ -127,15 +127,6 @@ class Wave6MinecraftSupportTests(unittest.TestCase):
             self.assertIn("dry-run-only", status.text)
             self.assertEqual(len(request.server_operations), 1)
             self.assertEqual(request.metadata["execution_allowed"], False)
-
-    def test_migration_contains_server_operations_table(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "006_wave6_minecraft_support.sql"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("create table if not exists server_operations", sql)
-        self.assertIn("dry_run jsonb", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

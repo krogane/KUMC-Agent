@@ -15,3 +15,8 @@
 - 例: `routing_decision`、`fast_mode`、`selected_handler`、`policy_decision`、`trace_id`などはトップレベルへ昇格せず、`metadata`に保持してください。
 - 大きな本文断片、検索context、secretを含む可能性がある値など、CLI出力や外部連携に不要または危険なmetadataは出力前に除外・マスクしてください。
 - 既存payloadを拡張する場合は、同じ方針に従ってテストとdocs/explanation配下の関連説明も更新してください。
+
+# 各種設定の保存先
+- パラメータなどの保存はconfigsフォルダ内に保存する。
+- プロンプトはassets/promptsフォルダ内に保存する。
+- .env / .env.exampleには、パラメータやプロンプトは保存せず、トークンやAPIキーなどの情報などを保存する。

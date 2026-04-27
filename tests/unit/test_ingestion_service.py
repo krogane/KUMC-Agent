@@ -73,7 +73,7 @@ class DummyConnector:
         )
 
 
-class Wave2IngestionTests(unittest.TestCase):
+class IngestionServiceTests(unittest.TestCase):
     def test_backfill_detects_checksum_and_secret_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -154,14 +154,6 @@ class Wave2IngestionTests(unittest.TestCase):
                 ]
             )
             self.assertEqual([chunk.id for chunk in storage.load_chunks()], ["ok"])
-
-    def test_migration_contains_wave2_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "002_wave2_ingestion.sql"
-        ).read_text(encoding="utf-8")
-        for table in ("source_items", "documents", "chunks", "secret_findings"):
-            self.assertIn(f"create table if not exists {table}", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

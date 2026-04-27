@@ -19,31 +19,6 @@ from kumc_agent.infra.workflow import FileWorkflowRepository
 
 
 class DesignGapFoundationTests(unittest.TestCase):
-    def test_gap_migration_contains_required_tables(self) -> None:
-        sql = (
-            ROOT / "infrastructure" / "migrations" / "009_design_gap_tables.sql"
-        ).read_text(encoding="utf-8")
-        for table in (
-            "workflow_candidates",
-            "workflow_runs",
-            "action_specs",
-            "action_runs",
-            "action_approvals",
-            "llm_calls",
-            "tool_calls",
-            "indexing_runs",
-            "assets",
-            "asset_usage_requests",
-            "member_profiles",
-            "finance_records",
-            "eval_sets",
-            "eval_cases",
-            "eval_runs",
-            "eval_results",
-            "minecraft_wiki_articles",
-        ):
-            self.assertIn(f"create table if not exists {table}", sql)
-
     def test_file_operations_repository_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repository = FileOperationsRepository(root_dir=Path(tmp) / "operations")

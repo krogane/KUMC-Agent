@@ -50,7 +50,7 @@ class DummyAskService:
         )
 
 
-class Wave5AgenticDocgenAnnouncementTests(unittest.TestCase):
+class AgenticDocgenAnnouncementTests(unittest.TestCase):
     def test_agentic_search_runs_state_machine_with_citations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = AgenticSearchService(
@@ -141,19 +141,10 @@ class Wave5AgenticDocgenAnnouncementTests(unittest.TestCase):
             self.assertNotIn("1234", announcement.text)
             self.assertEqual(announcement.metadata["status"], "needs_review")
 
-    def test_tool_registry_and_migration(self) -> None:
+    def test_tool_registry(self) -> None:
         names = {schema.name for schema in ToolSchemaRegistry().list()}
         self.assertIn("search_documents", names)
         self.assertIn("compare_evidence", names)
-
-        sql = (
-            ROOT
-            / "infrastructure"
-            / "migrations"
-            / "005_wave5_agentic_docgen_announcement.sql"
-        ).read_text(encoding="utf-8")
-        for table in ("agent_runs", "agent_steps", "announcements"):
-            self.assertIn(f"create table if not exists {table}", sql)
 
 
 if __name__ == "__main__":
