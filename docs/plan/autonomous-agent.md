@@ -8,7 +8,7 @@
 初期実装では、自律エージェントを「定期的に状況を確認して、候補・通知案・承認申請・ログを作る機能」として実装する。外部投稿、サーバー操作、タスク/イベント正本更新、オートメーション正本更新は承認前に実行しない。
 
 ## 2. 完了条件
-- 1日にn回の起動時刻を `configs/ops/autonomous_agent.yaml` で設定できる。
+- 1日にn回の起動時刻を `configs/main/autonomous_agent.yaml` で設定できる。
 - 手動dry-runとworker/scheduler経由のrunで同じ `AutonomousAgentService` を呼べる。
 - `idempotency_key` により同一日・同一slot・同一scopeの二重実行を防げる。
 - PLANでタスク、イベント、RAG差分、サーバー運用、オートメーションの確認項目を決定できる。
@@ -39,7 +39,7 @@
 - 自律エージェントから直接書き込み実行される危険なservice呼び出しがないこと。
 
 ### Phase 2: 設定追加
-1. `configs/ops/autonomous_agent.yaml` を追加する。
+1. `configs/main/autonomous_agent.yaml` を追加する。
 2. `enabled`、`schedule_times`、`timezone`、`scopes`、`notification_channel_id`、`dry_run`、`lookahead_days`、`duplicate_suppression_hours`、`budget` を定義する。
 3. `config/schema.py` にAutonomousAgent設定sectionを追加する。
 4. `config/load.py` または既存設定merge経路に読み込みを追加する。
@@ -193,7 +193,7 @@
 ### Phase 12: worker/scheduler連携
 1. `apps/worker/app.py` に `job_type="autonomous_agent_run"` を追加する。
 2. payloadからtrigger、slot、scopes、dry_runを受け取る。
-3. `configs/ops/autonomous_agent.yaml` の `schedule_times` をscheduler候補にできるようにする。
+3. `configs/main/autonomous_agent.yaml` の `schedule_times` をscheduler候補にできるようにする。
 4. 既存schedulerがcron生成を持たない場合は、初期実装では手動worker起動とCLI dry-runを優先する。
 5. `AutomationRule` と連携する場合は、action_type `autonomous_agent_run` を追加し、modeは初期 `approval_required` または `dry_run` にする。
 
@@ -262,7 +262,7 @@
 3. `docs/design/evaluation-platform.md` に自律エージェント評価観点を追記する。
 4. `docs/design/integrated-input.md` に自律エージェントからの呼び出し方を追記する。
 5. `docs/plan/integrated-input.md` に自律エージェント連携タスクを追記する。
-6. 設定ファイルを追加した場合は、運用説明に `configs/ops/autonomous_agent.yaml` を記載する。
+6. 設定ファイルを追加した場合は、運用説明に `configs/main/autonomous_agent.yaml` を記載する。
 
 検証:
 - 自律エージェントの出力が「提案・通知・承認申請・ログ」に限定される説明になっていること。

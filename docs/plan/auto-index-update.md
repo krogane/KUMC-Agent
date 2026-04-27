@@ -24,7 +24,7 @@
 
 ## 3. 実装ステップ
 ### Phase 1: 実行モデルと設定整理
-1. `configs/ops/scheduler.yaml` に自動更新の運用パラメータを追加する。
+1. `configs/main/scheduler.yaml` に自動更新の運用パラメータを追加する。
 2. `SchedulerSection` と `load_runtime_config()` に追加設定を反映する。
 3. `KUMC_AUTO_INDEX_*` 既存env bindingとの整合を確認する。
 4. `AutoIndexUpdateRequest` / `AutoIndexUpdateResult` を追加する。
@@ -214,7 +214,7 @@
 | jobs/worker | `src/kumc_agent/apps/worker/app.py`、`src/kumc_agent/infra/jobs/lifecycle.py` |
 | automation | `src/kumc_agent/features/automation/service.py` |
 | runtime | `src/kumc_agent/runtime/container.py`、`src/kumc_agent/runtime/context.py` |
-| config | `src/kumc_agent/config/schema.py`、`src/kumc_agent/config/load.py`、`src/kumc_agent/config/env_map.py`、`configs/ops/scheduler.yaml` |
+| config | `src/kumc_agent/config/schema.py`、`src/kumc_agent/config/load.py`、`src/kumc_agent/config/env_map.py`、`configs/main/scheduler.yaml` |
 | CLI | `src/kumc_agent/cli.py` |
 | retrieval | `src/kumc_agent/infra/retrieval/faiss.py`、`src/kumc_agent/infra/retrieval/sudachi_bm25.py` 必要に応じて |
 | image/member/workflow | `src/kumc_agent/features/image_search/`、`src/kumc_agent/features/member_search/`、`src/kumc_agent/features/workflow/` |

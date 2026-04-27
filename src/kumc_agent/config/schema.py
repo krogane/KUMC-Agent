@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -423,6 +422,11 @@ class OpsSection:
 
 
 @dataclass(frozen=True)
+class SummarizationSection:
+    target_characters: int
+
+
+@dataclass(frozen=True)
 class IntegrationDiscordSection:
     bot_token: str
 
@@ -567,7 +571,6 @@ class ServerManagementSection:
 @dataclass(frozen=True)
 class RuntimeConfig:
     base_dir: Path
-    experiment_profile: str
     app: AppSection
     providers: ProviderSection
     security: SecuritySection
@@ -579,11 +582,11 @@ class RuntimeConfig:
     rag: RagSection
     indexing: IndexingSection
     ops: OpsSection
+    summarization: SummarizationSection
     integrations: IntegrationSection
     model: ModelSection
     vc: VCSection
     server_management: ServerManagementSection
-    experiments: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_discord_enabled(self) -> bool:

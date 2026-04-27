@@ -7,13 +7,7 @@ docker-compose.yml
 docker/
 app/.venv/
 app/data/*
-data/raw/*
-data/processed/*
-data/chunks/*
-data/index/*
-data/cache/*
-data/eval/*
-app/model/*
+data/*
 model/*
 logs/
 prompt.txt

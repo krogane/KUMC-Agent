@@ -521,12 +521,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         summarize=SummarizationUsecase(
             service=SummarizationService(
                 config=SummarizationConfig(
-                    target_characters=int(
-                        config.experiments.get("summarization", {}).get(
-                            "target_characters",
-                            200,
-                        )
-                    )
+                    target_characters=config.summarization.target_characters,
                 )
             )
         ),

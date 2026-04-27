@@ -1,0 +1,79 @@
+rag:
+  fast_model_notice: "※負荷軽減のために軽量モードを使用しました。"
+  answer_json_max_retries: 2
+  prompt_texts:
+    empty_context: "(コンテキストなし)"
+    empty_history: "(履歴なし)"
+    history_user_prefix: "ユーザー: "
+    history_assistant_prefix: "アシスタント: "
+    history_sources_label: "参照ソース:"
+    gemini_header_chat_history: "# チャット履歴"
+    gemini_header_retry_history: "# 再検索前の質問と回答"
+    gemini_header_circle_info: "# サークルの基本情報"
+    gemini_header_capabilities: "# チャットボット自身の機能情報"
+    gemini_header_context: "# コンテキスト"
+    gemini_header_output_format: "# 出力形式"
+    gemini_header_instructions: "## 指示"
+    gemini_header_question: "# ユーザーの質問"
+  routing:
+    enabled: true
+    provider: "gemini"
+    gemini_model: "gemini-2.5-flash-lite"
+    prompt_name: "routing"
+    tasks:
+      target_model:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        prompt_name: "routing_target_model"
+      use_additional_memory:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        prompt_name: "routing_use_additional_memory"
+      include_capabilities_info:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        prompt_name: "routing_include_capabilities_info"
+      needs_additional_query:
+        provider: "gemini"
+        gemini_model: "gemini-2.5-flash-lite"
+        prompt_name: "routing_needs_additional_query"
+      additional_queries:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        prompt_name: "routing_additional_queries"
+      material_names:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        prompt_name: "routing_material_names"
+      recency_mode:
+        provider: "gemini"
+        gemini_model: "gemini-3.1-flash-lite-preview"
+        prompt_name: "routing_recency_mode"
+    temperature: 0.0
+    max_new_tokens: 128
+    max_retries: 1
+    log_enabled: true
+    material_search_max_names: 3
+  history:
+    enabled: true
+    max_turns: 3
+    prompt_default_turns: 0
+    prompt_additional_turns: 3
+    special_channel_history_limit: 30
+    special_channel_names: ["kumc-agent"]
+    special_channel_custom_instruction: ""
+  generation:
+    rag:
+      provider: "gemini"
+      gemini_model: "gemini-3-flash-preview"
+      temperature: 0.0
+      max_output_tokens: 8192
+      thinking_level: "minimal"
+      prompt_name: "answer_rag"
+    no_rag:
+      provider: "gemini"
+      gemini_model: "gemini-2.5-flash-lite"
+      temperature: 0.0
+      max_output_tokens: 4096
+      thinking_level: "minimal"
+      prompt_name: "answer_no_rag"

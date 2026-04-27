@@ -13,15 +13,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.config.load import ConfigLoadError, load_runtime_config
+from kumc_agent.config.load import load_runtime_config
 
 
 class ConfigLoadingTests(unittest.TestCase):
     def _prepare_base(self, base: Path) -> None:
-        (base / "configs" / "ops").mkdir(parents=True)
-        (base / "configs" / "experiments" / "rag").mkdir(parents=True)
+        (base / "configs" / "main").mkdir(parents=True)
 
-        (base / "configs" / "ops" / "app.yaml").write_text(
+        (base / "configs" / "main" / "app.yaml").write_text(
             dedent(
                 """
                 app:
@@ -127,7 +126,7 @@ class ConfigLoadingTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "providers.yaml").write_text(
+        (base / "configs" / "main" / "providers.yaml").write_text(
             dedent(
                 """
                 providers:
@@ -153,15 +152,15 @@ class ConfigLoadingTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "security.yaml").write_text(
+        (base / "configs" / "main" / "security.yaml").write_text(
             "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "scheduler.yaml").write_text(
+        (base / "configs" / "main" / "scheduler.yaml").write_text(
             "scheduler:\n  auto_index_enabled: false\n  auto_index_time: '03:00'\n  auto_index_weekdays: [0,1,2]\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "features.yaml").write_text(
+        (base / "configs" / "main" / "features.yaml").write_text(
             dedent(
                 """
                 features:
@@ -199,7 +198,7 @@ class ConfigLoadingTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "model.yaml").write_text(
+        (base / "configs" / "main" / "model.yaml").write_text(
             dedent(
                 """
                 model:
@@ -214,7 +213,7 @@ class ConfigLoadingTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "vc.yaml").write_text(
+        (base / "configs" / "main" / "vc.yaml").write_text(
             dedent(
                 """
                 vc:
@@ -262,12 +261,17 @@ class ConfigLoadingTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "experiments" / "rag" / "baseline.yaml").write_text(
-            "features:\n  retrieval:\n    top_k: 7\n",
-            encoding="utf-8",
-        )
+        for file_name in (
+            "infrastructure.yaml",
+            "rag.yaml",
+            "indexing.yaml",
+            "evaluation.yaml",
+            "integrations.yaml",
+            "summarization.yaml",
+        ):
+            (base / "configs" / "main" / file_name).write_text("", encoding="utf-8")
 
-    def test_priority_ops_env_experiment(self) -> None:
+    def test_priority_main_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             self._prepare_base(base)
@@ -318,13 +322,12 @@ class ConfigLoadingTests(unittest.TestCase):
                     "SPARSE_BM25_B": "0.7",
                     "SPARSE_USE_NORMALIZED_FORM": "0",
                     "SPARSE_REMOVE_SYMBOLS": "0",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):
                 config = load_runtime_config(base_dir=base)
 
-            self.assertEqual(config.features.retrieval.top_k, 7)
+            self.assertEqual(config.features.retrieval.top_k, 9)
             self.assertEqual(config.features.retrieval.rrf_k, 17)
             self.assertEqual(config.features.retrieval.recency_weight_soft, 0.33)
             self.assertEqual(config.features.retrieval.recency_weight_hard, 0.66)
@@ -407,12 +410,12 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertFalse(config.ops.ragas_metrics.context_precision_enabled)
             self.assertTrue(config.ops.ragas_metrics.context_recall_enabled)
 
-    def test_unknown_key_in_experiment_raises(self) -> None:
+    def test_summarization_config_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             self._prepare_base(base)
-            (base / "configs" / "experiments" / "rag" / "baseline.yaml").write_text(
-                "features:\n  unknown_key: true\n",
+            (base / "configs" / "main" / "summarization.yaml").write_text(
+                "summarization:\n  target_characters: 123\n",
                 encoding="utf-8",
             )
             with patch.dict(
@@ -421,12 +424,12 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):
-                with self.assertRaises(ConfigLoadError):
-                    load_runtime_config(base_dir=base)
+                config = load_runtime_config(base_dir=base)
+
+        self.assertEqual(config.summarization.target_characters, 123)
 
     def test_openclaw_default_agent_is_main(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -438,7 +441,6 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):
@@ -458,7 +460,7 @@ class ConfigLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             self._prepare_base(base)
-            features_path = base / "configs" / "ops" / "features.yaml"
+            features_path = base / "configs" / "main" / "features.yaml"
             features_path.write_text(
                 "\n".join(
                     line
@@ -474,7 +476,6 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):
@@ -495,7 +496,6 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_RAG_GENERATION_NO_RAG_GEMINI_MODEL": "gemini-no-rag",
                     "KUMC_RAG_IDEA_PROMPT_NAME": "idea_generation",
                     "KUMC_RAG_IDEA_TEMPERATURE": "0.8",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):

@@ -22,8 +22,7 @@ from kumc_agent.usecases.indexing.build import BuildIndexRequest
 
 class ChatIndexEvalIntegrationTests(unittest.TestCase):
     def _write_minimal_project(self, base: Path) -> None:
-        (base / "configs" / "ops").mkdir(parents=True)
-        (base / "configs" / "experiments" / "rag").mkdir(parents=True)
+        (base / "configs" / "main").mkdir(parents=True)
         (base / "assets" / "prompts").mkdir(parents=True)
         (base / "data" / "raw" / "docs").mkdir(parents=True)
         (base / "data" / "eval").mkdir(parents=True)
@@ -40,7 +39,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
         (base / "assets" / "prompts" / "routing.md").write_text("routing", encoding="utf-8")
         (base / "assets" / "prompts" / "summarization.md").write_text("sum", encoding="utf-8")
 
-        (base / "configs" / "ops" / "app.yaml").write_text(
+        (base / "configs" / "main" / "app.yaml").write_text(
             dedent(
                 """
                 app:
@@ -86,7 +85,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "providers.yaml").write_text(
+        (base / "configs" / "main" / "providers.yaml").write_text(
             dedent(
                 """
                 providers:
@@ -112,15 +111,15 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "security.yaml").write_text(
+        (base / "configs" / "main" / "security.yaml").write_text(
             "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "scheduler.yaml").write_text(
+        (base / "configs" / "main" / "scheduler.yaml").write_text(
             "scheduler:\n  auto_index_enabled: false\n  auto_index_time: '03:00'\n  auto_index_weekdays: [0]\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "features.yaml").write_text(
+        (base / "configs" / "main" / "features.yaml").write_text(
             dedent(
                 """
                 features:
@@ -151,7 +150,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "model.yaml").write_text(
+        (base / "configs" / "main" / "model.yaml").write_text(
             dedent(
                 """
                 model:
@@ -166,7 +165,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "ops" / "vc.yaml").write_text(
+        (base / "configs" / "main" / "vc.yaml").write_text(
             dedent(
                 """
                 vc:
@@ -214,10 +213,15 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (base / "configs" / "experiments" / "rag" / "baseline.yaml").write_text(
-            "features:\n  retrieval:\n    top_k: 5\n",
-            encoding="utf-8",
-        )
+        for file_name in (
+            "infrastructure.yaml",
+            "rag.yaml",
+            "indexing.yaml",
+            "evaluation.yaml",
+            "integrations.yaml",
+            "summarization.yaml",
+        ):
+            (base / "configs" / "main" / file_name).write_text("", encoding="utf-8")
 
         (base / "data" / "raw" / "docs" / "sample.md").write_text(
             "KUMCは京都大学のMinecraftサークルです。例会は土曜日です。",
@@ -240,7 +244,6 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "dummy",
                     "KUMC_GEMINI_API_KEY": "dummy",
                     "KUMC_DRIVE_FOLDER_ID": "dummy",
-                    "KUMC_EXPERIMENT_PROFILE": "rag/baseline",
                 },
                 clear=False,
             ):

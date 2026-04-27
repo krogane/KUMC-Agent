@@ -94,7 +94,7 @@ admin判定は `AccessContext` の次の情報を使う。
 | `guild_id` | `security.discord_guild_allow_list` と照合する |
 | `role_ids` | Discord roleに基づくadmin権限拡張に使う |
 
-初期実装では `is_admin=True` または `user_id` が `security.maintenance_command_author_ids` に含まれる場合をadminとする。role_idによるadmin判定を入れる場合は、role allow listを `configs/ops/security.yaml` 配下に追加する。
+初期実装では `is_admin=True` または `user_id` が `security.maintenance_command_author_ids` に含まれる場合をadminとする。role_idによるadmin判定を入れる場合は、role allow listを `configs/main/security.yaml` 配下に追加する。
 
 ### 5.2 拒否応答
 非adminが操作しようとした場合は、候補作成も一覧表示も行わない。
@@ -239,7 +239,7 @@ ActionSpecの `required_args` が不足している場合は候補を作らず�
 - `player_name` がMinecraft IDとして妥当である
 - operationに不要な引数があってもexecutorに渡さない
 
-設定は `.env` ではなく `configs/ops/server_management.yaml` などconfigs配下に置く。APIキーやtokenを追加する場合のみ `.env` と `.env.example` の両方に反映する。
+設定は `.env` ではなく `configs/main/server_management.yaml` などconfigs配下に置く。APIキーやtokenを追加する場合のみ `.env` と `.env.example` の両方に反映する。
 
 ## 9. ServerOperation
 ### 9.1 データモデル
@@ -497,7 +497,7 @@ admin向けdetailには次を表示する。
 
 ## 15. 設定
 ### 15.1 feature flag
-現行の `configs/ops/features.yaml` を使う。
+現行の `configs/main/features.yaml` を使う。
 
 ```yaml
 features:

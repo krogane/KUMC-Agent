@@ -11,6 +11,7 @@ boto3
 google-api-python-client
 google-auth
 google-genai
+langchain
 langchain-community
 langchain-core
 langchain-huggingface

@@ -3,7 +3,7 @@
 ## 1. 目的
 評価基盤は、KUMC-Agent の各機能の品質を継続的に測定し、実装前の評価ケース作成と実装後の回帰評価を支える仕組みである。
 
-本設計は `docs/design/kumc-agent.md` の「5. 評価基盤」を上位仕様とし、詳細部分は現行実装の `src/kumc_agent/usecases/eval/ragas.py`、`src/kumc_agent/cli.py`、`src/kumc_agent/runtime/container.py`、`domain.models.operations.EvalRun`、`configs/ops/app.yaml` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+本設計は `docs/design/kumc-agent.md` の「5. 評価基盤」を上位仕様とし、詳細部分は現行実装の `src/kumc_agent/usecases/eval/ragas.py`、`src/kumc_agent/cli.py`、`src/kumc_agent/runtime/container.py`、`domain.models.operations.EvalRun`、`configs/main/evaluation.yaml` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
 現行実装はRAGASによるRAG評価を中心にしている。本設計ではそれを拡張し、RAG評価、機能別評価、安全性評価、PR小規模評価、full eval、結果保存を統一的に扱う。
 
@@ -236,7 +236,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli eval run --set rag.circle.
 ```
 
 ## 9. 設定
-現行設定は `configs/ops/app.yaml` の `ops.ragas_*` と `ops.ragas_metrics` にある。
+現行設定は `configs/main/evaluation.yaml` の `ops.ragas_*` と `ops.ragas_metrics` にある。
 
 主な現行項目:
 

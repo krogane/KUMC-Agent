@@ -14,7 +14,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli admin --action reindex --f
 
 ## 定期実行
 
-定期実行条件は `configs/ops/scheduler.yaml` の次の値で管理する。
+定期実行条件は `configs/main/scheduler.yaml` の次の値で管理する。
 
 - `scheduler.auto_index_enabled`
 - `scheduler.auto_index_time`

@@ -3,7 +3,7 @@
 ## 1. 目的
 自動インデックス更新は、1日ごと特定の時間にRAG関連インデックスを更新し、検索対象の新規・更新・削除・権限変更を検索結果へ反映する機能である。
 
-本設計は `docs/design/kumc-agent.md` の「8. 自動インデックス更新」を上位仕様とする。詳細部分は現行実装の `usecases.indexing`、`features.indexing`、`features.ingestion`、`infra.connectors`、`infra.operations.repository.IndexingRun`、`apps.worker`、`features.automation`、`configs/ops/scheduler.yaml` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+本設計は `docs/design/kumc-agent.md` の「8. 自動インデックス更新」を上位仕様とする。詳細部分は現行実装の `usecases.indexing`、`features.indexing`、`features.ingestion`、`infra.connectors`、`infra.operations.repository.IndexingRun`、`apps.worker`、`features.automation`、`configs/main/scheduler.yaml` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
 ## 2. 対象範囲
 対象機能は次の通り。
@@ -60,7 +60,7 @@ flowchart TD
 
 ## 5. 起動と実行制御
 ### 5.1 スケジュール
-設定は現行の `configs/ops/scheduler.yaml` と `RuntimeConfig.scheduler` を使う。
+設定は現行の `configs/main/scheduler.yaml` と `RuntimeConfig.scheduler` を使う。
 
 | 設定 | 説明 |
 | --- | --- |
@@ -276,11 +276,11 @@ CLIや外部連携payloadのトップレベルは安定フィールドだけに�
 
 | 設定 | 保存先 | 説明 |
 | --- | --- | --- |
-| `auto_index_max_runtime_minutes` | `configs/ops/scheduler.yaml` | 1 runの上限 |
-| `auto_index_lock_ttl_minutes` | `configs/ops/scheduler.yaml` | lock TTL |
-| `quality_min_chunk_ratio` | `configs/ops/scheduler.yaml` | 前回比chunk数の下限 |
-| `quality_smoke_queries` | `configs/ops/scheduler.yaml` または `configs/ops/index_quality.yaml` | 代表クエリ |
-| `rollback_keep_snapshots` | `configs/ops/scheduler.yaml` | 保存snapshot数 |
+| `auto_index_max_runtime_minutes` | `configs/main/scheduler.yaml` | 1 runの上限 |
+| `auto_index_lock_ttl_minutes` | `configs/main/scheduler.yaml` | lock TTL |
+| `quality_min_chunk_ratio` | `configs/main/scheduler.yaml` | 前回比chunk数の下限 |
+| `quality_smoke_queries` | `configs/main/scheduler.yaml` または `configs/main/index_quality.yaml` | 代表クエリ |
+| `rollback_keep_snapshots` | `configs/main/scheduler.yaml` | 保存snapshot数 |
 
 `.env` または `.env.example` のどちらか一方で項目を追加・削除する場合は、必ず他方にも反映する。
 

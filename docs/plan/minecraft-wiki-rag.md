@@ -136,7 +136,7 @@
 
 ### Phase 9: 運用・ドキュメント
 1. `docs/explanation/cli.md` にMinecraft Wiki RAGの呼び出し例を追記する。
-2. 必要な設定を `configs/ops/app.yaml`、`configs/ops/features.yaml` に追加する。
+2. 必要な設定を `configs/main/indexing.yaml`、`configs/main/integrations.yaml`、`configs/main/features.yaml` に追加する。
 3. `.env` または `.env.example` に項目を追加する場合は、必ず他方にも反映する。
 4. 取得速度制限、日本語版全記事取得、再取得、rollbackの運用手順をrunbook化する。
 

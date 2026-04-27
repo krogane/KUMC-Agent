@@ -28,8 +28,8 @@ Announcement、Minecraft 支援、Automation / Production hardening を実装し
 ```text
 KUMC-Agent/
   configs/
-    ops/
-    experiments/
+    main/
+    openclaw/
   docs/
   infrastructure/
   src/kumc_agent/
@@ -58,20 +58,19 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli --help
 
 ## Configuration
 
-設定は `configs/ops/*.yaml`、環境変数、`configs/experiments/**/*.yaml` の順に merge されます。
+設定は `configs/main/*.yaml` を読み込み、環境変数で上書きされます。
 
 優先順位:
 
-1. ops defaults
+1. main defaults
 2. environment variables
-3. experiment config
 
 マージ仕様:
 
 - dict は deep-merge
 - scalar は後勝ち
 - list は完全置換
-- 未知キーは起動エラー
+- 環境変数の対応先が未知キーの場合は起動エラー
 
 `.env` と `.env.example` は同じキー集合を保つ必要があります。片方にキーを追加・削除した場合は、必ずもう片方にも反映してください。
 
@@ -85,7 +84,6 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli --help
 - `KUMC_OPENCLAW_AGENT`
 - `KUMC_OPENCLAW_MODEL`
 - `KUMC_OPENAI_API_KEY`
-- `KUMC_EXPERIMENT_PROFILE`
 - `KUMC_LOG_LEVEL`
 - `KUMC_FEATURE_AUTOMATION_AUTO_RUN_MODE`
 

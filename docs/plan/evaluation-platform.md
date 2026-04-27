@@ -3,7 +3,7 @@
 ## 1. 方針
 `docs/design/kumc-agent.md` と `docs/design/evaluation-platform.md` に従い、評価基盤を実装する。
 
-実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `usecases.eval.ragas.EvaluateRagasUsecase`、`domain.models.operations.EvalRun`、`infra.operations.repository`、`runtime.container`、`cli.py`、`configs/ops/app.yaml` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先する。
+実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `usecases.eval.ragas.EvaluateRagasUsecase`、`domain.models.operations.EvalRun`、`infra.operations.repository`、`runtime.container`、`cli.py`、`configs/main/evaluation.yaml` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先する。
 
 現行の `eval ragas` は互換維持しつつ、評価セット、機能別scorer、安全性scorer、結果保存、PR/full evalを扱う共通評価基盤へ拡張する。
 
@@ -161,7 +161,7 @@
 1. `RuntimeContext` に共通EvalRunnerを追加する。
 2. `runtime.container` でtarget adapterとscorerを配線する。
 3. `config/schema.py`、`config/load.py` に共通評価設定を追加する。
-4. `configs/ops/app.yaml` に共通評価設定を追加する。
+4. `configs/main/evaluation.yaml` に共通評価設定を追加する。
 5. env overrideが必要な項目だけ `config/env_map.py` と `.env` / `.env.example` に追加する。
 
 検証:
@@ -193,7 +193,7 @@
 | repository | `src/kumc_agent/infra/operations/repository.py` |
 | runtime | `src/kumc_agent/runtime/context.py`、`src/kumc_agent/runtime/container.py` |
 | CLI | `src/kumc_agent/cli.py` |
-| config | `src/kumc_agent/config/schema.py`、`src/kumc_agent/config/load.py`、`src/kumc_agent/config/env_map.py`、`configs/ops/app.yaml`、`configs/eval/` 新規 |
+| config | `src/kumc_agent/config/schema.py`、`src/kumc_agent/config/load.py`、`src/kumc_agent/config/env_map.py`、`configs/main/evaluation.yaml`、`configs/eval/` 新規 |
 | eval data | `data/eval/` |
 | docs | `docs/explanation/cli.md`、必要に応じてrunbook |
 | tests | `tests/unit/test_eval_*.py`、`tests/integration/test_chat_index_eval.py` |
@@ -239,4 +239,3 @@ pytestは未導入前提のため、既存方式に合わせて `unittest` で�
 5. 機能別adapter/scorerを実装済み機能から順に追加する。
 6. 結果保存、CLI、CI連携を追加する。
 7. full eval運用と差分レポートを追加する。
-

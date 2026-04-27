@@ -65,18 +65,27 @@ from kumc_agent.config.schema import (
     SourcesSection,
     RedisSection,
     RiskFeatureFlagsSection,
+    SummarizationSection,
     VCSection,
 )
 
-OPS_FILES = (
+MAIN_FILES = (
     "app.yaml",
+    "infrastructure.yaml",
     "providers.yaml",
     "security.yaml",
     "scheduler.yaml",
     "autonomous_agent.yaml",
     "features.yaml",
-    "server_management.yaml",
     "model.yaml",
+    "rag.yaml",
+    "indexing.yaml",
+    "evaluation.yaml",
+    "integrations.yaml",
+    "summarization.yaml",
+    "server_management.yaml",
+    "event_management.yaml",
+    "task_management.yaml",
     "vc.yaml",
 )
 
@@ -293,15 +302,6 @@ def _resolve_optional_path_str(base_dir: Path, value: str) -> str:
     return str(_resolve_path(base_dir, raw))
 
 
-def _resolve_experiment_path(base_dir: Path, profile: str) -> Path:
-    profile_clean = (profile or "rag/baseline").strip().replace("\\", "/")
-    if not profile_clean:
-        profile_clean = "rag/baseline"
-    if not profile_clean.endswith(".yaml"):
-        profile_clean += ".yaml"
-    return base_dir / "configs" / "experiments" / profile_clean
-
-
 def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     updated = dict(config)
     infrastructure = updated.get("infrastructure")
@@ -427,6 +427,12 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     idea_generation.setdefault("prompt_name", "answer_idea")
     idea_generation.setdefault("temperature", 0.0)
 
+    summarization = updated.get("summarization")
+    if not isinstance(summarization, dict):
+        summarization = {}
+        updated["summarization"] = summarization
+    summarization.setdefault("target_characters", 200)
+
     integrations = updated.get("integrations")
     if not isinstance(integrations, dict):
         integrations = {}
@@ -532,9 +538,18 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
     load_dotenv(resolved_base_dir / ".env", override=False)
 
     merged: dict[str, Any] = {}
-    for file_name in OPS_FILES:
-        path = resolved_base_dir / "configs" / "ops" / file_name
-        if file_name in {"server_management.yaml", "autonomous_agent.yaml"} and not path.exists():
+    for file_name in MAIN_FILES:
+        path = resolved_base_dir / "configs" / "main" / file_name
+        if (
+            file_name
+            in {
+                "server_management.yaml",
+                "autonomous_agent.yaml",
+                "event_management.yaml",
+                "task_management.yaml",
+            }
+            and not path.exists()
+        ):
             payload = {}
         else:
             payload = _yaml_load(path)
@@ -549,29 +564,16 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
     except (ValueError, ConfigLoadError) as exc:
         raise ConfigLoadError(str(exc)) from exc
 
-    experiment_profile = os.getenv("KUMC_EXPERIMENT_PROFILE", "rag/baseline")
-    experiment_path = _resolve_experiment_path(resolved_base_dir, experiment_profile)
-    experiment_payload = _yaml_load(experiment_path)
-
-    try:
-        merged = deep_merge(merged, experiment_payload, allow_new_keys=False)
-    except MergeError as exc:
-        raise ConfigLoadError(str(exc)) from exc
-
     return _to_runtime_config(
         merged=merged,
-        experiment_profile=experiment_profile,
         base_dir=resolved_base_dir,
-        experiments=experiment_payload,
     )
 
 
 def _to_runtime_config(
     *,
     merged: dict[str, Any],
-    experiment_profile: str,
     base_dir: Path,
-    experiments: dict[str, Any],
 ) -> RuntimeConfig:
     app = merged["app"]
     providers = merged["providers"]
@@ -587,6 +589,7 @@ def _to_runtime_config(
     rag = merged.get("rag", {})
     indexing = merged.get("indexing", {})
     ops = merged.get("ops", {})
+    summarization = merged.get("summarization", {})
     integrations = merged.get("integrations", {})
     model = merged.get("model", {})
     vc = merged.get("vc", {})
@@ -776,7 +779,6 @@ def _to_runtime_config(
 
     runtime = RuntimeConfig(
         base_dir=base_dir,
-        experiment_profile=experiment_profile,
         app=AppSection(
             command_prefix=str(app["command_prefix"]),
             index_command_prefix=str(app["index_command_prefix"]),
@@ -1498,6 +1500,12 @@ def _to_runtime_config(
                 ),
             ),
         ),
+        summarization=SummarizationSection(
+            target_characters=max(
+                1,
+                int(summarization.get("target_characters", 200)),
+            ),
+        ),
         integrations=IntegrationSection(
             discord=IntegrationDiscordSection(
                 bot_token=str(integrations.get("discord", {}).get("bot_token", "")),
@@ -1805,7 +1813,6 @@ def _to_runtime_config(
                 ),
             ),
         ),
-        experiments=experiments,
     )
 
     _validate_required(runtime)

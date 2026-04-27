@@ -1,0 +1,19 @@
+infrastructure:
+  database:
+    url: ""
+    connect_timeout_seconds: 3.0
+    application_name: "kumc-agent"
+  redis:
+    url: ""
+    socket_timeout_seconds: 3.0
+  object_storage:
+    endpoint_url: ""
+    bucket: ""
+    region: "ap-northeast-1"
+    access_key_id: ""
+    secret_access_key: ""
+    prefix: "kumc-agent"
+    use_ssl: true
+  migrations:
+    directory: "infrastructure/migrations"
+    table_name: "schema_migrations"

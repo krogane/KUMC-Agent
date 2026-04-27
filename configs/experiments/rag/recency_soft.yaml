@@ -1,7 +1,0 @@
-features:
-  retrieval:
-    top_k: 8
-    dense_top_k: 15
-    sparse_top_k: 15
-    rerank_pool_size: 20
-  recency_mode: "soft"

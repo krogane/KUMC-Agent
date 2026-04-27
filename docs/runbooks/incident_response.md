@@ -4,7 +4,7 @@
 
 1. Disable high-impact automation rules with `/automation action:disable`.
 2. Set risky feature flags to `disabled` or `approval_required`.
-3. For server operation incidents, set `features.risk_flags.minecraft_server_ops` to `disabled` in `configs/ops/features.yaml` and redeploy/restart the process.
+3. For server operation incidents, set `features.risk_flags.minecraft_server_ops` to `disabled` in `configs/main/features.yaml` and redeploy/restart the process.
 4. Capture health and readiness output.
 5. Preserve audit logs before making further changes.
 

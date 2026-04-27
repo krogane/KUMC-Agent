@@ -5,7 +5,7 @@
 
 本機能は利用者の入力を待たずに起動するが、副作用のある操作は自動実行しない。外部投稿、サーバー操作、タスク正本更新、イベント正本更新、オートメーション正本更新は、必ず承認待ち候補または承認申請として作成する。
 
-本設計は `docs/design/kumc-agent.md` の「12. 自律エージェント」を上位仕様とする。詳細部分は現行実装の `domain.models.agentic.AgentRun`、`AgentStep`、`AgentBudget`、`infra.agentic.repository`、`domain.models.automation.AutomationRule`、`AutomationRun`、`features.automation.service.AutomationService`、`domain.models.workflow.WorkRequest`、`WorkResponse`、`features.workflow.service.WorkflowService`、`domain.models.audit.AuditEvent`、`configs/ops/scheduler.yaml`、`configs/ops/task_management.yaml` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+本設計は `docs/design/kumc-agent.md` の「12. 自律エージェント」を上位仕様とする。詳細部分は現行実装の `domain.models.agentic.AgentRun`、`AgentStep`、`AgentBudget`、`infra.agentic.repository`、`domain.models.automation.AutomationRule`、`AutomationRun`、`features.automation.service.AutomationService`、`domain.models.workflow.WorkRequest`、`WorkResponse`、`features.workflow.service.WorkflowService`、`domain.models.audit.AuditEvent`、`configs/main/scheduler.yaml`、`configs/main/task_management.yaml` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
 ## 2. 対象範囲
 対象機能は次の通り。
@@ -38,7 +38,7 @@
 | VERIFY | Automationはmode/riskでblocked判定する | 自律エージェントは「再検索」「何もしない」「通知」「許可申請」「候補作成」のいずれかを選ぶ |
 | 出力 | AutomationResponse、WorkResponse | AutonomousAgentResponseを追加し、提案・通知・承認申請・ログだけを主結果として返す |
 | 監査 | AutomationとWorkflowはAuditEventを残せる | 自律エージェントrun、判断理由、参照対象、候補ID、通知予定を監査ログに残す |
-| 設定 | `configs/ops/scheduler.yaml` と機能別configがある | `configs/ops/autonomous_agent.yaml` を追加し、起動時刻や対象scopeを保存する |
+| 設定 | `configs/main/scheduler.yaml` と機能別configがある | `configs/main/autonomous_agent.yaml` を追加し、起動時刻や対象scopeを保存する |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -79,14 +79,14 @@ flowchart TD
 | repository | run idempotencyと履歴保存 | `src/kumc_agent/infra/agentic/repository.py`, `src/kumc_agent/infra/automation/repository.py` |
 | audit | 判断理由と結果の監査 | `src/kumc_agent/infra/audit/repository.py` |
 | app context | feature、repository、scheduler設定の組み立て | `src/kumc_agent/apps/autonomous_agent.py` |
-| config | 起動時刻、対象scope、通知先、budget | `configs/ops/autonomous_agent.yaml` |
+| config | 起動時刻、対象scope、通知先、budget | `configs/main/autonomous_agent.yaml` |
 | frontend/worker | 手動dry-run、定期run、Discord通知連携 | `src/kumc_agent/cli.py`, `src/kumc_agent/apps/worker/app.py` |
 
 ## 5. 実行タイミング
 ### 5.1 起動方式
 自律エージェントは1日にn回、自動で起動する。初期実装ではworkerから明示的に `job_type="autonomous_agent_run"` を実行できるようにし、scheduler連携時に同じserviceを呼び出す。
 
-起動時刻は `.env` ではなく `configs/ops/autonomous_agent.yaml` に保存する。トークン、APIキー、DB接続情報などを追加する場合だけ `.env` / `.env.example` を更新する。
+起動時刻は `.env` ではなく `configs/main/autonomous_agent.yaml` に保存する。トークン、APIキー、DB接続情報などを追加する場合だけ `.env` / `.env.example` を更新する。
 
 設定例:
 
@@ -353,7 +353,7 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 - 大きなRAG contextや本文断片は外部payloadにもtraceにも保存しない。
 
 ## 12. 設定
-自律エージェントのパラメータは `configs/ops/autonomous_agent.yaml` に保存する。
+自律エージェントのパラメータは `configs/main/autonomous_agent.yaml` に保存する。
 
 `.env` / `.env.example` に保存してよいのは、外部API token、DB URL、Discord tokenなどのsecretだけである。設定項目を追加する場合は `config/schema.py` と `config/load.py` の読み込みも更新する。
 

@@ -1,0 +1,18 @@
+ops:
+  index_update_estimate_min_minutes: 30
+  index_update_estimate_max_minutes: 60
+  ragas_answer_generation_batch_size: 30
+  ragas_batch_size: 1024
+  ragas_max_workers: 64
+  ragas_timeout_seconds: 180.0
+  ragas_max_retries: 1
+  ragas_answer_cache_enabled: false
+  ragas_answer_cache_path: "data/eval/cache/ragas_answers.jsonl"
+  ragas_disable_history_for_eval: true
+  ragas_metrics:
+    answer_relevancy_enabled: true
+    faithfulness_enabled: true
+    context_precision_enabled: true
+    context_recall_enabled: true
+  answer_record_log_enabled: true
+  answer_record_log_path: "logs/answer_records.jsonl"

@@ -549,31 +549,23 @@ sync_cursors
 ### 8.1 設定ファイル構成
 ```text
 /configs
-  /base
+  /main
     app.yaml
     providers.yaml
     security.yaml
-    retrieval.yaml
-    agents.yaml
-    actions.yaml
-    automation.yaml
-    discord.yaml
-  /env
-    local.yaml
-    staging.yaml
-    production.yaml
-  /experiments
-    retrieval_rrf.yaml
-    rerank_provider_a.yaml
-    agent_budget_small.yaml
+    features.yaml
+    rag.yaml
+    indexing.yaml
+    integrations.yaml
+    evaluation.yaml
+    summarization.yaml
+    scheduler.yaml
 ```
 
 設定の merge 順:
-1. `configs/base/*.yaml`
-2. `configs/env/{KUMC_ENV}.yaml`
-3. `configs/experiments/{KUMC_EXPERIMENT_PROFILE}.yaml`
-4. environment variables
-未知 key は起動時にエラーにする。
+1. `configs/main/*.yaml`
+2. environment variables
+環境変数の対応先が未知 key の場合は起動時にエラーにする。
 
 ### 8.2 環境変数
 必須:

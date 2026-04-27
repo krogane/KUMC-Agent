@@ -234,7 +234,7 @@
 | repository | `src/kumc_agent/infra/workflow/repository.py` |
 | migration | `infrastructure/migrations/016_task_management_hardening.sql` 新規候補 |
 | prompts | `assets/prompts/task_extraction.md` 新規候補 |
-| config | `configs/workflow/task_management.yaml` または `configs/ops/task_management.yaml` 新規候補 |
+| config | `configs/workflow/task_management.yaml` または `configs/main/task_management.yaml` 新規候補 |
 | CLI | `src/kumc_agent/cli.py` |
 | Discord | `src/kumc_agent/frontends/discord/app.py` |
 | HTTP | `src/kumc_agent/frontends/http/app.py` 存在する場合 |

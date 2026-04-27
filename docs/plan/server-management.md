@@ -53,7 +53,7 @@
 - `maintenance_command_author_ids` に含まれるuser idはadmin扱いになること。
 
 ### Phase 3: 設定追加
-1. `configs/ops/server_management.yaml` を追加する。
+1. `configs/main/server_management.yaml` を追加する。
 2. `RuntimeConfig` に `server_management` sectionを追加する。
 3. 設定にはserver name、compose_dir、service allow list、file search allow path、timeout、stdout/stderr上限を持たせる。
 4. `load_runtime_config()` でconfigs配下の設定を読み込む。
@@ -230,7 +230,7 @@
 | repository | `src/kumc_agent/infra/minecraft/repository.py` |
 | workflow | `src/kumc_agent/features/workflow/service.py` |
 | config schema | `src/kumc_agent/config/schema.py`, `src/kumc_agent/config/load.py` |
-| config | `configs/ops/features.yaml`, `configs/ops/security.yaml`, `configs/ops/server_management.yaml` 新規 |
+| config | `configs/main/features.yaml`, `configs/main/security.yaml`, `configs/main/server_management.yaml` 新規 |
 | CLI | `src/kumc_agent/cli.py`, `docs/explanation/cli.md` |
 | frontend | `src/kumc_agent/frontends/discord/app.py`, `src/kumc_agent/frontends/http/app.py` |
 | DB | `infrastructure/migrations/006_minecraft_server_operations.sql`、必要なら追加migration |
