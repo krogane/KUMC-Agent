@@ -5,14 +5,19 @@ import asyncio
 from dataclasses import asdict, is_dataclass
 import json
 import logging
-import re
 from pathlib import Path
 
 from kumc_agent.frontends.console.repl import run_repl
+from kumc_agent.domain.models.integrated_input import IntegratedInputRequest
 from kumc_agent.domain.models.retrieval import AccessContext
+from kumc_agent.features.foundation.payload_sanitizer import (
+    compact_payload_text,
+    mask_payload_secret,
+    sanitize_payload,
+    sanitize_payload_metadata,
+)
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
-from kumc_agent.usecases.chat.entry import ChatEntryRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
 from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
@@ -71,6 +76,24 @@ def _workflow_response_payload(response: object) -> dict[str, object]:
     }
 
 
+def _comprehensive_response_payload(response: object) -> dict[str, object]:
+    return {
+        "text": getattr(response, "text", ""),
+        "detail_markdown": getattr(response, "detail_markdown", ""),
+        "citations": _sanitize_payload_value(
+            [getattr(citation, "__dict__", {}) for citation in getattr(response, "citations", ())]
+        ),
+        "confidence": getattr(response, "confidence", "low"),
+        "task_candidates": _sanitize_payload_value(getattr(response, "task_candidates", ())),
+        "event_candidates": _sanitize_payload_value(getattr(response, "event_candidates", ())),
+        "server_operations": _sanitize_payload_value(getattr(response, "server_operations", ())),
+        "assets": _sanitize_payload_value(getattr(response, "assets", ())),
+        "member_profiles": _sanitize_payload_value(getattr(response, "member_profiles", ())),
+        "warnings": list(getattr(response, "warnings", ())),
+        "metadata": _sanitize_payload_metadata(getattr(response, "metadata", {}) or {}),
+    }
+
+
 def _dump_workflow_item(item: object) -> dict[str, object]:
     raw = asdict(item) if is_dataclass(item) else getattr(item, "__dict__", {})
     payload = {
@@ -94,72 +117,19 @@ def _dump_workflow_item(item: object) -> dict[str, object]:
 
 
 def _sanitize_payload_metadata(value: object) -> dict[str, object]:
-    metadata = dict(value or {}) if isinstance(value, dict) else {}
-    for key in (
-        "contexts",
-        "context",
-        "llm_prompt",
-        "raw",
-        "secret",
-        "executor_args",
-        "server_state_before",
-        "server_state_after",
-        "container_state_before",
-        "container_state_after",
-    ):
-        metadata.pop(key, None)
-    for key, item in list(metadata.items()):
-        if isinstance(item, str):
-            metadata[key] = _compact_payload_text(_mask_payload_secret(item), 1200)
-        elif isinstance(item, dict):
-            metadata[key] = _sanitize_payload_value(item)
-        elif isinstance(item, list):
-            metadata[key] = _sanitize_payload_value(item)
-    return metadata
+    return sanitize_payload_metadata(value)
 
 
 def _sanitize_payload_value(value: object) -> object:
-    if isinstance(value, dict):
-        sanitized: dict[str, object] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if key_text.lower() in {"secret", "password", "token", "api_key", "raw"}:
-                continue
-            sanitized[key_text] = _sanitize_payload_value(item)
-        return sanitized
-    if isinstance(value, tuple):
-        return [_sanitize_payload_value(item) for item in value]
-    if isinstance(value, list):
-        return [_sanitize_payload_value(item) for item in value]
-    if isinstance(value, str):
-        return _compact_payload_text(_mask_payload_secret(value), 4000)
-    return value
+    return sanitize_payload(value)
 
 
 def _compact_payload_text(text: str, limit: int) -> str:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: max(0, limit - 3)].rstrip() + "..."
+    return compact_payload_text(text, limit)
 
 
 def _mask_payload_secret(text: str) -> str:
-    masked = re.sub(
-        r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
-        r"\1=[REDACTED]",
-        text,
-    )
-    masked = re.sub(
-        r"\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b",
-        "[internal-ip]",
-        masked,
-    )
-    masked = re.sub(
-        r"(?i)(network[_-]?key|pin|unlock(?:ing)?[_ -]?steps?)\s*[:=]\s*[^\n]+",
-        r"\1=[REDACTED]",
-        masked,
-    )
-    return masked
+    return mask_payload_secret(text)
 
 
 def _automation_response_payload(response: object) -> dict[str, object]:
@@ -303,6 +273,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "member",
             "task",
             "event",
+            "server",
         ),
     )
     ask_parser.add_argument("--mode", default="answer", choices=("answer", "search_only", "fast", "careful"))
@@ -610,86 +581,23 @@ def main() -> None:
             return
 
     if args.command == "ask":
-        if args.source == "member":
-            from kumc_agent.apps.workflow import build_workflow_app_context
-            from kumc_agent.domain.models.workflow import WorkRequest
+        from kumc_agent.apps.integrated_input import build_integrated_input_app_context
 
-            workflow = build_workflow_app_context()
-            response = workflow.workflow.run(
-                WorkRequest(
-                    work_type="member_search",
-                    instruction=args.question,
-                    access=AccessContext(
-                        user_id=args.user_id,
-                        guild_id=args.guild_id,
-                        role_ids=tuple(args.role_id or ()),
-                        is_admin=bool(args.admin),
-                    ),
-                )
-            )
-            print(json.dumps(_workflow_response_payload(response), ensure_ascii=False, default=str))
-            return
-        if args.depth == "deep":
-            from kumc_agent.apps.agentic import build_agentic_app_context
-            from kumc_agent.domain.models.agentic import AgenticSearchRequest
-
-            agentic = build_agentic_app_context()
-            response = agentic.agentic_search.search(
-                AgenticSearchRequest(
-                    query=args.question,
-                    source_filter=args.source,
-                    access=AccessContext(
-                        user_id=args.user_id,
-                        guild_id=args.guild_id,
-                        role_ids=tuple(args.role_id or ()),
-                        is_admin=bool(args.admin),
-                    ),
-                )
-            )
-            print(
-                json.dumps(
-                    {
-                        "text": response.text,
-                        "detail_markdown": response.detail_markdown,
-                        "confidence": response.confidence,
-                        "warnings": list(response.warnings),
-                        "citations": [citation.__dict__ for citation in response.citations],
-                        "agent_run_id": response.run.id,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return
-        from kumc_agent.apps.retrieval import build_retrieval_app_context
-        from kumc_agent.domain.models.retrieval import RetrievalQuery
-
-        retrieval = build_retrieval_app_context()
-        response = retrieval.ask.ask(
-            RetrievalQuery(
+        integrated = build_integrated_input_app_context()
+        response = integrated.integrated_input.execute(
+            IntegratedInputRequest(
                 text=args.question,
-                source_filter=args.source,
+                source=args.source,
                 mode=args.mode,
                 depth=args.depth,
-                access=AccessContext(
-                    user_id=args.user_id,
-                    guild_id=args.guild_id,
-                    role_ids=tuple(args.role_id or ()),
-                    is_admin=bool(args.admin),
-                ),
+                user_id=args.user_id,
+                guild_id=args.guild_id,
+                role_ids=tuple(args.role_id or ()),
+                is_admin=bool(args.admin),
+                frontend="cli",
             )
         )
-        print(
-            json.dumps(
-                {
-                    "text": response.text,
-                    "detail_markdown": response.detail_markdown,
-                    "confidence": response.confidence,
-                    "warnings": list(response.warnings),
-                    "citations": [citation.__dict__ for citation in response.citations],
-                },
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(response.to_payload(), ensure_ascii=False, default=str))
         return
 
     if args.command == "work":
@@ -788,7 +696,9 @@ def main() -> None:
 
     if args.command == "chat":
         logger.info("Running chat query. length=%d", len(args.query or ""))
-        answer = context.chat_entry.execute(ChatEntryRequest(query=args.query))
+        answer = context.integrated_input.execute(
+            IntegratedInputRequest(text=args.query, frontend="cli")
+        )
         print(answer.text)
         logger.info("Chat query completed")
         return

@@ -17,7 +17,6 @@ from kumc_agent.infra.loaders.discord import DiscordLoader
 from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
 from kumc_agent.infra.loaders.notion import NotionLoader
-from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.database.postgres import PostgresClient
 from kumc_agent.infra.audit.repository import build_audit_repository
@@ -45,7 +44,6 @@ from kumc_agent.features.rag.config import (
     RagPromptTextSettings,
 )
 from kumc_agent.features.rag.components.generation import GenerationComponent
-from kumc_agent.features.rag.components.entry_routing import EntryQueryRouter
 from kumc_agent.features.rag.components.answer_filter import AnswerFilterComponent
 from kumc_agent.features.rag.components.query_synthesis import QuerySynthesizer
 from kumc_agent.features.rag.components.retrieval import RetrievalComponent
@@ -57,7 +55,6 @@ from kumc_agent.features.vc.config import VCManagerConfig
 from kumc_agent.features.vc.service import VCService
 from kumc_agent.runtime.context import RuntimeContext
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
-from kumc_agent.usecases.chat.entry import ChatEntryUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
 from kumc_agent.usecases.eval.ragas import EvaluateRagasUsecase
 from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateUsecase
@@ -476,38 +473,16 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
-    entry_router = EntryQueryRouter(
-        provider=config.rag.routing.provider,
-        gemini_model=config.rag.routing.gemini_model,
-        temperature=config.rag.routing.temperature,
-        max_new_tokens=config.rag.routing.max_new_tokens,
-        max_retries=config.rag.routing.max_retries,
-        gemini_api_key=config.integrations.gemini_api_key,
-        gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
-        prompt_name="routing_openclaw_gate",
-        log_enabled=config.rag.routing.log_enabled,
-    )
-    openclaw_client = OpenClawClient(
-        enabled=config.integrations.openclaw.enabled,
-        agent=config.integrations.openclaw.agent,
-        model=config.integrations.openclaw.model,
-        lite_agent=config.integrations.openclaw.lite_agent,
-        lite_model=config.integrations.openclaw.lite_model,
-        openai_api_key=config.integrations.openai_api_key,
-        config_dir=config.integrations.openclaw.config_dir,
-    )
-    chat_entry_usecase = ChatEntryUsecase(
-        chat_usecase=chat_answer_usecase,
-        openclaw_client=openclaw_client,
-        entry_router=entry_router,
-    )
+    from kumc_agent.apps.integrated_input import build_integrated_input_app_context
+
+    integrated_input = build_integrated_input_app_context(base_dir=config.base_dir).integrated_input
     chat_route_usecase = ChatRouteUsecase(router=router)
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
 
     return RuntimeContext(
         config=config,
+        integrated_input=integrated_input,
         chat_answer=chat_answer_usecase,
-        chat_entry=chat_entry_usecase,
         chat_route=chat_route_usecase,
         build_index=build_index_usecase,
         update_index=UpdateIndexUsecase(

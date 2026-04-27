@@ -3,9 +3,9 @@
 ## 1. 方針
 `docs/design/kumc-agent.md` と `docs/design/integrated-input.md` に従い、統合入力受付を実装する。
 
-実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `domain.models.retrieval.AccessContext`、`domain.models.retrieval.RetrievalQuery`、`domain.models.workflow.WorkRequest`、`domain.models.workflow.WorkResponse`、`features.rag.components.entry_routing.EntryQueryRouter`、`usecases.chat.entry.ChatEntryUsecase`、`features.workflow.service.WorkflowService`、`features.agentic.service.AgenticSearchService` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先する。
+実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `domain.models.retrieval.AccessContext`、`domain.models.retrieval.RetrievalQuery`、`domain.models.workflow.WorkRequest`、`domain.models.workflow.WorkResponse`、`features.workflow.service.WorkflowService`、新規実装後の `features.agentic.comprehensive.ComprehensiveAgentService` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先する。
 
-初期実装では、既存の `ChatEntryUsecase` と `direct_rag` / `openclaw` 分類は互換経路として残し、新たに `IntegratedInputUsecase` を追加する。CLI/HTTP/Discordの `/ask` は段階的に新usecaseへ寄せる。
+`ChatEntryUsecase`、`EntryQueryRouter`、`EntryRoutingDecision`、CLI/HTTP/Discordに分散している旧 `/ask` 分岐は削除する。互換経路や後方互換adapterは残さず、入口は `IntegratedInputUsecase` に統一する。
 
 ## 2. 完了条件
 - Discord統合コマンドから質問、依頼、管理操作を受け取れる。
@@ -20,22 +20,21 @@
 - Discordへの送信責務が統合入力受付adapterに集約される。
 - CLI、HTTP、Discordで同じ出力envelopeを利用できる。
 - secret、巨大context、raw prompt、画像local pathが外部payloadに出ない。
-- 既存の `ChatEntryUsecase`、CLI `ask`、HTTP `/ask`、Discord `/ask` の主要互換動作が壊れない。
+- `ChatEntryUsecase`、`EntryQueryRouter`、旧 `/ask` 分岐が削除され、通常入力が `IntegratedInputUsecase` 経由だけになる。
 - 主要動作を既存のunittest方式で検証できる。
 
 ## 3. 実装ステップ
-### Phase 1: 現行入口の仕様固定
-1. `ChatEntryUsecase` の既存 `direct_rag` / `openclaw` 挙動をテストで固定する。
-2. `EntryQueryRouter` のparse、retry、fallback挙動をテストで固定する。
-3. CLI `ask` の `source=member`、`depth=deep`、通常RAGの分岐をテストで固定する。
-4. HTTP `/ask` の `source=member`、`depth=deep`、通常RAGの分岐をテストで固定する。
-5. Discord `/ask` の `source=member`、`depth=deep`、通常RAGの分岐をテスト可能なhelperへ切り出す。
-6. 既存payload sanitizerが `contexts`、`llm_prompt`、`raw`、画像local pathを落とすことを確認する。
+### Phase 1: 旧入口の削除範囲確定
+1. `ChatEntryUsecase`、`ChatEntryRequest`、`EntryRoutingDecision`、`EntryRoute`、`EntryQueryRouter` の参照箇所を列挙する。
+2. CLI `ask` の `source=member`、`depth=deep`、通常RAGの個別分岐を削除対象として特定する。
+3. HTTP `/ask` の `source=member`、`depth=deep`、通常RAGの個別分岐を削除対象として特定する。
+4. Discord `/ask` の `source=member`、`depth=deep`、通常RAGの個別分岐を削除対象として特定する。
+5. `direct_rag` / `openclaw` とOpenClaw入口を削除対象として特定する。
+6. 削除後に `IntegratedInputUsecase` が引き継ぐ入力、分類、権限、payload項目を一覧化する。
 
 検証:
-- `tests/unit/test_chat_entry_usecase.py`
-- `tests/unit/test_entry_query_router.py`
-- CLI/HTTP helperのunittest追加
+- `rg "ChatEntryUsecase|EntryQueryRouter|EntryRoutingDecision|direct_rag|openclaw"` で削除対象を把握できていること。
+- 削除対象の責務が後続Phaseの新componentへ割り当てられていること。
 
 ### Phase 2: domain model追加
 1. `domain/models/integrated_input.py` を追加する。
@@ -62,16 +61,16 @@
 
 検証:
 - secretがtext、metadata、nested itemからマスクされること。
-- 既存CLI/HTTP payloadが後方互換の主結果を維持すること。
+- CLI/HTTP/Discordの出力が同じsanitizerを通ること。
 
 ### Phase 4: IntegratedInputRouter実装
 1. `features/rag/components/integrated_input_routing.py` を追加する。
-2. 現行 `EntryQueryRouter` のGemini呼び出し、retry、JSON抽出、code fence除去を再利用する。
+2. Gemini呼び出し、retry、JSON抽出、code fence除去を `IntegratedInputRouter` 内に実装する。
 3. promptは `assets/prompts/integrated_input_routing.md` に保存する。
 4. 出力schemaにroute、intent、required_features、source_filters、attribute_filters、risk、freshness_required、needs_clarification、clarification_question、reasonを定義する。
 5. schema外の診断情報は `metadata` に移す。
 6. invalid payload時はretry後にread-only fallback decisionを返す。
-7. 既存 `EntryRoutingDecision` との互換adapterを用意する。
+7. `EntryRoutingDecision` との互換adapterは作らず、新しい `IntegratedInputDecision` のみを返す。
 
 検証:
 - 全routeの正常parse。
@@ -150,59 +149,62 @@
 3. `build_integrated_input_app_context()` でfoundation、retrieval、workflow、agenticを組み立てる。
 4. import循環が起きる場合は、依存をprotocolまたは薄いadapterで切る。
 5. `runtime/container.py` の `RuntimeContext` へ必要に応じて統合入力受付を追加する。
-6. 既存 `ChatEntryUsecase` は互換用として残す。
+6. `RuntimeContext` やapp contextから `ChatEntryUsecase` 参照を取り除く。
 
 検証:
 - app context生成で循環importしないこと。
 - Discord bot起動時にcontext構築が重複しすぎないこと。
 
-### Phase 10: CLI配線
+### Phase 10: CLI配線と旧分岐削除
 1. CLI `ask` を `IntegratedInputUsecase` 経由に変更する。
-2. 既存の `source=member`、`depth=deep` 分岐は統合入力受付handlerへ移す。
+2. CLI `ask` 内の `source=member`、`depth=deep`、通常RAGの個別分岐を削除する。
 3. `--source`、`--mode`、`--depth`、`--user-id`、`--guild-id`、`--role-id`、`--admin` を `IntegratedInputRequest` へ渡す。
 4. 出力は `IntegratedInputResponse` のpayload builderでJSON化する。
-5. 既存の安定フィールド `text`、`detail_markdown`、`citations`、`confidence`、`warnings` は維持する。
+5. 安定フィールド `text`、`detail_markdown`、`citations`、`confidence`、`warnings` は `IntegratedInputResponse` から出力する。
 6. 診断情報は `metadata` 配下へ入れる。
 
 検証:
-- `python -m kumc_agent.cli ask --question ...` の既存主要payloadが維持されること。
+- CLI `ask` が `IntegratedInputUsecase` を1回だけ呼ぶこと。
 - member/image/task/event/serverの主結果がトップレベルに出ること。
+- `ChatEntryUsecase`、`EntryQueryRouter`、OpenClaw分類を参照しないこと。
 
-### Phase 11: HTTP配線
+### Phase 11: HTTP配線と旧分岐削除
 1. HTTP `/ask` を `IntegratedInputUsecase` 経由に変更する。
 2. payloadの `question` / `query`、`source`、`mode`、`depth`、権限情報をrequestへ渡す。
 3. `_workflow_payload` とRAG payloadの重複を統合payload builderへ寄せる。
 4. エラー時はHTTP 400/403/500の使い分けを整理する。
-5. 互換のため、主結果フィールド名は既存と揃える。
+5. 主結果フィールド名は `IntegratedInputResponse` の安定schemaに揃える。
 
 検証:
 - sourceごとのrouteがHTTPでもCLIと一致すること。
 - metadata sanitizerが適用されること。
+- HTTP `/ask` 内に個別route分岐が残っていないこと。
 
-### Phase 12: Discord配線
+### Phase 12: Discord配線と旧分岐削除
 1. Discord `/ask` を `IntegratedInputUsecase` 経由に変更する。
 2. `_access_context(interaction)` を統合入力受付へ渡す。
 3. route先のresponseを直接送信せず、`DiscordOutputAdapter` で送信する。
 4. `text` が長い場合または `detail_markdown` が本文より長い場合はattachmentを付ける。
-5. task/event/server候補がある場合は、既存のapproval viewを必要に応じて添付する。
+5. task/event/server候補がある場合は、承認viewを必要に応じて添付する。
 6. `/work` と `/approval` は明示操作として残すが、通常の依頼は `/ask` へ集約する。
 7. 各ルーティング先serviceにDiscord送信責務を持たせない。
 
 検証:
-- Discord `/ask` がsource別に正しいrouteへ委譲すること。
-- attachment判定が既存挙動を維持すること。
+- Discord `/ask` が `IntegratedInputUsecase` を1回だけ呼ぶこと。
+- attachment判定が `IntegratedInputResponse` に基づくこと。
 - 候補作成時に承認ボタンが必要な場合だけ付くこと。
+- Discord `/ask` 内に個別route分岐が残っていないこと。
 
 ### Phase 13: 総合エージェント連携
 1. `required_features` が2つ以上の場合のrequest変換を実装する。
-2. 初期段階では既存 `AgenticSearchService` を互換routeとして呼ぶ。
-3. `docs/design/comprehensive-agent.md` の `ComprehensiveAgentService` 実装後はそちらへ切り替える。
+2. `docs/design/comprehensive-agent.md` の `ComprehensiveAgentService` を呼ぶ。
+3. `ComprehensiveAgentService` が未実装の場合は、総合エージェントrouteをstub化せず、実装順を前倒しする。
 4. 分類結果のrisk、source_filters、attribute_filtersを総合エージェントへ渡す。
 5. 総合エージェントのrun idは `metadata.trace_id` または `metadata.agent_run_id` に入れる。
 6. 候補や承認待ちがある場合はトップレベル主結果に正規化する。
 
 検証:
-- 複合依頼が既存deep検索だけでなく総合エージェントrouteとして識別されること。
+- 複合依頼が総合エージェントrouteとして識別されること。
 - run idがトップレベルへ昇格しないこと。
 
 ### Phase 14: 監査・trace
@@ -226,13 +228,13 @@
 - docs内のファイル名、route名、work_type名が実装と一致すること。
 
 ## 4. 推奨実装順
-1. Phase 1からPhase 3で既存挙動とpayload sanitizationを固定する。
-2. Phase 4からPhase 7で新usecaseを追加し、CLIだけを先に統合入力受付経由にする。
-3. Phase 8からPhase 11で安全境界とHTTPを統合する。
-4. Phase 12でDiscord `/ask` を統合する。
+1. Phase 1で旧入口の削除範囲と責務移管先を確定する。
+2. Phase 2からPhase 8で新しいmodel、router、usecase、route handler、安全境界を実装する。
+3. Phase 9でapp contextを統合入力受付中心に組み替える。
+4. Phase 10からPhase 12でCLI/HTTP/Discordの旧 `/ask` 分岐を削除し、薄いadapterへ置き換える。
 5. Phase 13以降で総合エージェント、trace、docsを仕上げる。
 
-この順序にすると、Discord送信の変更を最後に回し、CLI/HTTPでrouteとpayloadを先に検証できる。
+この順序にすると、旧入口を残したまま新旧併存させる期間を作らず、`IntegratedInputUsecase` への一本化を前提に各frontendを置き換えられる。
 
 ## 5. テスト一覧
 追加または更新するテスト候補は次の通り。
@@ -244,18 +246,19 @@
 | `tests/unit/test_integrated_routing_policy.py` | source優先、複合依頼昇格、副作用fallback |
 | `tests/unit/test_integrated_input_usecase.py` | routeごとのservice委譲、AccessContext伝播 |
 | `tests/unit/test_integrated_input_sanitizer.py` | secret、context、画像pathの除外 |
-| `tests/unit/test_cli_integrated_ask.py` | CLI askのpayload互換 |
-| `tests/unit/test_http_integrated_ask.py` | HTTP /askのpayload互換 |
+| `tests/unit/test_cli_integrated_ask.py` | CLI askが統合入力受付だけを呼ぶこと |
+| `tests/unit/test_http_integrated_ask.py` | HTTP /askが統合入力受付だけを呼ぶこと |
 | `tests/unit/test_discord_integrated_ask.py` | Discord送信adapterとattachment判定 |
+| `tests/unit/test_removed_legacy_entrypoints.py` | 旧入口のimport参照が残っていないこと |
 
 pytestは未導入のため、既存と同じunittest形式で追加する。
 
 ## 6. リスクと対策
 | リスク | 対策 |
 | --- | --- |
-| 既存 `/ask` の互換性を壊す | Phase 1で現行分岐とpayloadを固定する |
+| 旧入口削除時に責務が抜け落ちる | Phase 1で削除対象と移管先を対応表にする |
 | 分類LLMが誤って副作用routeを選ぶ | 決定的policyとrisk検査で副作用を候補作成に限定する |
 | Discord送信責務の移行漏れ | route handlerはresponse返却のみ、送信はadapterに限定するテストを置く |
 | app context循環 | 統合入力受付用contextを独立させ、必要ならprotocol adapterを使う |
 | metadataからsecretが漏れる | 共通sanitizerを全出口とtrace保存前に適用する |
-| 総合エージェント未完成でrouteが宙に浮く | 初期は既存 `AgenticSearchService` 互換routeへfallbackし、後で差し替える |
+| 総合エージェント未完成でrouteが宙に浮く | 統合入力受付の総合エージェントroute実装前に `ComprehensiveAgentService` を用意する |

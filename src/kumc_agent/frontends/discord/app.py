@@ -5,9 +5,9 @@ import io
 import json
 import logging
 
-from kumc_agent.domain.models.agentic import AgenticSearchRequest
 from kumc_agent.domain.models.health import HealthReport
-from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
+from kumc_agent.domain.models.integrated_input import IntegratedInputRequest, IntegratedInputResponse
+from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.domain.models.source import BackfillScope
 from kumc_agent.domain.models.workflow import WorkRequest
 
@@ -47,6 +47,7 @@ def create_bot(
     workflow_context: object,
     automation_context: object,
     ingestion_context: object,
+    integrated_input_context: object | None = None,
 ):
     import discord
     from discord import app_commands
@@ -122,6 +123,35 @@ def create_bot(
                 await self._run(interaction, "show")
 
         return TaskApprovalView(target_id)
+
+    def _first_candidate_id(response: IntegratedInputResponse) -> str:
+        candidates = (
+            tuple(response.task_candidates or tuple())
+            + tuple(response.task_change_candidates or tuple())
+        )
+        if not candidates:
+            return ""
+        first = candidates[0]
+        if isinstance(first, dict):
+            return str(first.get("id") or first.get("operation_id") or "")
+        return str(getattr(first, "id", "") or getattr(first, "operation_id", ""))
+
+    async def _send_integrated_response(
+        interaction: discord.Interaction,
+        response: IntegratedInputResponse,
+    ) -> None:
+        kwargs = {"content": response.text or "結果がありません。", "ephemeral": True}
+        if response.detail_markdown and (
+            len(response.detail_markdown) > len(response.text or "")
+            or len(response.text or "") > 1800
+        ):
+            kwargs["file"] = _format_detail_attachment(content=response.detail_markdown)
+            if len(str(kwargs["content"])) > 1800:
+                kwargs["content"] = response.text[:1700].rstrip() + "..."
+        candidate_id = _first_candidate_id(response)
+        if candidate_id:
+            kwargs["view"] = _task_approval_view(candidate_id)
+        await interaction.followup.send(**kwargs)
 
     def _event_approval_view(target_id: str, *, batch_id: str = ""):
         if not target_id:
@@ -376,6 +406,7 @@ def create_bot(
             app_commands.Choice(name="member", value="member"),
             app_commands.Choice(name="task", value="task"),
             app_commands.Choice(name="event", value="event"),
+            app_commands.Choice(name="server", value="server"),
         ],
         mode=[
             app_commands.Choice(name="answer", value="answer"),
@@ -397,39 +428,27 @@ def create_bot(
         depth: str = "normal",
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if source == "member":
-            response = await asyncio.to_thread(
-                workflow_context.workflow.run,
-                WorkRequest(
-                    work_type="member_search",
-                    instruction=question,
-                    access=_access_context(interaction),
-                ),
-            )
-        elif depth == "deep":
-            response = await asyncio.to_thread(
-                agentic_context.agentic_search.search,
-                AgenticSearchRequest(
-                    query=question,
-                    source_filter=source,
-                    access=_access_context(interaction),
-                ),
-            )
-        else:
-            response = await asyncio.to_thread(
-                retrieval_context.ask.ask,
-                RetrievalQuery(
-                    text=question,
-                    source_filter=source,
-                    mode=mode,
-                    depth=depth,
-                    access=_access_context(interaction),
-                ),
-            )
-        kwargs = {"content": response.text, "ephemeral": True}
-        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
-            kwargs["file"] = _format_detail_attachment(content=response.detail_markdown)
-        await interaction.followup.send(**kwargs)
+        if integrated_input_context is None:
+            await interaction.followup.send("統合入力受付が未設定です。", ephemeral=True)
+            return
+        access = _access_context(interaction)
+        response = await asyncio.to_thread(
+            integrated_input_context.integrated_input.execute,
+            IntegratedInputRequest(
+                text=question,
+                source=source,
+                mode=mode,
+                depth=depth,
+                user_id=access.user_id,
+                guild_id=access.guild_id,
+                role_ids=access.role_ids,
+                is_admin=access.is_admin,
+                access=access,
+                frontend="discord",
+                metadata={"interaction_id": str(interaction.id)},
+            ),
+        )
+        await _send_integrated_response(interaction, response)
 
     @bot.tree.command(name="work", description="KUMC-Agent workflow operations")
     @app_commands.describe(

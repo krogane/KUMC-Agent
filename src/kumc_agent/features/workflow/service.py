@@ -9,7 +9,6 @@ from typing import Any
 from uuid import uuid4
 
 from kumc_agent.domain.models.audit import AuditEvent
-from kumc_agent.domain.models.agentic import AgenticSearchRequest
 from kumc_agent.domain.models.docgen import DocGenRequest
 from kumc_agent.domain.models.operations import (
     WorkflowCandidate,
@@ -37,7 +36,6 @@ from kumc_agent.features.announcement.service import (
     AnnouncementDraftRequest,
     AnnouncementDraftService,
 )
-from kumc_agent.features.agentic import AgenticSearchService
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.event_management import (
     DuplicateEventDetector,
@@ -85,7 +83,6 @@ class WorkflowService:
         repository: WorkflowRepository,
         ask_service: Any | None = None,
         audit_log: AuditLogRepository | None = None,
-        agentic_search: AgenticSearchService | None = None,
         docgen: DocGenService | None = None,
         announcement: AnnouncementDraftService | None = None,
         minecraft: MinecraftSupportService | None = None,
@@ -107,7 +104,6 @@ class WorkflowService:
         self.repository = repository
         self.ask_service = ask_service
         self.audit_log = audit_log
-        self.agentic_search = agentic_search
         self.docgen = docgen
         self.announcement = announcement
         self.minecraft = minecraft
@@ -1017,7 +1013,7 @@ class WorkflowService:
 
     def doc_draft(self, request: WorkRequest) -> WorkResponse:
         docgen = self.docgen or DocGenService()
-        retrieved = self._agentic_or_retrieve(
+        retrieved = self._retrieve(
             request,
             fallback_query=request.target or request.instruction or "週報 意思決定 メモ 根拠",
         )
@@ -1045,7 +1041,7 @@ class WorkflowService:
         )
 
     def x_draft(self, request: WorkRequest) -> WorkResponse:
-        retrieved = self._agentic_or_retrieve(
+        retrieved = self._retrieve(
             request,
             fallback_query=request.target or request.instruction or "告知 SNS 投稿 過去文面",
         )
@@ -1082,7 +1078,7 @@ class WorkflowService:
                 repository=FileAnnouncementRepository(root_dir=Path("data/announcement")),
                 docgen=self.docgen or DocGenService(),
             )
-        retrieved = self._agentic_or_retrieve(
+        retrieved = self._retrieve(
             request,
             fallback_query=request.target or request.instruction or "告知 関連資料 日時 場所",
         )
@@ -2471,21 +2467,6 @@ class WorkflowService:
                 source_filter="all",
                 mode="search_only",
                 depth="normal",
-                access=request.access,
-            )
-        )
-        return {
-            "text": response.detail_markdown or response.text,
-            "citations": tuple(response.citations),
-        }
-
-    def _agentic_or_retrieve(self, request: WorkRequest, *, fallback_query: str) -> dict[str, object]:
-        if self.agentic_search is None:
-            return self._retrieve(request, fallback_query=fallback_query)
-        response = self.agentic_search.search(
-            AgenticSearchRequest(
-                query=fallback_query,
-                source_filter="all",
                 access=request.access,
             )
         )

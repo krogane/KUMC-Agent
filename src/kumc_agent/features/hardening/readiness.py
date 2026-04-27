@@ -58,8 +58,11 @@ class ProductionReadinessService:
 
     def cost_report(self) -> dict[str, object]:
         agent_steps_path = self.config.base_dir / "data" / "agentic" / "agent_steps.jsonl"
+        agent_runs_path = self.config.base_dir / "data" / "agentic" / "agent_runs.jsonl"
         total_cost = 0.0
         step_count = 0
+        tool_counts: dict[str, int] = {}
+        tool_failures: dict[str, int] = {}
         if agent_steps_path.exists():
             for line in agent_steps_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -67,6 +70,24 @@ class ProductionReadinessService:
                 payload = json.loads(line)
                 total_cost += float(payload.get("cost_usd") or 0.0)
                 step_count += 1
+                output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+                tool_name = str(output.get("tool_name") or "")
+                if tool_name:
+                    tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+                    if str(payload.get("status") or "") in {"failed", "insufficient_input"}:
+                        tool_failures[tool_name] = tool_failures.get(tool_name, 0) + 1
+        latest_runs: dict[str, dict[str, object]] = {}
+        if agent_runs_path.exists():
+            for line in agent_runs_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if isinstance(payload, dict) and payload.get("id"):
+                    latest_runs[str(payload["id"])] = payload
+        status_counts: dict[str, int] = {}
+        for payload in latest_runs.values():
+            status = str(payload.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
         warnings = self.cost_cap.check(
             projected_daily_usd=total_cost,
             projected_run_usd=0.0,
@@ -74,6 +95,10 @@ class ProductionReadinessService:
         return {
             "total_agentic_cost_usd": round(total_cost, 4),
             "agent_step_count": step_count,
+            "agent_run_count": len(latest_runs),
+            "agent_run_status_counts": status_counts,
+            "agent_tool_counts": tool_counts,
+            "agent_tool_failure_counts": tool_failures,
             "daily_cap_usd": self.cost_cap.daily_usd_cap,
             "per_run_cap_usd": self.cost_cap.per_run_usd_cap,
             "warnings": list(warnings),

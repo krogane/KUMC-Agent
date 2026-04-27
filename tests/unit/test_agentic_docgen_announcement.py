@@ -11,11 +11,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.domain.models.agentic import AgenticSearchRequest
+from kumc_agent.domain.models.agentic import ComprehensiveAgentRequest
 from kumc_agent.domain.models.docgen import DocGenRequest
 from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation
 from kumc_agent.domain.models.workflow import WorkRequest
-from kumc_agent.features.agentic import AgenticSearchService, ToolSchemaRegistry
+from kumc_agent.features.agentic import ComprehensiveAgentService, ToolSchemaRegistry
 from kumc_agent.features.announcement import AnnouncementDraftService
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.workflow import WorkflowService
@@ -51,36 +51,40 @@ class DummyAskService:
 
 
 class AgenticDocgenAnnouncementTests(unittest.TestCase):
-    def test_agentic_search_runs_state_machine_with_citations(self) -> None:
+    def test_comprehensive_agent_runs_state_machine_with_citations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = AgenticSearchService(
+            service = ComprehensiveAgentService(
                 ask_service=DummyAskService(),
                 repository=FileAgentTraceRepository(root_dir=Path(tmp) / "agentic"),
             )
 
-            response = service.search(
-                AgenticSearchRequest(
+            response = service.run(
+                ComprehensiveAgentRequest(
                     query="新歓企画の要点は?",
                     access=AccessContext(user_id="user-1"),
+                    required_features=("circle_rag",),
+                    metadata={"depth": "deep"},
                 )
             )
 
             states = [step.state for step in response.run.steps]
             self.assertIn("PLAN", states)
-            self.assertIn("SEARCH", states)
+            self.assertIn("TOOL", states)
             self.assertIn("VERIFY", states)
             self.assertIn("ANSWER", states)
-            self.assertEqual(response.confidence, "medium")
+            self.assertEqual(response.confidence, "high")
             self.assertGreaterEqual(len(response.citations), 1)
 
-    def test_agentic_search_stops_when_evidence_is_missing(self) -> None:
+    def test_comprehensive_agent_stops_when_evidence_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = AgenticSearchService(
+            service = ComprehensiveAgentService(
                 ask_service=DummyAskService(with_citation=False),
                 repository=FileAgentTraceRepository(root_dir=Path(tmp) / "agentic"),
             )
 
-            response = service.search(AgenticSearchRequest(query="不明な質問"))
+            response = service.run(
+                ComprehensiveAgentRequest(query="不明な質問", metadata={"depth": "deep"})
+            )
 
             self.assertEqual(response.confidence, "low")
             self.assertIn("十分な根拠", response.text)
@@ -108,10 +112,6 @@ class AgenticDocgenAnnouncementTests(unittest.TestCase):
             service = WorkflowService(
                 repository=FileWorkflowRepository(root_dir=root / "workflow"),
                 ask_service=DummyAskService(),
-                agentic_search=AgenticSearchService(
-                    ask_service=DummyAskService(),
-                    repository=FileAgentTraceRepository(root_dir=root / "agentic"),
-                ),
                 docgen=docgen,
                 announcement=AnnouncementDraftService(
                     repository=FileAnnouncementRepository(root_dir=root / "announcement"),
@@ -143,8 +143,9 @@ class AgenticDocgenAnnouncementTests(unittest.TestCase):
 
     def test_tool_registry(self) -> None:
         names = {schema.name for schema in ToolSchemaRegistry().list()}
-        self.assertIn("search_documents", names)
-        self.assertIn("compare_evidence", names)
+        self.assertIn("circle_rag_search", names)
+        self.assertIn("task_candidate_create", names)
+        self.assertFalse(ToolSchemaRegistry().get("task_candidate_create").read_only)
 
 
 if __name__ == "__main__":

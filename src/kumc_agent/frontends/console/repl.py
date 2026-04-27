@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from kumc_agent.domain.models.integrated_input import IntegratedInputRequest
 from kumc_agent.runtime.context import RuntimeContext
-from kumc_agent.usecases.chat.entry import ChatEntryRequest
 
 
 def run_repl(context: RuntimeContext) -> None:
@@ -18,5 +18,7 @@ def run_repl(context: RuntimeContext) -> None:
         if query.lower() in {"exit", "quit"}:
             break
 
-        answer = context.chat_entry.execute(ChatEntryRequest(query=query))
+        answer = context.integrated_input.execute(
+            IntegratedInputRequest(text=query, frontend="cli")
+        )
         print(answer.text)

@@ -121,7 +121,17 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --help
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli chat --query "KUMCの活動内容は？"
 ```
 
-内部では `ChatEntryRequest` を作り、`context.chat_entry.execute(...)` に渡します。
+内部では `IntegratedInputRequest` を作り、`context.integrated_input.execute(...)` に渡します。
+
+### `ask`
+
+CLI/HTTP/Discord と同じ統合入力受付を通して質問・依頼を実行します。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回イベントの準備タスク候補を作って" --source task
+```
+
+出力payloadは `text`、`detail_markdown`、`citations`、`confidence`、候補一覧などをトップレベルに置き、ルーティング判断やtrace idなどの診断情報は `metadata` 配下に入ります。
 
 ### `tool rag`
 
@@ -316,8 +326,9 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ask --question "次回の�
 通常は retrieval app context を作り、`retrieval.ask.ask(...)` を呼びます。
 質問文、source filter、mode、depth、アクセス情報を `RetrievalQuery` にまとめて渡します。
 
-`--depth deep` の場合だけ、通常の retrieval ではなく agentic search を使います。
-この場合は `build_agentic_app_context()` で agentic context を作り、`agentic.agentic_search.search(...)` を呼びます。
+`--depth deep` の場合だけ、通常の retrieval ではなく総合エージェントを使います。
+この場合は `build_agentic_app_context()` で comprehensive agent context を作り、`agentic.comprehensive_agent.run(...)` を呼びます。
+診断情報、run id、tool summary、replan count は payload の `metadata` 配下に入ります。
 
 アクセス制御に関係する値として、次のオプションがあります。
 

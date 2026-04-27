@@ -5,7 +5,9 @@
 
 本機能は、各機能がDiscordへ直接送信する経路を持たないようにし、Discordへの最終送信、長文添付、エラー表示、権限不足表示を統合入力受付に集約する。
 
-本設計は `docs/design/kumc-agent.md` の「11. 統合入力受付」を上位仕様とする。詳細部分は現行実装の `usecases.chat.entry.ChatEntryUsecase`、`features.rag.components.entry_routing.EntryQueryRouter`、`domain.models.entry_routing.EntryRoutingDecision`、`domain.models.retrieval.AccessContext`、`domain.models.retrieval.RetrievalQuery`、`domain.models.workflow.WorkRequest`、`domain.models.workflow.WorkResponse`、`frontends.discord.app`、`frontends.http.app`、`cli.py` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+本設計は `docs/design/kumc-agent.md` の「11. 統合入力受付」を上位仕様とする。詳細部分は現行実装の `domain.models.retrieval.AccessContext`、`domain.models.retrieval.RetrievalQuery`、`domain.models.workflow.WorkRequest`、`domain.models.workflow.WorkResponse`、`features.workflow.service.WorkflowService`、`frontends.discord.app`、`frontends.http.app`、`cli.py` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+
+`usecases.chat.entry.ChatEntryUsecase`、`features.rag.components.entry_routing.EntryQueryRouter`、およびCLI/HTTP/Discordに分散している既存 `/ask` 分岐は削除対象とし、入口処理は `IntegratedInputUsecase` に統一する。後方互換adapterは置かず、必要な振る舞いは `IntegratedInputUsecase` と `IntegratedInputRouter` に移植する。
 
 ## 2. 対象範囲
 対象機能は次の通り。
@@ -29,15 +31,15 @@
 
 | 項目 | 現行実装 | 本設計で必要な状態 |
 | --- | --- | --- |
-| Discord入口 | `/ask`、`/work`、`/approval` が個別に各serviceを呼ぶ | Discordの通常入力は統合入力受付が受け、route結果に応じて各機能へ委譲する |
-| 分類 | `EntryQueryRouter` が `direct_rag` / `openclaw` の2値を返す | intent、必要機能、risk、freshness、source_filters、attribute_filtersを返す |
-| ルーティング先 | CLI/HTTP/Discordで `source == member`、`depth == deep` などを個別判定 | 統一された `IntegratedRoute` によって8系統へ分岐する |
-| 総合エージェント昇格 | `depth=deep` で既存Agentic Searchを起動 | 複数機能が必要な入力は総合エージェントへ昇格する |
+| Discord入口 | `/ask`、`/work`、`/approval` が個別に各serviceを呼ぶ | 通常入力は `IntegratedInputUsecase` が受け、route結果に応じて各機能へ委譲する。既存 `/ask` handlerの分岐は削除する |
+| 分類 | `EntryQueryRouter` が `direct_rag` / `openclaw` の2値を返す | `EntryQueryRouter` を削除し、`IntegratedInputRouter` がintent、必要機能、risk、freshness、source_filters、attribute_filtersを返す |
+| ルーティング先 | CLI/HTTP/Discordで `source == member`、`depth == deep` などを個別判定 | 個別分岐を削除し、統一された `IntegratedRoute` によって8系統へ分岐する |
+| 総合エージェント昇格 | `depth=deep` で総合エージェントを起動 | 複数機能が必要な入力は総合エージェントへ昇格する |
 | 権限 | `AccessContext` は各入口で作る | 統合入力受付で必ず解決し、全ルーティング先へ渡す |
 | Discord送信 | 各command handlerが直接 `followup.send` する | ルーティング先はresponseを返すだけにし、Discord送信は統合入力受付に限定する |
 | payload | CLI/HTTPごとにpayload整形が重複 | 安定フィールドをトップレベル、診断情報を `metadata` に統一する |
 | sanitization | CLI/HTTPに類似処理が重複 | 共通sanitizerでsecret、巨大context、raw promptを除外する |
-| fallback | OpenClaw失敗時にlocal RAGへfallback | 分類失敗時は副作用を直接実行せず、read-only routeまたは確認質問へfallbackする |
+| fallback | OpenClaw失敗時にlocal RAGへfallback | OpenClaw経路は削除する。分類失敗時は副作用を直接実行せず、read-only routeまたは確認質問へfallbackする |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -77,12 +79,12 @@ flowchart TD
 
 | 層 | 責務 | 現行の主なファイル |
 | --- | --- | --- |
-| domain | 入力request、分類結果、route、出力envelope | `domain.models.entry_routing`, `domain.models.answer`, `domain.models.retrieval`, `domain.models.workflow` |
-| usecase | 入力正規化、分類、権限解決、route実行、出力整形 | `usecases.chat.entry.ChatEntryUsecase` |
-| router | LLM分類、schema validation、fallback | `features.rag.components.entry_routing.EntryQueryRouter` |
+| domain | 入力request、分類結果、route、出力envelope | 新規 `domain.models.integrated_input`, `domain.models.retrieval`, `domain.models.workflow` |
+| usecase | 入力正規化、分類、権限解決、route実行、出力整形 | 新規 `usecases.integrated_input.entry.IntegratedInputUsecase` |
+| router | LLM分類、schema validation、fallback | 新規 `features.rag.components.integrated_input_routing.IntegratedInputRouter` |
 | retrieval | サークル情報RAG、Minecraft Wiki RAG | `apps.retrieval`, `domain.models.retrieval.RetrievalQuery` |
 | workflow | メンバー、画像、タスク、イベント、サーバー管理 | `features.workflow.service.WorkflowService` |
-| agentic | 複数機能が必要な依頼の昇格先 | `apps.agentic`, `features.agentic.service.AgenticSearchService` |
+| comprehensive_agent | 複数機能が必要な依頼の昇格先 | `apps.agentic`, `features.agentic.comprehensive.ComprehensiveAgentService` |
 | frontend | Discord送信、CLI JSON、HTTP JSON | `frontends.discord.app`, `frontends.http.app`, `cli.py` |
 
 ## 5. 入力受付
@@ -102,7 +104,7 @@ flowchart TD
 | `frontend` | `discord`、`cli`、`http` |
 | `metadata` | request id、interaction idなど内部診断情報 |
 
-現行の `ChatEntryRequest.query`、`RetrievalQuery.source_filter`、`RetrievalQuery.mode`、`RetrievalQuery.depth`、`AccessContext` を統合した形とする。
+現行の `ChatEntryRequest.query` 相当の入力、`RetrievalQuery.source_filter`、`RetrievalQuery.mode`、`RetrievalQuery.depth`、`AccessContext` を統合した形とする。`ChatEntryRequest` 自体は削除対象であり、新規実装では参照しない。
 
 本文が空の場合はrouteを実行せず、空または入力不足responseを返す。副作用を含む可能性があるのに必要情報が不足している場合は、候補作成や承認申請を行わず、確認質問を返す。
 
@@ -124,7 +126,7 @@ flowchart TD
 統合入力受付は `AccessContext` を全ルーティング先に渡す。route先で別の権限文脈を作り直してはならない。
 
 ## 7. 分類設計
-分類器は `IntegratedInputRouter` として実装する。現行 `EntryQueryRouter` のLLM呼び出し、JSON抽出、retry、fallbackの構造を引き継ぐが、出力schemaを拡張する。
+分類器は `IntegratedInputRouter` として実装する。現行 `EntryQueryRouter` は削除対象であり、LLM呼び出し、JSON抽出、retry、fallbackは `IntegratedInputRouter` に必要な形で再実装する。
 
 ### 7.1 分類出力
 分類結果は次の形にする。
@@ -323,17 +325,17 @@ pytestは未導入の前提で、既存のunittest方式に合わせる。
 | payload | 診断情報が `metadata` 配下に入る |
 | sanitizer | raw prompt、context、secret、画像local pathが外部payloadに出ない |
 | Discord output | 送信処理が統合入力受付adapterに集約される |
-| regression | 既存 `ChatEntryUsecase`、CLI `ask`、HTTP `/ask`、Discord `/ask` の互換経路が壊れない |
+| removed entrypoints | `ChatEntryUsecase`、`EntryQueryRouter`、CLI/HTTP/Discordの旧 `/ask` 分岐が削除され、`IntegratedInputUsecase` 経由だけになる |
 
 ## 14. 移行方針
-初期実装では既存の `ChatEntryUsecase`、`EntryQueryRouter`、CLI/HTTP/Discordの `/ask` は互換経路として残す。
+本機能では互換経路を残さず、入口を `IntegratedInputUsecase` に統一する。
 
-段階的に次を行う。
+実装時は次を行う。
 
-1. 新しいdomain modelと `IntegratedInputUsecase` を追加する。
-2. 現行 `EntryQueryRouter` を拡張または新routerへ置き換える。
-3. CLI/HTTPの `/ask` を統合入力受付経由にする。
-4. Discord `/ask` を統合入力受付経由にする。
-5. `/work` と `/approval` は明示的な管理・承認操作として残しつつ、通常依頼は統合入力受付へ寄せる。
+1. 新しいdomain model、`IntegratedInputRouter`、`IntegratedInputUsecase` を追加する。
+2. `ChatEntryUsecase`、`ChatEntryRequest`、`EntryRoutingDecision`、`EntryRoute`、`EntryQueryRouter` を削除する。
+3. CLI `ask`、HTTP `/ask`、Discord `/ask` の個別分岐を削除し、すべて `IntegratedInputUsecase` を呼ぶ薄いadapterに置き換える。
+4. `direct_rag` / `openclaw` の2値分類とOpenClaw入口は廃止する。
+5. `/work` と `/approval` は明示的な管理・承認操作として残してよいが、通常依頼の入口にはしない。
 6. 各route先からDiscord送信責務を取り除き、response返却のみにする。
-7. 既存 `direct_rag` / `openclaw` の2値分類は後方互換adapterとして扱う。
+7. 旧入口に対応するテストは削除または統合入力受付のテストへ置き換える。

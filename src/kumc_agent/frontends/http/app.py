@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, is_dataclass
-import re
 
-from kumc_agent.domain.models.agentic import AgenticSearchRequest
-from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
+from kumc_agent.domain.models.integrated_input import IntegratedInputRequest
+from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.domain.models.source import BackfillScope
 from kumc_agent.domain.models.workflow import WorkRequest
+from kumc_agent.features.foundation.payload_sanitizer import (
+    compact_payload_text,
+    mask_payload_secret,
+    sanitize_payload,
+    sanitize_payload_metadata,
+)
 
 
 def _access(payload: dict[str, object] | None = None) -> AccessContext:
@@ -53,67 +58,19 @@ def _dump_workflow_item(item: object) -> dict[str, object]:
 
 
 def _sanitize_payload_metadata(value: object) -> dict[str, object]:
-    metadata = dict(value or {}) if isinstance(value, dict) else {}
-    for key in (
-        "contexts",
-        "context",
-        "llm_prompt",
-        "raw",
-        "secret",
-        "executor_args",
-        "server_state_before",
-        "server_state_after",
-        "container_state_before",
-        "container_state_after",
-    ):
-        metadata.pop(key, None)
-    for key, item in list(metadata.items()):
-        if isinstance(item, str):
-            metadata[key] = _compact_payload_text(_mask_payload_secret(item), 1200)
-        elif isinstance(item, (dict, list, tuple)):
-            metadata[key] = _sanitize_payload_value(item)
-    return metadata
+    return sanitize_payload_metadata(value)
 
 
 def _sanitize_payload_value(value: object) -> object:
-    if isinstance(value, dict):
-        sanitized: dict[str, object] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if key_text.lower() in {"secret", "password", "token", "api_key", "raw"}:
-                continue
-            sanitized[key_text] = _sanitize_payload_value(item)
-        return sanitized
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_payload_value(item) for item in value]
-    if isinstance(value, str):
-        return _compact_payload_text(_mask_payload_secret(value), 4000)
-    return value
+    return sanitize_payload(value)
 
 
 def _compact_payload_text(text: str, limit: int) -> str:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: max(0, limit - 3)].rstrip() + "..."
+    return compact_payload_text(text, limit)
 
 
 def _mask_payload_secret(text: str) -> str:
-    masked = re.sub(
-        r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
-        r"\1=[REDACTED]",
-        text,
-    )
-    masked = re.sub(
-        r"\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b",
-        "[internal-ip]",
-        masked,
-    )
-    return re.sub(
-        r"(?i)(network[_-]?key|pin|unlock(?:ing)?[_ -]?steps?)\s*[:=]\s*[^\n]+",
-        r"\1=[REDACTED]",
-        masked,
-    )
+    return mask_payload_secret(text)
 
 
 def _workflow_payload(response: object) -> dict[str, object]:
@@ -136,6 +93,24 @@ def _workflow_payload(response: object) -> dict[str, object]:
         "meetings": _dump_items(getattr(response, "meetings", ())),
         "approvals": _dump_items(getattr(response, "approvals", ())),
         "server_operations": _dump_items(getattr(response, "server_operations", ())),
+        "warnings": list(getattr(response, "warnings", ())),
+        "metadata": _sanitize_payload_metadata(getattr(response, "metadata", {}) or {}),
+    }
+
+
+def _comprehensive_payload(response: object) -> dict[str, object]:
+    return {
+        "text": getattr(response, "text", ""),
+        "detail_markdown": getattr(response, "detail_markdown", ""),
+        "citations": _sanitize_payload_value(
+            [getattr(citation, "__dict__", {}) for citation in getattr(response, "citations", ())]
+        ),
+        "confidence": getattr(response, "confidence", "low"),
+        "task_candidates": _sanitize_payload_value(getattr(response, "task_candidates", ())),
+        "event_candidates": _sanitize_payload_value(getattr(response, "event_candidates", ())),
+        "server_operations": _sanitize_payload_value(getattr(response, "server_operations", ())),
+        "assets": _sanitize_payload_value(getattr(response, "assets", ())),
+        "member_profiles": _sanitize_payload_value(getattr(response, "member_profiles", ())),
         "warnings": list(getattr(response, "warnings", ())),
         "metadata": _sanitize_payload_metadata(getattr(response, "metadata", {}) or {}),
     }
@@ -181,39 +156,25 @@ def create_app(context: object):
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
         access = _access(payload)
-        source = str(payload.get("source") or "all")
-        depth = str(payload.get("depth") or "normal")
-        if source == "member":
-            response = context.workflow.workflow.run(
-                WorkRequest(
-                    work_type="member_search",
-                    instruction=question,
-                    access=access,
-                )
+        response = context.integrated_input.integrated_input.execute(
+            IntegratedInputRequest(
+                text=question,
+                source=str(payload.get("source") or "all"),
+                mode=str(payload.get("mode") or "answer"),
+                depth=str(payload.get("depth") or "normal"),
+                user_id=access.user_id,
+                guild_id=access.guild_id,
+                role_ids=access.role_ids,
+                is_admin=access.is_admin,
+                access=access,
+                frontend="http",
+                metadata={
+                    "route_hint": str(payload.get("route") or ""),
+                    "required_features_hint": payload.get("required_features") or (),
+                },
             )
-            return _workflow_payload(response)
-        if depth == "deep":
-            response = context.agentic.agentic_search.search(
-                AgenticSearchRequest(query=question, source_filter=source, access=access)
-            )
-        else:
-            response = context.retrieval.ask.ask(
-                RetrievalQuery(
-                    text=question,
-                    source_filter=source,
-                    mode=str(payload.get("mode") or "answer"),
-                    depth=depth,
-                    access=access,
-                )
-            )
-        return {
-            "text": response.text,
-            "detail_markdown": response.detail_markdown,
-            "citations": _dump_items(getattr(response, "citations", ())),
-            "confidence": getattr(response, "confidence", "low"),
-            "warnings": list(getattr(response, "warnings", ())),
-            "metadata": dict(getattr(response, "metadata", {}) or {}),
-        }
+        )
+        return response.to_payload()
 
     @app.post("/work")
     def work(payload: dict[str, object]) -> dict[str, object]:
@@ -227,6 +188,58 @@ def create_app(context: object):
             )
         )
         return _workflow_payload(response)
+
+    @app.get("/agent/runs")
+    def agent_runs(limit: int = 20) -> dict[str, object]:
+        runs = context.agentic.trace_repository.latest_runs(limit=limit)
+        return {
+            "runs": [
+                {
+                    "id": run.id,
+                    "query": run.query,
+                    "status": run.status,
+                    "confidence": run.confidence,
+                    "metadata": _sanitize_payload_metadata(run.metadata),
+                    "created_at": run.created_at,
+                    "updated_at": run.updated_at,
+                }
+                for run in runs
+            ],
+            "metadata": {"limit": limit},
+        }
+
+    @app.get("/agent/runs/{run_id}")
+    def agent_run(run_id: str) -> dict[str, object]:
+        run = context.agentic.trace_repository.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="agent run not found")
+        steps = context.agentic.trace_repository.list_steps(run_id)
+        return {
+            "run": {
+                "id": run.id,
+                "query": run.query,
+                "status": run.status,
+                "answer": run.answer,
+                "confidence": run.confidence,
+                "citations": _sanitize_payload_value([citation.__dict__ for citation in run.citations]),
+                "metadata": _sanitize_payload_metadata(run.metadata),
+                "created_at": run.created_at,
+                "updated_at": run.updated_at,
+            },
+            "steps": [
+                {
+                    "id": step.id,
+                    "state": step.state,
+                    "status": step.status,
+                    "input": _sanitize_payload_value(step.input),
+                    "output": _sanitize_payload_value(step.output),
+                    "cost_usd": step.cost_usd,
+                    "created_at": step.created_at,
+                }
+                for step in steps
+            ],
+            "metadata": {},
+        }
 
     @app.post("/approval")
     def approval(payload: dict[str, object]) -> dict[str, object]:

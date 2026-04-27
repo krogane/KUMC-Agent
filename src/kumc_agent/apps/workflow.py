@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from kumc_agent.apps.agentic import build_agentic_app_context
 from kumc_agent.apps.foundation import build_foundation_app_context
 from kumc_agent.apps.retrieval import build_retrieval_app_context
 from kumc_agent.features.announcement import AnnouncementDraftService
@@ -45,7 +44,6 @@ class WorkflowAppContext:
 def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppContext:
     foundation = build_foundation_app_context(base_dir=base_dir)
     retrieval = build_retrieval_app_context(base_dir=base_dir)
-    agentic = build_agentic_app_context(base_dir=base_dir)
     repository = build_workflow_repository(
         postgres=foundation.postgres,
         fallback_dir=foundation.config.base_dir / "data" / "workflow",
@@ -164,7 +162,6 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             repository=repository,
             ask_service=retrieval.ask,
             audit_log=foundation.audit_log,
-            agentic_search=agentic.agentic_search,
             docgen=docgen,
             announcement=AnnouncementDraftService(
                 repository=announcement_repository,

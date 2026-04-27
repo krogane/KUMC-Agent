@@ -65,7 +65,7 @@ flowchart TD
 | --- | --- | --- |
 | `id` | `str` | 安定ID。例: `rag.circle.smoke`, `safety.prompt_injection.full` |
 | `name` | `str` | 表示名 |
-| `target` | `str` | `circle_rag`, `minecraft_wiki_rag`, `member_search`, `image_search`, `workflow`, `automation`, `entry_router`, `agentic` |
+| `target` | `str` | `circle_rag`, `minecraft_wiki_rag`, `member_search`, `image_search`, `workflow`, `automation`, `entry_router`, `comprehensive_agent`, `agentic` |
 | `case_file` | `Path` | JSONLまたはYAMLの評価ケース |
 | `mode` | `str` | `smoke`, `pr`, `full`, `manual` |
 | `scorers` | `list[str]` | 適用する採点器 |
@@ -330,4 +330,3 @@ pytestは未導入前提のため、既存方式に合わせて `unittest` で�
 - CLI payloadのmetadata方針
 - 権限違反、安全性失敗のfail-fast
 - キャッシュkeyにindex/config/access contextが含まれること
-
