@@ -84,6 +84,7 @@ class MemberProfile:
     skills: tuple[str, ...] = tuple()
     interests: tuple[str, ...] = tuple()
     past_assignments: tuple[str, ...] = tuple()
+    evidence: tuple[dict[str, Any], ...] = tuple()
     access_scope: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None

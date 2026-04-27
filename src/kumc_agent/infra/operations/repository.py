@@ -58,6 +58,9 @@ class OperationsRepository(Protocol):
     def search_member_profiles(self, *, query: str) -> list[MemberProfile]:
         ...
 
+    def list_member_profiles(self) -> list[MemberProfile]:
+        ...
+
     def save_action_run(self, run: ActionRun) -> ActionRun:
         ...
 
@@ -163,9 +166,19 @@ class FileOperationsRepository:
                         " ".join(profile.skills),
                         " ".join(profile.interests),
                         " ".join(profile.past_assignments),
+                        " ".join(_evidence_search_text(item) for item in profile.evidence),
                     )
                 ).lower()
             ]
+        return sorted(profiles, key=lambda item: item.display_name or item.id)
+
+    def list_member_profiles(self) -> list[MemberProfile]:
+        profiles = list(
+            _latest_by_id(
+                self.root_dir / "member_profiles.jsonl",
+                _member_profile_from_payload,
+            ).values()
+        )
         return sorted(profiles, key=lambda item: item.display_name or item.id)
 
     def save_action_run(self, run: ActionRun) -> ActionRun:
@@ -478,6 +491,7 @@ def _member_profile_payload(item: MemberProfile) -> dict[str, object]:
         "skills": list(item.skills),
         "interests": list(item.interests),
         "past_assignments": list(item.past_assignments),
+        "evidence": list(item.evidence),
         "access_scope": item.access_scope,
         "metadata": item.metadata,
     }
@@ -492,10 +506,18 @@ def _member_profile_from_payload(payload: dict[str, object]) -> MemberProfile:
         skills=tuple(str(item) for item in _json(payload.get("skills") or [])),
         interests=tuple(str(item) for item in _json(payload.get("interests") or [])),
         past_assignments=tuple(str(item) for item in _json(payload.get("past_assignments") or [])),
+        evidence=tuple(dict(item) for item in _json(payload.get("evidence") or [])),
         access_scope=dict(_json(payload.get("access_scope") or {})),
         metadata=dict(_json(payload.get("metadata") or {})),
         created_at=_dt_from(payload.get("created_at")),
         updated_at=_dt_from(payload.get("updated_at")),
+    )
+
+
+def _evidence_search_text(evidence: dict[str, Any]) -> str:
+    return " ".join(
+        str(evidence.get(key) or "")
+        for key in ("source_type", "source_item_id", "chunk_id", "label", "quote")
     )
 
 

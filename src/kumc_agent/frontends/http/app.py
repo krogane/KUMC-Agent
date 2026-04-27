@@ -95,6 +95,15 @@ def create_app(context: object):
         access = _access(payload)
         source = str(payload.get("source") or "all")
         depth = str(payload.get("depth") or "normal")
+        if source == "member":
+            response = context.workflow.workflow.run(
+                WorkRequest(
+                    work_type="member_search",
+                    instruction=question,
+                    access=access,
+                )
+            )
+            return _workflow_payload(response)
         if depth == "deep":
             response = context.agentic.agentic_search.search(
                 AgenticSearchRequest(query=question, source_filter=source, access=access)
@@ -188,6 +197,22 @@ def create_app(context: object):
             return context.automation.readiness.report().as_dict()
         if action in {"sync", "reindex"}:
             source = str(payload.get("scope") or "").strip()
+            if source == "member_profiles":
+                guild_ids = [
+                    str(value)
+                    for value in context.foundation.config.security.discord_guild_allow_list
+                ]
+                results = [
+                    context.workflow.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
+                    for guild_id in guild_ids
+                    if context.workflow.member_profile_builder is not None
+                ]
+                return {
+                    "action": action,
+                    "source_kind": "member_profiles",
+                    "results": results,
+                    "metadata": {"guild_ids": guild_ids},
+                }
             results = asyncio.run(
                 context.ingestion.service.backfill_many(
                     source_kinds=(source,) if source else tuple(),

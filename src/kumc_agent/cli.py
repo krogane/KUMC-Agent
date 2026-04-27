@@ -168,6 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "permissions",
             "reindex",
             "cost_report",
+            "member_profiles",
         ),
         required=True,
     )
@@ -345,6 +346,49 @@ def main() -> None:
             print(json.dumps(report.as_dict(), ensure_ascii=False))
             return
         if args.action in {"sync", "reindex"}:
+            if args.scope == "member_profiles":
+                from kumc_agent.apps.workflow import build_workflow_app_context
+
+                workflow = build_workflow_app_context()
+                guild_ids = [
+                    str(value)
+                    for value in (
+                        foundation.config.security.discord_guild_allow_list
+                        if not args.limit
+                        else foundation.config.security.discord_guild_allow_list[: args.limit]
+                    )
+                ]
+                if not guild_ids:
+                    print(
+                        json.dumps(
+                            {
+                                "action": args.action,
+                                "source_kind": "member_profiles",
+                                "results": [],
+                                "metadata": {"reason": "no_guild_ids_configured"},
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    return
+                results = [
+                    workflow.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
+                    for guild_id in guild_ids
+                    if workflow.member_profile_builder is not None
+                ]
+                print(
+                    json.dumps(
+                        {
+                            "action": args.action,
+                            "source_kind": "member_profiles",
+                            "results": results,
+                            "metadata": {},
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
+                return
             from kumc_agent.apps.ingestion import build_ingestion_app_context
             from kumc_agent.domain.models.source import BackfillScope
 
@@ -407,6 +451,31 @@ def main() -> None:
             automation = build_automation_app_context(seed_defaults=False)
             print(json.dumps(automation.readiness.cost_report(), ensure_ascii=False))
             return
+        if args.action == "member_profiles":
+            from kumc_agent.apps.workflow import build_workflow_app_context
+
+            workflow = build_workflow_app_context()
+            configured_guild_ids = [
+                str(value) for value in foundation.config.security.discord_guild_allow_list
+            ]
+            guild_ids = [args.scope] if args.scope else configured_guild_ids
+            results = [
+                workflow.member_profile_builder.rebuild_guild(guild_id=str(guild_id)).__dict__
+                for guild_id in guild_ids
+                if workflow.member_profile_builder is not None
+            ]
+            print(
+                json.dumps(
+                    {
+                        "action": "member_profiles",
+                        "results": results,
+                        "metadata": {"guild_ids": guild_ids},
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+            return
 
     if args.command == "db":
         from kumc_agent.apps.foundation import build_foundation_app_context
@@ -450,6 +519,25 @@ def main() -> None:
             return
 
     if args.command == "ask":
+        if args.source == "member":
+            from kumc_agent.apps.workflow import build_workflow_app_context
+            from kumc_agent.domain.models.workflow import WorkRequest
+
+            workflow = build_workflow_app_context()
+            response = workflow.workflow.run(
+                WorkRequest(
+                    work_type="member_search",
+                    instruction=args.question,
+                    access=AccessContext(
+                        user_id=args.user_id,
+                        guild_id=args.guild_id,
+                        role_ids=tuple(args.role_id or ()),
+                        is_admin=bool(args.admin),
+                    ),
+                )
+            )
+            print(json.dumps(_workflow_response_payload(response), ensure_ascii=False, default=str))
+            return
         if args.depth == "deep":
             from kumc_agent.apps.agentic import build_agentic_app_context
             from kumc_agent.domain.models.agentic import AgenticSearchRequest

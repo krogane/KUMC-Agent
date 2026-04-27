@@ -72,6 +72,24 @@ def _dispatch_job(
             )
         )
         return {"results": [result.__dict__ for result in results], "side_effects": "indexing_only"}
+    if job_type == "member_profiles_rebuild":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        guild_id = str(payload.get("guild_id") or "").strip()
+        if guild_id:
+            guild_ids = [guild_id]
+        else:
+            foundation = build_foundation_app_context(base_dir=base_dir)
+            guild_ids = [str(value) for value in foundation.config.security.discord_guild_allow_list]
+        results = [
+            workflow.member_profile_builder.rebuild_guild(guild_id=value).__dict__
+            for value in guild_ids
+            if workflow.member_profile_builder is not None
+        ]
+        return {
+            "results": results,
+            "guild_ids": guild_ids,
+            "side_effects": "member_profile_indexing",
+        }
     if job_type == "weekly_summary_draft":
         workflow = build_workflow_app_context(base_dir=base_dir)
         response = workflow.workflow.run(

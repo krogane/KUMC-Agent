@@ -149,11 +149,15 @@ create table if not exists member_profiles (
   skills jsonb not null default '[]'::jsonb,
   interests jsonb not null default '[]'::jsonb,
   past_assignments jsonb not null default '[]'::jsonb,
+  evidence jsonb not null default '[]'::jsonb,
   access_scope jsonb not null default '{}'::jsonb,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table member_profiles
+  add column if not exists evidence jsonb not null default '[]'::jsonb;
 
 create table if not exists finance_records (
   id text primary key,

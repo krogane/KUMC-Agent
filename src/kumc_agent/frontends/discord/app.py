@@ -94,6 +94,7 @@ def create_bot(
             app_commands.Choice(name="permissions", value="permissions"),
             app_commands.Choice(name="reindex", value="reindex"),
             app_commands.Choice(name="cost_report", value="cost_report"),
+            app_commands.Choice(name="member_profiles", value="member_profiles"),
         ]
     )
     async def admin_action(
@@ -113,6 +114,7 @@ def create_bot(
             "permissions",
             "reindex",
             "cost_report",
+            "member_profiles",
         }:
             await interaction.response.send_message("未対応の action です。", ephemeral=True)
             return
@@ -132,21 +134,57 @@ def create_bot(
             summary = readiness.summary
             filename = "kumc-agent-production-readiness.json"
         elif action.value in {"sync", "reindex"}:
-            source_kinds = (scope.strip(),) if scope.strip() else tuple()
-            results = await asyncio.to_thread(
-                lambda: asyncio.run(
-                    ingestion_context.service.backfill_many(
-                        source_kinds=source_kinds,
-                        scope=BackfillScope(force=action.value == "reindex"),
+            if scope.strip() == "member_profiles":
+                guild_ids = [str(value) for value in foundation_context.config.security.discord_guild_allow_list]
+                results = await asyncio.to_thread(
+                    lambda: [
+                        workflow_context.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
+                        for guild_id in guild_ids
+                        if workflow_context.member_profile_builder is not None
+                    ]
+                )
+                payload = {
+                    "action": action.value,
+                    "source_kind": "member_profiles",
+                    "results": results,
+                    "metadata": {"guild_ids": guild_ids},
+                }
+                summary = f"{action.value} member_profiles completed: {len(results)} guild(s)"
+                filename = "kumc-agent-member-profiles.json"
+            else:
+                source_kinds = (scope.strip(),) if scope.strip() else tuple()
+                results = await asyncio.to_thread(
+                    lambda: asyncio.run(
+                        ingestion_context.service.backfill_many(
+                            source_kinds=source_kinds,
+                            scope=BackfillScope(force=action.value == "reindex"),
+                        )
                     )
                 )
+                payload = {
+                    "action": action.value,
+                    "results": [result.__dict__ for result in results],
+                }
+                summary = f"{action.value} completed: {len(results)} source(s)"
+                filename = "kumc-agent-admin-sync.json"
+        elif action.value == "member_profiles":
+            guild_ids = [scope.strip()] if scope.strip() else [
+                str(value) for value in foundation_context.config.security.discord_guild_allow_list
+            ]
+            results = await asyncio.to_thread(
+                lambda: [
+                    workflow_context.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
+                    for guild_id in guild_ids
+                    if workflow_context.member_profile_builder is not None
+                ]
             )
             payload = {
-                "action": action.value,
-                "results": [result.__dict__ for result in results],
+                "action": "member_profiles",
+                "results": results,
+                "metadata": {"guild_ids": guild_ids},
             }
-            summary = f"{action.value} completed: {len(results)} source(s)"
-            filename = "kumc-agent-admin-sync.json"
+            summary = f"member_profiles completed: {len(results)} guild(s)"
+            filename = "kumc-agent-member-profiles.json"
         elif action.value == "eval":
             readiness = await asyncio.to_thread(automation_context.readiness.report)
             payload = {
@@ -234,7 +272,16 @@ def create_bot(
         depth: str = "normal",
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if depth == "deep":
+        if source == "member":
+            response = await asyncio.to_thread(
+                workflow_context.workflow.run,
+                WorkRequest(
+                    work_type="member_search",
+                    instruction=question,
+                    access=_access_context(interaction),
+                ),
+            )
+        elif depth == "deep":
             response = await asyncio.to_thread(
                 agentic_context.agentic_search.search,
                 AgenticSearchRequest(

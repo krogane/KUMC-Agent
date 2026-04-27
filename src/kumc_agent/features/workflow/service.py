@@ -73,6 +73,7 @@ class WorkflowService:
         announcement: AnnouncementDraftService | None = None,
         minecraft: MinecraftSupportService | None = None,
         operations: OperationsRepository | None = None,
+        member_search_service: Any | None = None,
     ) -> None:
         self.repository = repository
         self.ask_service = ask_service
@@ -82,6 +83,7 @@ class WorkflowService:
         self.announcement = announcement
         self.minecraft = minecraft
         self.operations = operations
+        self.member_search_service = member_search_service
 
     def run(self, request: WorkRequest) -> WorkResponse:
         run_record = self._start_workflow_run(request)
@@ -644,12 +646,6 @@ class WorkflowService:
         )
 
     def member_search(self, request: WorkRequest) -> WorkResponse:
-        if not _can_search_members(request.access):
-            return WorkResponse(
-                text="権限がありません。",
-                detail_markdown="member_search requires organizer or admin. 対象情報の有無は表示しません。",
-                metadata={"route": "member_search", "authorized": False},
-            )
         if self.operations is None:
             return WorkResponse(
                 text="メンバー検索 repository は未設定です。",
@@ -657,12 +653,26 @@ class WorkflowService:
                 metadata={"route": "member_search", "configured": False},
             )
         query = (request.target or request.instruction).strip()
+        if self.member_search_service is not None:
+            result = self.member_search_service.search(query=query, access=request.access)
+            return WorkResponse(
+                text=result.text,
+                detail_markdown=result.detail_markdown,
+                member_profiles=result.profiles,
+                metadata=result.metadata,
+            )
+        if not _can_search_members(request.access):
+            return WorkResponse(
+                text="権限がありません。",
+                detail_markdown="member_search requires configured member search policy. 対象情報の有無は表示しません。",
+                metadata={"route": "member_search", "authorized": False},
+            )
         profiles = tuple(self.operations.search_member_profiles(query=query))
         return WorkResponse(
             text=f"条件に合うメンバー候補は {len(profiles)} 件です。担当決定には本人または運営確認が必要です。",
             detail_markdown=self._format_member_profiles(list(profiles)),
             member_profiles=profiles,
-            metadata={"route": "member_search", "query": query},
+            metadata={"route": "member_search", "search_conditions": {"fallback_query": query}},
         )
 
     def approval(
