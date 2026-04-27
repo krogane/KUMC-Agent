@@ -361,6 +361,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 - `announcement_draft`: 告知文下書き
 - `mc_status`: Minecraft サーバー状態確認
 - `mc_request`: Minecraft 関連操作リクエスト
+- `server_operation_execute`: 承認済み ServerOperation を実行
 - `image_search`: 登録済み Asset と画像検索indexから画像候補を検索。再利用可否は判断しません。
 - `member_search`: 権限付きでメンバー候補を検索
 
@@ -369,6 +370,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 `task_add`、`task_extract`、`event_add`、`schedule_add` は正本を直接登録せず、候補として返します。Task 正本の変更・削除も `task_change_candidates` に保存され、承認されるまで `tasks` には反映されません。正本に入るのは、`approval --type task|event|schedule --action approve` で承認された後です。
 タスク系の診断情報、抽出器、重複検出結果、通知条件、batch id はトップレベルではなく `metadata` に入ります。
 `member_search` は organizer / admin 権限がない場合、対象情報の有無を示唆しない拒否応答を返します。
+
+サーバー管理は admin 限定です。`mc_request` は自然言語または `operation: compose_restart server: survival service: minecraft` のようなラベル付き入力から定義済み ActionSpec の dry-run を作成します。`docker_ps` は read-only として admin であれば事前承認なしに実行されます。副作用操作は `approval --type server_operation --action approve` の後、`work --type server_operation_execute --target <operation-id>` で実行します。診断情報、実行結果、stdout/stderr 抜粋は `metadata` 配下に入り、secret や内部IPはマスクされます。
 
 ### `approval`
 
@@ -389,7 +392,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type event --ac
 - `edit`: 編集
 
 `work` と同じ workflow app context を使い、`workflow.workflow.approval(...)` を呼びます。
-`task`、`event`、`schedule` は候補を正本へ昇格できます。`task` では `TaskCandidate` の承認に加え、`TaskChangeCandidate` の承認も扱います。変更候補は承認後に正本 Task を更新し、削除候補は物理削除ではなく `status=deleted` の論理削除として扱います。それ以外の type は現時点では承認記録のみを保存し、外部投稿、サーバー操作、会計確定などの副作用は実行しません。
+`task`、`event`、`schedule` は候補を正本へ昇格できます。`task` では `TaskCandidate` の承認に加え、`TaskChangeCandidate` の承認も扱います。変更候補は承認後に正本 Task を更新し、削除候補は物理削除ではなく `status=deleted` の論理削除として扱います。`server_operation` は専用 handler で `ServerOperation.status` と承認者を更新します。high risk は admin 承認必須、critical は二者承認または disabled です。それ以外の type は現時点では承認記録のみを保存し、外部投稿、会計確定などの副作用は実行しません。
 
 ### `automation`
 

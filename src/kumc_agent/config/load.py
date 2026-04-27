@@ -55,6 +55,10 @@ from kumc_agent.config.schema import (
     RuntimeConfig,
     SchedulerSection,
     SecuritySection,
+    ServerManagementDockerPsSection,
+    ServerManagementExecutionSection,
+    ServerManagementSection,
+    ServerManagementServerSection,
     SourcesSection,
     RedisSection,
     RiskFeatureFlagsSection,
@@ -67,6 +71,7 @@ OPS_FILES = (
     "security.yaml",
     "scheduler.yaml",
     "features.yaml",
+    "server_management.yaml",
     "model.yaml",
     "vc.yaml",
 )
@@ -470,6 +475,24 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
         ("sparse_remove_symbols", retrieval.get("sparse_remove_symbols", True)),
     ):
         minecraft_wiki_retrieval.setdefault(key, fallback)
+    server_management = updated.get("server_management")
+    if not isinstance(server_management, dict):
+        server_management = {}
+        updated["server_management"] = server_management
+    server_management.setdefault("default_server_name", "default")
+    docker_ps = server_management.get("docker_ps")
+    if not isinstance(docker_ps, dict):
+        docker_ps = {}
+        server_management["docker_ps"] = docker_ps
+    docker_ps.setdefault("container_name_prefixes", [])
+    server_management.setdefault("servers", [])
+    execution = server_management.get("execution")
+    if not isinstance(execution, dict):
+        execution = {}
+        server_management["execution"] = execution
+    execution.setdefault("timeout_seconds", 120)
+    execution.setdefault("stdout_char_limit", 4000)
+    execution.setdefault("stderr_char_limit", 4000)
     return updated
 
 
@@ -479,7 +502,11 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
 
     merged: dict[str, Any] = {}
     for file_name in OPS_FILES:
-        payload = _yaml_load(resolved_base_dir / "configs" / "ops" / file_name)
+        path = resolved_base_dir / "configs" / "ops" / file_name
+        if file_name == "server_management.yaml" and not path.exists():
+            payload = {}
+        else:
+            payload = _yaml_load(path)
         try:
             merged = deep_merge(merged, payload, allow_new_keys=True)
         except MergeError as exc:
@@ -531,6 +558,7 @@ def _to_runtime_config(
     integrations = merged.get("integrations", {})
     model = merged.get("model", {})
     vc = merged.get("vc", {})
+    server_management = merged.get("server_management", {})
 
     rag_routing = rag.get("routing", {})
     rag_history = rag.get("history", {})
@@ -1665,6 +1693,56 @@ def _to_runtime_config(
             ),
             final_summary_thinking_level=str(
                 vc.get("final_summary_thinking_level", "minimal")
+            ),
+        ),
+        server_management=ServerManagementSection(
+            default_server_name=str(
+                server_management.get("default_server_name", "default")
+            ),
+            docker_ps=ServerManagementDockerPsSection(
+                container_name_prefixes=[
+                    str(value)
+                    for value in (
+                        server_management.get("docker_ps", {}).get(
+                            "container_name_prefixes",
+                            [],
+                        )
+                        or []
+                    )
+                    if str(value)
+                ],
+            ),
+            servers=[
+                ServerManagementServerSection(
+                    name=str(item.get("name", "")),
+                    compose_dir=_resolve_path(base_dir, str(item.get("compose_dir", ""))),
+                    services=[
+                        str(value)
+                        for value in (item.get("services", []) or [])
+                        if str(value)
+                    ],
+                    allow_file_search_paths=[
+                        _resolve_path(base_dir, str(value))
+                        for value in (item.get("allow_file_search_paths", []) or [])
+                        if str(value)
+                    ],
+                    critical_operations_enabled=bool(
+                        item.get("critical_operations_enabled", False)
+                    ),
+                )
+                for item in (server_management.get("servers", []) or [])
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            ],
+            execution=ServerManagementExecutionSection(
+                timeout_seconds=int(
+                    server_management.get("execution", {}).get("timeout_seconds", 120)
+                ),
+                stdout_char_limit=int(
+                    server_management.get("execution", {}).get("stdout_char_limit", 4000)
+                ),
+                stderr_char_limit=int(
+                    server_management.get("execution", {}).get("stderr_char_limit", 4000)
+                ),
             ),
         ),
         experiments=experiments,

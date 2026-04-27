@@ -12,6 +12,7 @@ class MinecraftActionSpecRegistry:
                 risk_level="low",
                 approval_policy="self",
                 read_only=True,
+                executor_name="status",
             ),
             ActionSpec(
                 operation="docker_ps",
@@ -20,6 +21,7 @@ class MinecraftActionSpecRegistry:
                 approval_policy="admin",
                 optional_args=("service_name",),
                 read_only=True,
+                executor_name="docker_ps",
             ),
             ActionSpec(
                 operation="file_search",
@@ -28,6 +30,7 @@ class MinecraftActionSpecRegistry:
                 approval_policy="admin_dry_run",
                 required_args=("path", "query"),
                 read_only=True,
+                executor_name="file_search",
             ),
             ActionSpec(
                 operation="compose_up",
@@ -35,6 +38,7 @@ class MinecraftActionSpecRegistry:
                 risk_level="high",
                 approval_policy="admin_approval",
                 required_args=("service_name",),
+                executor_name="compose",
             ),
             ActionSpec(
                 operation="compose_restart",
@@ -42,6 +46,7 @@ class MinecraftActionSpecRegistry:
                 risk_level="high",
                 approval_policy="admin_approval",
                 required_args=("service_name",),
+                executor_name="compose",
             ),
             ActionSpec(
                 operation="restart",
@@ -49,6 +54,7 @@ class MinecraftActionSpecRegistry:
                 risk_level="high",
                 approval_policy="admin_approval",
                 optional_args=("service_name",),
+                executor_name="compose",
             ),
             ActionSpec(
                 operation="whitelist_update",
@@ -56,6 +62,8 @@ class MinecraftActionSpecRegistry:
                 risk_level="high",
                 approval_policy="admin_approval",
                 required_args=("player_name",),
+                optional_args=("whitelist_action", "service_name"),
+                executor_name="whitelist",
             ),
             ActionSpec(
                 operation="compose_down",
@@ -63,6 +71,7 @@ class MinecraftActionSpecRegistry:
                 risk_level="critical",
                 approval_policy="two_person_or_disabled",
                 required_args=("service_name",),
+                executor_name="compose",
             ),
         )
         self._specs = {spec.operation: spec for spec in specs}

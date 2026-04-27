@@ -22,7 +22,8 @@ from kumc_agent.features.member_search.service import (
     MemberProfileGenerator,
     MemberProfileIndexService,
 )
-from kumc_agent.features.minecraft import MinecraftSupportService
+from kumc_agent.features.minecraft import MinecraftSupportService, settings_from_runtime
+from kumc_agent.features.minecraft.access import ServerManagementAccessPolicy
 from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.connectors.discord_members import DiscordMemberDirectoryConnector
 from kumc_agent.infra.embeddings.gemini import GeminiEmbedder
@@ -30,6 +31,7 @@ from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.llm.gemini import GeminiLLM
 from kumc_agent.infra.announcement import build_announcement_repository
 from kumc_agent.infra.minecraft import build_server_operation_repository
+from kumc_agent.infra.minecraft.executor import ServerOperationExecutorRegistry
 from kumc_agent.infra.operations import build_operations_repository
 from kumc_agent.infra.workflow import build_workflow_repository
 
@@ -171,6 +173,16 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             minecraft=MinecraftSupportService(
                 repository=server_operation_repository,
                 feature_flags=foundation.feature_flags,
+                access_policy=ServerManagementAccessPolicy(
+                    admin_user_ids=tuple(
+                        str(value)
+                        for value in foundation.config.security.maintenance_command_author_ids
+                    )
+                ),
+                settings=settings_from_runtime(foundation.config.server_management),
+                executor=ServerOperationExecutorRegistry(
+                    config=settings_from_runtime(foundation.config.server_management)
+                ),
             ),
             operations=operations_repository,
             member_search_service=member_search,

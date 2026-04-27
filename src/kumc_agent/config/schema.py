@@ -508,6 +508,35 @@ class VCSection:
 
 
 @dataclass(frozen=True)
+class ServerManagementDockerPsSection:
+    container_name_prefixes: list[str]
+
+
+@dataclass(frozen=True)
+class ServerManagementServerSection:
+    name: str
+    compose_dir: Path
+    services: list[str]
+    allow_file_search_paths: list[Path]
+    critical_operations_enabled: bool
+
+
+@dataclass(frozen=True)
+class ServerManagementExecutionSection:
+    timeout_seconds: int
+    stdout_char_limit: int
+    stderr_char_limit: int
+
+
+@dataclass(frozen=True)
+class ServerManagementSection:
+    default_server_name: str
+    docker_ps: ServerManagementDockerPsSection
+    servers: list[ServerManagementServerSection]
+    execution: ServerManagementExecutionSection
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     base_dir: Path
     experiment_profile: str
@@ -524,6 +553,7 @@ class RuntimeConfig:
     integrations: IntegrationSection
     model: ModelSection
     vc: VCSection
+    server_management: ServerManagementSection
     experiments: dict[str, Any] = field(default_factory=dict)
 
     @property

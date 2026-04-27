@@ -14,6 +14,9 @@ class ActionSpec:
     required_args: tuple[str, ...] = tuple()
     optional_args: tuple[str, ...] = tuple()
     read_only: bool = False
+    executor_name: str = ""
+    timeout_seconds: int | None = None
+    output_policy: str = "masked_excerpt"
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,35 @@ class MinecraftDryRun:
     command_preview: tuple[str, ...] = tuple()
     warnings: tuple[str, ...] = tuple()
     execution_allowed: bool = False
+
+
+@dataclass(frozen=True)
+class ServerOperationPlan:
+    operation: str
+    server_name: str = ""
+    service_name: str = ""
+    server_dir: str = ""
+    path: str = ""
+    query: str = ""
+    player_name: str = ""
+    whitelist_action: str = ""
+    reason: str = ""
+    confidence: str = "medium"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ServerOperationExecutionResult:
+    action_run_id: str
+    status: str
+    stdout: str = ""
+    stderr: str = ""
+    summary: str = ""
+    server_state_before: dict[str, Any] = field(default_factory=dict)
+    server_state_after: dict[str, Any] = field(default_factory=dict)
+    container_state_before: dict[str, Any] = field(default_factory=dict)
+    container_state_after: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

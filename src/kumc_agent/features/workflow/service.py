@@ -213,6 +213,8 @@ class WorkflowService:
             return self.mc_status(request)
         if work_type == "mc_request":
             return self.mc_request(request)
+        if work_type == "server_operation_execute":
+            return self.server_operation_execute(request)
         if work_type == "image_search":
             return self.image_search(request)
         if work_type == "member_search":
@@ -1113,6 +1115,7 @@ class WorkflowService:
             text=result.text,
             detail_markdown=result.detail_markdown,
             warnings=result.warnings,
+            metadata=result.metadata or {},
         )
 
     def mc_request(self, request: WorkRequest) -> WorkResponse:
@@ -1124,17 +1127,56 @@ class WorkflowService:
             access=request.access,
         )
         target = result.operation.id if result.operation else "minecraft"
-        self._audit("workflow.mc_request", request.access, "dry_run", target)
+        self._audit(
+            "workflow.mc_request",
+            request.access,
+            "dry_run" if result.operation else "denied",
+            target,
+        )
         return WorkResponse(
             text=result.text,
             detail_markdown=result.detail_markdown,
-            server_operations=(result.operation,) if result.operation else tuple(),
+            server_operations=result.operations
+            or ((result.operation,) if result.operation else tuple()),
             warnings=result.warnings,
             metadata={
                 "server_operation_id": result.operation.id if result.operation else "",
                 "status": result.operation.status if result.operation else "",
                 "risk_level": result.operation.risk_level if result.operation else "",
                 "execution_allowed": False,
+                **(result.metadata or {}),
+            },
+        )
+
+    def server_operation_execute(self, request: WorkRequest) -> WorkResponse:
+        if self.minecraft is None:
+            raise RuntimeError("Minecraft support service is not configured.")
+        operation_id = _extract_labeled_value(
+            _join_text(request.instruction, request.target),
+            ("operation_id", "id", "server_operation"),
+        ) or request.target.strip()
+        if not operation_id:
+            return WorkResponse(
+                text="operation_id を指定してください。",
+                detail_markdown="例: --target <server_operation_id>",
+                metadata={"missing_fields": ["operation_id"]},
+            )
+        result = self.minecraft.execute(operation_id=operation_id, access=request.access)
+        self._audit(
+            "workflow.server_operation.execute",
+            request.access,
+            result.operation.status if result.operation else "denied",
+            operation_id,
+        )
+        return WorkResponse(
+            text=result.text,
+            detail_markdown=result.detail_markdown,
+            server_operations=result.operations,
+            warnings=result.warnings,
+            metadata={
+                "server_operation_id": result.operation.id if result.operation else "",
+                "status": result.operation.status if result.operation else "",
+                **(result.metadata or {}),
             },
         )
 
@@ -1239,10 +1281,16 @@ class WorkflowService:
                 comment=comment,
                 access=access,
             )
+        if normalized_type == "server_operation":
+            return self._server_operation_approval(
+                action=normalized_action,
+                target_id=target_id,
+                comment=comment,
+                access=access,
+            )
         if normalized_type in {
             "announcement",
             "automation_rule",
-            "server_operation",
             "finance_record",
             "member_assignment",
             "other",
@@ -1670,6 +1718,102 @@ class WorkflowService:
                 approvals=(record,),
             )
         raise ValueError(f"Unsupported schedule approval action: {action}")
+
+    def _server_operation_approval(
+        self,
+        *,
+        action: str,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> WorkResponse:
+        if self.minecraft is None:
+            raise RuntimeError("Minecraft support service is not configured.")
+        if action == "list":
+            result = self.minecraft.list_pending(access=access)
+            self._audit(
+                "workflow.server_operation.list",
+                access,
+                "succeeded" if result.operation or not result.metadata else "denied",
+                "server_operation",
+            )
+            return WorkResponse(
+                text=result.text,
+                detail_markdown=result.detail_markdown,
+                server_operations=result.operations,
+                metadata=result.metadata or {},
+            )
+        if action == "show":
+            result = self.minecraft.show(operation_id=target_id, access=access)
+            self._audit(
+                "workflow.server_operation.show",
+                access,
+                "succeeded" if result.operation else "denied",
+                target_id,
+            )
+            return WorkResponse(
+                text=result.text,
+                detail_markdown=result.detail_markdown,
+                server_operations=result.operations,
+                metadata=result.metadata or {},
+            )
+        if action == "approve":
+            before = self.minecraft.repository.get(target_id)
+            result = self.minecraft.approve(operation_id=target_id, access=access)
+            record = self.repository.save_approval(
+                ApprovalRecord(
+                    id=str(uuid4()),
+                    target_type="server_operation",
+                    target_id=target_id,
+                    action="approve",
+                    actor_id=access.user_id,
+                    comment=comment,
+                    before=asdict(before) if before else {},
+                    after=asdict(result.operation) if result.operation else {},
+                )
+            )
+            self._audit("workflow.server_operation.approve", access, "succeeded", target_id)
+            return WorkResponse(
+                text=result.text,
+                detail_markdown="\n\n".join([result.detail_markdown, self._format_approvals([record])]),
+                approvals=(record,),
+                server_operations=result.operations,
+                metadata=result.metadata or {},
+            )
+        if action == "reject":
+            before = self.minecraft.repository.get(target_id)
+            result = self.minecraft.reject(
+                operation_id=target_id,
+                access=access,
+                comment=comment,
+            )
+            record = self.repository.save_approval(
+                ApprovalRecord(
+                    id=str(uuid4()),
+                    target_type="server_operation",
+                    target_id=target_id,
+                    action="reject",
+                    actor_id=access.user_id,
+                    comment=comment,
+                    before=asdict(before) if before else {},
+                    after=asdict(result.operation) if result.operation else {},
+                )
+            )
+            self._audit("workflow.server_operation.reject", access, "succeeded", target_id)
+            return WorkResponse(
+                text=result.text,
+                detail_markdown="\n\n".join([result.detail_markdown, self._format_approvals([record])]),
+                approvals=(record,),
+                server_operations=result.operations,
+                metadata=result.metadata or {},
+            )
+        if action == "edit":
+            return WorkResponse(
+                text="server_operation edit は未対応です。新しい dry-run を作成してください。",
+                detail_markdown="ServerOperation は監査性のため直接編集しません。",
+                metadata={"target_type": "server_operation", "editable": False},
+            )
+        raise ValueError(f"Unsupported server_operation approval action: {action}")
 
     def _generic_approval(
         self,

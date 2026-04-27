@@ -1,0 +1,9 @@
+server_management:
+  default_server_name: "default"
+  docker_ps:
+    container_name_prefixes: []
+  servers: []
+  execution:
+    timeout_seconds: 120
+    stdout_char_limit: 4000
+    stderr_char_limit: 4000

@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 from typing import Protocol
 
-from kumc_agent.domain.models.minecraft import MinecraftDryRun, ServerOperation
+from kumc_agent.domain.models.minecraft import (
+    MinecraftDryRun,
+    ServerOperation,
+    ServerOperationExecutionResult,
+)
 from kumc_agent.infra.database.postgres import PostgresClient
 
 
@@ -18,6 +22,39 @@ class ServerOperationRepository(Protocol):
         ...
 
     def list(self, *, status: str | None = None) -> list[ServerOperation]:
+        ...
+
+    def update_status(
+        self,
+        operation_id: str,
+        status: str,
+        metadata_patch: dict[str, object] | None = None,
+    ) -> ServerOperation:
+        ...
+
+    def add_approval(self, operation_id: str, approver_user_id: str) -> ServerOperation:
+        ...
+
+    def list_by_requester(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[ServerOperation]:
+        ...
+
+    def list_pending_for_approval(
+        self,
+        *,
+        risk_level: str | None = None,
+    ) -> list[ServerOperation]:
+        ...
+
+    def save_execution_result(
+        self,
+        operation_id: str,
+        result: ServerOperationExecutionResult,
+    ) -> ServerOperation:
         ...
 
 
@@ -40,6 +77,75 @@ class FileServerOperationRepository:
         return sorted(
             operations,
             key=lambda operation: operation.created_at or datetime.min.replace(tzinfo=UTC),
+        )
+
+    def update_status(
+        self,
+        operation_id: str,
+        status: str,
+        metadata_patch: dict[str, object] | None = None,
+    ) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        return self.save(
+            replace(
+                operation,
+                status=status,
+                metadata={**operation.metadata, **(metadata_patch or {})},
+            )
+        )
+
+    def add_approval(self, operation_id: str, approver_user_id: str) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        approvals = tuple(dict.fromkeys((*operation.approved_by_user_ids, approver_user_id)))
+        return self.save(replace(operation, approved_by_user_ids=approvals))
+
+    def list_by_requester(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[ServerOperation]:
+        return [
+            operation
+            for operation in self.list(status=status)
+            if operation.requested_by_user_id == user_id
+        ]
+
+    def list_pending_for_approval(
+        self,
+        *,
+        risk_level: str | None = None,
+    ) -> list[ServerOperation]:
+        operations = self.list(status="waiting_approval")
+        if risk_level:
+            operations = [operation for operation in operations if operation.risk_level == risk_level]
+        return operations
+
+    def save_execution_result(
+        self,
+        operation_id: str,
+        result: ServerOperationExecutionResult,
+    ) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        metadata = {
+            **operation.metadata,
+            "action_run_id": result.action_run_id,
+            "stdout_excerpt": _compact_secret_text(result.stdout, 4000),
+            "stderr_excerpt": _compact_secret_text(result.stderr, 4000),
+            "server_state_before": result.server_state_before,
+            "server_state_after": result.server_state_after,
+            "container_state_before": result.container_state_before,
+            "container_state_after": result.container_state_after,
+            "executor_result": result.metadata,
+            "executor_summary": result.summary,
+        }
+        return self.save(
+            replace(
+                operation,
+                status=result.status,
+                action_run_id=result.action_run_id,
+                metadata=metadata,
+            )
         )
 
     def _latest(self) -> dict[str, ServerOperation]:
@@ -112,6 +218,96 @@ class PostgresServerOperationRepository:
         else:
             rows = self._fetch("select * from server_operations order by created_at asc", ())
         return [_operation_from_row(row) for row in rows]
+
+    def update_status(
+        self,
+        operation_id: str,
+        status: str,
+        metadata_patch: dict[str, object] | None = None,
+    ) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        return self.save(
+            replace(
+                operation,
+                status=status,
+                metadata={**operation.metadata, **(metadata_patch or {})},
+            )
+        )
+
+    def add_approval(self, operation_id: str, approver_user_id: str) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        approvals = tuple(dict.fromkeys((*operation.approved_by_user_ids, approver_user_id)))
+        return self.save(replace(operation, approved_by_user_ids=approvals))
+
+    def list_by_requester(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+    ) -> list[ServerOperation]:
+        if status:
+            rows = self._fetch(
+                """
+                select * from server_operations
+                where requested_by_user_id = %s and status = %s
+                order by created_at asc
+                """,
+                (user_id, status),
+            )
+        else:
+            rows = self._fetch(
+                """
+                select * from server_operations
+                where requested_by_user_id = %s
+                order by created_at asc
+                """,
+                (user_id,),
+            )
+        return [_operation_from_row(row) for row in rows]
+
+    def list_pending_for_approval(
+        self,
+        *,
+        risk_level: str | None = None,
+    ) -> list[ServerOperation]:
+        if risk_level:
+            rows = self._fetch(
+                """
+                select * from server_operations
+                where status = %s and risk_level = %s
+                order by created_at asc
+                """,
+                ("waiting_approval", risk_level),
+            )
+            return [_operation_from_row(row) for row in rows]
+        return self.list(status="waiting_approval")
+
+    def save_execution_result(
+        self,
+        operation_id: str,
+        result: ServerOperationExecutionResult,
+    ) -> ServerOperation:
+        operation = _require_operation(self.get(operation_id), operation_id)
+        metadata = {
+            **operation.metadata,
+            "action_run_id": result.action_run_id,
+            "stdout_excerpt": _compact_secret_text(result.stdout, 4000),
+            "stderr_excerpt": _compact_secret_text(result.stderr, 4000),
+            "server_state_before": result.server_state_before,
+            "server_state_after": result.server_state_after,
+            "container_state_before": result.container_state_before,
+            "container_state_after": result.container_state_after,
+            "executor_result": result.metadata,
+            "executor_summary": result.summary,
+        }
+        return self.save(
+            replace(
+                operation,
+                status=result.status,
+                action_run_id=result.action_run_id,
+                metadata=metadata,
+            )
+        )
 
     def _fetch(self, sql: str, params: tuple[object, ...]) -> list[tuple[object, ...]]:
         with self.postgres.connect() as conn:
@@ -230,3 +426,27 @@ def _dt(value: object) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(str(value))
+
+
+def _require_operation(operation: ServerOperation | None, operation_id: str) -> ServerOperation:
+    if operation is None:
+        raise KeyError(operation_id)
+    return operation
+
+
+def _compact_secret_text(text: str, limit: int) -> str:
+    import re
+
+    value = re.sub(
+        r"(?i)(api[_-]?key|token|secret|password|pin)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        text or "",
+    )
+    value = re.sub(
+        r"\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b",
+        "[internal-ip]",
+        value,
+    )
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."

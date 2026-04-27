@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
+from typing import Any
 
 from kumc_agent.domain.models.minecraft import (
     ActionSpec,
     MinecraftDryRun,
     ServerOperation,
+    ServerOperationExecutionResult,
+    ServerOperationPlan,
 )
 from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.features.foundation.feature_flags import FeatureFlagService
+from kumc_agent.features.minecraft.access import ServerManagementAccessPolicy
 from kumc_agent.features.minecraft.actions import MinecraftActionSpecRegistry
+from kumc_agent.features.minecraft.config import (
+    DockerPsSettings,
+    ServerDefinition,
+    ServerExecutionSettings,
+    ServerManagementSettings,
+)
+from kumc_agent.features.minecraft.planner import ServerOperationPlanner
 from kumc_agent.infra.minecraft.repository import ServerOperationRepository
 from kumc_agent.utils.hashing import stable_hash
 
@@ -20,7 +32,9 @@ class MinecraftSupportResult:
     text: str
     detail_markdown: str
     operation: ServerOperation | None = None
+    operations: tuple[ServerOperation, ...] = tuple()
     warnings: tuple[str, ...] = tuple()
+    metadata: dict[str, Any] | None = None
 
 
 class MinecraftSupportService:
@@ -30,12 +44,27 @@ class MinecraftSupportService:
         repository: ServerOperationRepository,
         feature_flags: FeatureFlagService,
         registry: MinecraftActionSpecRegistry | None = None,
+        access_policy: ServerManagementAccessPolicy | None = None,
+        settings: ServerManagementSettings | None = None,
+        executor: Any | None = None,
     ) -> None:
         self.repository = repository
         self.feature_flags = feature_flags
         self.registry = registry or MinecraftActionSpecRegistry()
+        self.access_policy = access_policy or ServerManagementAccessPolicy()
+        self.settings = settings or ServerManagementSettings()
+        self.planner = ServerOperationPlanner(
+            default_server_name=self.settings.default_server_name
+        )
+        self.executor = executor
 
     def status(self, *, access: AccessContext) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
         mode = self.feature_flags.mode_for("minecraft_server_ops")
         pending = self.repository.list(status="waiting_approval")
         detail = "\n".join(
@@ -51,8 +80,8 @@ class MinecraftSupportService:
                 "",
                 "## Safety",
                 "- 任意 shell command は受け付けません。",
-                "- この Wave では docker / compose / whitelist 操作を実行しません。",
-                "- `mc_request` は dry-run と ServerOperation 保存だけを行います。",
+                "- 副作用操作は承認前に実行しません。",
+                "- executor は登録済み ActionSpec だけを実行します。",
             ]
         )
         return MinecraftSupportResult(
@@ -67,45 +96,208 @@ class MinecraftSupportService:
         target: str,
         access: AccessContext,
     ) -> MinecraftSupportResult:
-        payload = _parse_request(_join_text(instruction, target))
-        operation = payload.pop("operation", "docker_ps")
-        if not self.registry.has(operation):
-            raise ValueError(f"Unsupported Minecraft operation: {operation}")
-        spec = self.registry.get(operation)
-        missing = [name for name in spec.required_args if not payload.get(name)]
-        if missing:
-            raise ValueError(f"Missing required Minecraft operation args: {', '.join(missing)}")
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        request_text = _join_text(instruction, target)
+        if _looks_like_shell(request_text):
+            raise ValueError("Unsupported Minecraft operation: shell fragments are not accepted")
+        plans = self.planner.plan(request_text)
         mode = self.feature_flags.mode_for("minecraft_server_ops")
-        dry_run = self._dry_run(spec=spec, args=payload, mode=mode)
-        status = "disabled" if mode == "disabled" else "waiting_approval"
-        server_operation = ServerOperation(
-            id=stable_hash(
-                f"server-operation:{dry_run.server_name}:{dry_run.operation}:{payload}:{access.user_id}"
-            )[:32],
-            server_name=dry_run.server_name,
-            operation=dry_run.operation,
-            requested_by_user_id=access.user_id,
-            status=status,
-            risk_level=dry_run.risk_level,
-            dry_run=dry_run,
-            metadata={
-                "feature_mode": mode,
-                "wave": "6",
-                "execution": "not_executed",
-                "requires_admin": spec.approval_policy != "self",
-            },
-        )
-        stored = self.repository.save(server_operation)
-        detail = self._operation_detail(stored)
-        if status == "disabled":
-            text = f"Minecraft operation は disabled です。dry-run だけ保存しました: {stored.id}"
+        stored_operations: list[ServerOperation] = []
+        for index, plan in enumerate(plans):
+            operation = _normalize_operation(plan.operation)
+            if not self.registry.has(operation):
+                raise ValueError(f"Unsupported Minecraft operation: {operation}")
+            spec = self.registry.get(operation)
+            args = self._validated_args(plan=plan, spec=spec)
+            missing = [name for name in spec.required_args if not args.get(name)]
+            if missing:
+                raise ValueError(
+                    f"Missing required Minecraft operation args: {', '.join(missing)}"
+                )
+            dry_run = self._dry_run(spec=spec, args=args, mode=mode)
+            status = _initial_status(mode=mode, spec=spec)
+            server_operation = ServerOperation(
+                id=stable_hash(
+                    f"server-operation:{dry_run.server_name}:{dry_run.operation}:{args}:{access.user_id}:{index}"
+                )[:32],
+                server_name=dry_run.server_name,
+                operation=dry_run.operation,
+                requested_by_user_id=access.user_id,
+                status=status,
+                risk_level=dry_run.risk_level,
+                dry_run=dry_run,
+                metadata={
+                    "feature_mode": mode,
+                    "execution": "not_executed",
+                    "requires_admin": True,
+                    "planner": {
+                        "confidence": plan.confidence,
+                        **dict(plan.metadata),
+                    },
+                    "sequence_index": index,
+                    "depends_on": plan.metadata.get("depends_on", ""),
+                    "executor_name": spec.executor_name,
+                },
+            )
+            stored = self.repository.save(server_operation)
+            if spec.read_only and spec.approval_policy == "admin" and mode != "disabled":
+                stored = self.execute(operation_id=stored.id, access=access).operation or stored
+            stored_operations.append(stored)
+        detail = "\n\n".join(self._operation_detail(operation) for operation in stored_operations)
+        first = stored_operations[0] if stored_operations else None
+        if any(operation.status == "disabled" for operation in stored_operations):
+            text = f"Minecraft operation は disabled です。dry-run だけ保存しました: {len(stored_operations)} 件"
+        elif any(operation.status in {"succeeded", "failed"} for operation in stored_operations):
+            text = f"Minecraft read-only operation を実行しました: {len(stored_operations)} 件"
         else:
-            text = f"Minecraft operation dry-run を保存しました: {stored.id} / approval required"
+            text = f"Minecraft operation dry-run を保存しました: {len(stored_operations)} 件 / approval required"
         return MinecraftSupportResult(
             text=text,
             detail_markdown=detail,
+            operation=first,
+            operations=tuple(stored_operations),
+            warnings=tuple(
+                warning
+                for operation in stored_operations
+                for warning in (operation.dry_run.warnings if operation.dry_run else tuple())
+            ),
+            metadata={"operation_count": len(stored_operations)},
+        )
+
+    def list_pending(self, *, access: AccessContext) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        operations = tuple(self.repository.list_pending_for_approval())
+        return MinecraftSupportResult(
+            text=f"承認待ち ServerOperation は {len(operations)} 件です。",
+            detail_markdown=self._operations_list_detail(operations),
+            operation=operations[0] if operations else None,
+            operations=operations,
+        )
+
+    def show(self, *, operation_id: str, access: AccessContext) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        operation = self.repository.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        return MinecraftSupportResult(
+            text=f"ServerOperation を表示します: {operation.id}",
+            detail_markdown=self._operation_detail(operation),
+            operation=operation,
+            operations=(operation,),
+        )
+
+    def approve(
+        self,
+        *,
+        operation_id: str,
+        access: AccessContext,
+    ) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        operation = self.repository.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status not in {"waiting_approval", "approved"}:
+            raise ValueError(f"ServerOperation is not approvable: {operation.status}")
+        approved = self.repository.add_approval(operation_id, access.user_id)
+        next_status = self._approval_status(approved)
+        approved = self.repository.update_status(
+            operation_id,
+            next_status,
+            {"approval_policy_result": next_status, "last_approved_by": access.user_id},
+        )
+        return MinecraftSupportResult(
+            text=f"ServerOperation approval を反映しました: {approved.id} / status={approved.status}",
+            detail_markdown=self._operation_detail(approved),
+            operation=approved,
+            operations=(approved,),
+        )
+
+    def reject(
+        self,
+        *,
+        operation_id: str,
+        access: AccessContext,
+        comment: str = "",
+    ) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        operation = self.repository.update_status(
+            operation_id,
+            "rejected",
+            {"rejected_by": access.user_id, "rejection_comment": comment},
+        )
+        return MinecraftSupportResult(
+            text=f"ServerOperation を却下しました: {operation.id}",
+            detail_markdown=self._operation_detail(operation),
+            operation=operation,
+            operations=(operation,),
+        )
+
+    def execute(self, *, operation_id: str, access: AccessContext) -> MinecraftSupportResult:
+        if not self.access_policy.is_admin(access):
+            return MinecraftSupportResult(
+                text=self.access_policy.forbidden_text(),
+                detail_markdown="",
+                metadata=self.access_policy.forbidden_metadata(),
+            )
+        operation = self.repository.get(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        spec = self.registry.get(operation.operation)
+        if self.feature_flags.mode_for("minecraft_server_ops") == "disabled":
+            raise ValueError("minecraft_server_ops is disabled.")
+        if operation.status in {"rejected", "disabled", "cancelled", "failed", "succeeded"}:
+            raise ValueError(f"ServerOperation is not executable: {operation.status}")
+        if not spec.read_only and operation.status != "approved":
+            raise ValueError("ServerOperation must be approved before execution.")
+        if spec.risk_level == "critical" and len(operation.approved_by_user_ids) < 2:
+            raise ValueError("Critical ServerOperation requires two approvals.")
+        if self.executor is None:
+            result = ServerOperationExecutionResult(
+                action_run_id=stable_hash(f"noop:{operation.id}")[:32],
+                status="failed",
+                stderr="server operation executor is not configured",
+                summary="executor not configured",
+                metadata={"executor": "none"},
+            )
+        else:
+            self.repository.update_status(
+                operation_id,
+                "running",
+                {"executed_by": access.user_id},
+            )
+            result = self.executor.execute(operation)
+        stored = self.repository.save_execution_result(operation_id, result)
+        return MinecraftSupportResult(
+            text=f"ServerOperation を実行しました: {stored.id} / status={stored.status}",
+            detail_markdown=self._operation_detail(stored),
             operation=stored,
-            warnings=dry_run.warnings,
+            operations=(stored,),
+            metadata={"action_run_id": stored.action_run_id or ""},
         )
 
     def _dry_run(
@@ -138,6 +330,66 @@ class MinecraftSupportService:
             execution_allowed=False,
         )
 
+    def _validated_args(self, *, plan: ServerOperationPlan, spec: ActionSpec) -> dict[str, str]:
+        if _looks_like_shell(plan.operation) or any(
+            _looks_like_shell(value)
+            for value in (
+                plan.server_name,
+                plan.service_name,
+                plan.path,
+                plan.query,
+                plan.player_name,
+            )
+        ):
+            raise ValueError("Unsupported Minecraft operation: shell fragments are not accepted")
+        server_name = plan.server_name or self.settings.default_server_name
+        server = self.settings.server(server_name)
+        if self.settings.has_server_allow_list() and server is None:
+            raise ValueError("server_name is not allowed.")
+        args: dict[str, str] = {"server_name": server_name}
+        if plan.service_name:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", plan.service_name):
+                raise ValueError("service_name contains invalid characters.")
+            if server and server.services and plan.service_name not in server.services:
+                raise ValueError("service_name is not allowed for this server.")
+            args["service_name"] = plan.service_name
+        elif spec.operation == "restart" and server and server.services:
+            args["service_name"] = server.services[0]
+        if plan.path:
+            if Path(plan.path).is_absolute() or ".." in Path(plan.path).parts:
+                raise ValueError("path is outside the allowed search roots.")
+            if server and server.allow_file_search_paths:
+                args["path"] = plan.path
+            elif self.settings.has_server_allow_list():
+                raise ValueError("file search path is not configured for this server.")
+            else:
+                args["path"] = plan.path
+        if plan.query:
+            args["query"] = plan.query
+        if plan.player_name:
+            if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", plan.player_name):
+                raise ValueError("player_name must be a valid Minecraft player name.")
+            args["player_name"] = plan.player_name
+        if plan.whitelist_action:
+            action = plan.whitelist_action.lower()
+            if action not in {"add", "remove"}:
+                raise ValueError("whitelist_action must be add or remove.")
+            args["whitelist_action"] = action
+        elif spec.operation == "whitelist_update":
+            args["whitelist_action"] = "add"
+        if spec.operation == "compose_down" and server and not server.critical_operations_enabled:
+            args["critical_operations_enabled"] = "false"
+        return args
+
+    def _approval_status(self, operation: ServerOperation) -> str:
+        spec = self.registry.get(operation.operation)
+        if spec.risk_level == "critical":
+            server = self.settings.server(operation.server_name)
+            if server and not server.critical_operations_enabled:
+                return "disabled"
+            return "approved" if len(operation.approved_by_user_ids) >= 2 else "waiting_approval"
+        return "approved"
+
     def _operation_detail(self, operation: ServerOperation) -> str:
         dry_run = operation.dry_run
         if dry_run is None:
@@ -152,6 +404,8 @@ class MinecraftSupportService:
                 f"- server: `{operation.server_name}`",
                 f"- operation: `{operation.operation}`",
                 f"- risk: `{operation.risk_level}`",
+                f"- approved_by: `{', '.join(operation.approved_by_user_ids) or 'none'}`",
+                f"- action_run_id: `{operation.action_run_id or ''}`",
                 f"- approval_policy: `{dry_run.approval_policy}`",
                 f"- execution_allowed: `{dry_run.execution_allowed}`",
                 "",
@@ -170,6 +424,23 @@ class MinecraftSupportService:
                 "",
                 "## Warnings",
                 *[f"- {warning}" for warning in dry_run.warnings],
+            ]
+        )
+
+    def _operations_list_detail(self, operations: tuple[ServerOperation, ...]) -> str:
+        if not operations:
+            return "ServerOperation はありません。"
+        return "\n".join(
+            [
+                "# ServerOperation",
+                *[
+                    (
+                        f"- `{operation.id}` server={operation.server_name} "
+                        f"operation={operation.operation} risk={operation.risk_level} "
+                        f"status={operation.status}"
+                    )
+                    for operation in operations
+                ],
             ]
         )
 
@@ -277,3 +548,68 @@ def _command_preview(spec: ActionSpec, args: dict[str, str]) -> tuple[str, ...]:
 
 def _join_text(*parts: str) -> str:
     return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _normalize_operation(value: str) -> str:
+    normalized = (value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "mc_status": "status",
+        "docker": "docker_ps",
+        "ps": "docker_ps",
+        "compose": "compose_up",
+        "up": "compose_up",
+        "down": "compose_down",
+        "restart_mc_server": "restart",
+        "server_restart": "restart",
+        "whitelist": "whitelist_update",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _initial_status(*, mode: str, spec: ActionSpec) -> str:
+    if mode == "disabled":
+        return "disabled"
+    if spec.read_only and spec.approval_policy == "admin":
+        return "running"
+    return "waiting_approval"
+
+
+def _looks_like_shell(value: str) -> bool:
+    return bool(re.search(r"(\brm\s+-rf\b|[;&|`$<>]|\bsh\s+-c\b|\bbash\s+-c\b)", value or ""))
+
+
+def settings_from_runtime(config: object) -> ServerManagementSettings:
+    return ServerManagementSettings(
+        default_server_name=str(getattr(config, "default_server_name", "default")),
+        docker_ps=DockerPsSettings(
+            container_name_prefixes=tuple(
+                str(value)
+                for value in getattr(getattr(config, "docker_ps", object()), "container_name_prefixes", [])
+            ),
+        ),
+        servers=tuple(
+            ServerDefinition(
+                name=str(getattr(server, "name")),
+                compose_dir=getattr(server, "compose_dir", None),
+                services=tuple(str(value) for value in getattr(server, "services", [])),
+                allow_file_search_paths=tuple(
+                    getattr(server, "allow_file_search_paths", [])
+                ),
+                critical_operations_enabled=bool(
+                    getattr(server, "critical_operations_enabled", False)
+                ),
+            )
+            for server in getattr(config, "servers", [])
+        ),
+        execution=ServerExecutionSettings(
+            timeout_seconds=int(
+                getattr(getattr(config, "execution", object()), "timeout_seconds", 120)
+            ),
+            stdout_char_limit=int(
+                getattr(getattr(config, "execution", object()), "stdout_char_limit", 4000)
+            ),
+            stderr_char_limit=int(
+                getattr(getattr(config, "execution", object()), "stderr_char_limit", 4000)
+            ),
+        ),
+    )

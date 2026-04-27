@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import asdict, is_dataclass
 import json
 import logging
 import re
@@ -71,10 +72,12 @@ def _workflow_response_payload(response: object) -> dict[str, object]:
 
 
 def _dump_workflow_item(item: object) -> dict[str, object]:
+    raw = asdict(item) if is_dataclass(item) else getattr(item, "__dict__", {})
     payload = {
         key: value.isoformat() if hasattr(value, "isoformat") else value
-        for key, value in getattr(item, "__dict__", {}).items()
+        for key, value in raw.items()
     }
+    payload = _sanitize_payload_value(payload)
     if "metadata" in payload:
         payload["metadata"] = _sanitize_payload_metadata(payload.get("metadata"))
     if "media_type" not in payload or "metadata" not in payload:
@@ -92,12 +95,45 @@ def _dump_workflow_item(item: object) -> dict[str, object]:
 
 def _sanitize_payload_metadata(value: object) -> dict[str, object]:
     metadata = dict(value or {}) if isinstance(value, dict) else {}
-    for key in ("contexts", "context", "llm_prompt", "raw", "secret"):
+    for key in (
+        "contexts",
+        "context",
+        "llm_prompt",
+        "raw",
+        "secret",
+        "executor_args",
+        "server_state_before",
+        "server_state_after",
+        "container_state_before",
+        "container_state_after",
+    ):
         metadata.pop(key, None)
     for key, item in list(metadata.items()):
         if isinstance(item, str):
             metadata[key] = _compact_payload_text(_mask_payload_secret(item), 1200)
+        elif isinstance(item, dict):
+            metadata[key] = _sanitize_payload_value(item)
+        elif isinstance(item, list):
+            metadata[key] = _sanitize_payload_value(item)
     return metadata
+
+
+def _sanitize_payload_value(value: object) -> object:
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.lower() in {"secret", "password", "token", "api_key", "raw"}:
+                continue
+            sanitized[key_text] = _sanitize_payload_value(item)
+        return sanitized
+    if isinstance(value, tuple):
+        return [_sanitize_payload_value(item) for item in value]
+    if isinstance(value, list):
+        return [_sanitize_payload_value(item) for item in value]
+    if isinstance(value, str):
+        return _compact_payload_text(_mask_payload_secret(value), 4000)
+    return value
 
 
 def _compact_payload_text(text: str, limit: int) -> str:
@@ -108,11 +144,22 @@ def _compact_payload_text(text: str, limit: int) -> str:
 
 
 def _mask_payload_secret(text: str) -> str:
-    return re.sub(
+    masked = re.sub(
         r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
         r"\1=[REDACTED]",
         text,
     )
+    masked = re.sub(
+        r"\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b",
+        "[internal-ip]",
+        masked,
+    )
+    masked = re.sub(
+        r"(?i)(network[_-]?key|pin|unlock(?:ing)?[_ -]?steps?)\s*[:=]\s*[^\n]+",
+        r"\1=[REDACTED]",
+        masked,
+    )
+    return masked
 
 
 def _automation_response_payload(response: object) -> dict[str, object]:
@@ -296,6 +343,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "announcement_draft",
             "mc_status",
             "mc_request",
+            "server_operation_execute",
             "image_search",
             "member_search",
         ),

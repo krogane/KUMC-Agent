@@ -115,7 +115,12 @@ class MinecraftSupportTests(unittest.TestCase):
                 minecraft=minecraft,
             )
 
-            status = workflow.run(WorkRequest(work_type="mc_status"))
+            status = workflow.run(
+                WorkRequest(
+                    work_type="mc_status",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
             request = workflow.run(
                 WorkRequest(
                     work_type="mc_request",
@@ -124,7 +129,7 @@ class MinecraftSupportTests(unittest.TestCase):
                 )
             )
 
-            self.assertIn("dry-run-only", status.text)
+            self.assertIn("Minecraft support", status.text)
             self.assertEqual(len(request.server_operations), 1)
             self.assertEqual(request.metadata["execution_allowed"], False)
 
