@@ -79,6 +79,11 @@ class SchedulerSection:
     auto_index_enabled: bool
     auto_index_time: str
     auto_index_weekdays: list[int]
+    auto_index_max_runtime_minutes: int
+    auto_index_lock_ttl_minutes: int
+    quality_min_chunk_ratio: float
+    quality_smoke_queries: list[str]
+    rollback_keep_snapshots: int
 
 
 @dataclass(frozen=True)

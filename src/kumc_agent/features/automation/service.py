@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.automation import (
@@ -25,6 +25,7 @@ from kumc_agent.utils.hashing import stable_hash
 _VALID_MODES = {"dry_run", "approval_required", "auto_run"}
 _HIGH_RISKS = {"high", "critical"}
 _AUTO_RUN_ALLOWLIST = {
+    "auto_index_update",
     "ingest_backfill",
     "task_due_reminder",
     "weekly_summary_draft",
@@ -46,11 +47,13 @@ class AutomationService:
         feature_flags: FeatureFlagService,
         audit_log: AuditLogRepository | None = None,
         operations: OperationsRepository | None = None,
+        action_executor: Callable[[ActionSpecRef], dict[str, object]] | None = None,
     ) -> None:
         self.repository = repository
         self.feature_flags = feature_flags
         self.audit_log = audit_log
         self.operations = operations
+        self.action_executor = action_executor
 
     def seed_defaults(self) -> tuple[AutomationRule, ...]:
         if self.repository.list_rules():
@@ -307,13 +310,21 @@ class AutomationService:
                 and action.risk_level.lower() not in _HIGH_RISKS
                 and not action.approval_required
             )
+            executor_payload: dict[str, object] = {}
             action_status = "executed_internal" if allowed else status
+            side_effects = "none"
+            if allowed and self.action_executor is not None:
+                executor_payload = self.action_executor(action)
+                action_status = str(executor_payload.get("status") or action_status)
+                side_effects = str(executor_payload.get("side_effects") or "internal")
             result = {
                 "action_type": action.action_type,
                 "target": action.target,
                 "status": action_status,
-                "side_effects": "none",
+                "side_effects": side_effects,
             }
+            if executor_payload:
+                result["executor_payload"] = executor_payload
             results.append(result)
             if self.operations is not None:
                 self.operations.save_action_run(
@@ -379,6 +390,24 @@ class AutomationService:
 
 def _default_rules() -> tuple[AutomationRule, ...]:
     return (
+        AutomationRule(
+            id="auto_index_daily",
+            name="自動インデックス日次更新",
+            enabled=True,
+            trigger=TriggerSpec("schedule_cron", {"cron": "0 6 * * MON-FRI"}),
+            actions=(
+                ActionSpecRef(
+                    "auto_index_update",
+                    target="index",
+                    payload={"trigger": "automation"},
+                    risk_level="low",
+                ),
+            ),
+            mode="auto_run",
+            risk_level="low",
+            created_by_user_id="system",
+            approved_by_user_id="system",
+        ),
         AutomationRule(
             id="weekly_summary",
             name="週次まとめ draft",

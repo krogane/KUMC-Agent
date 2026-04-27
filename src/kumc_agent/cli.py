@@ -13,8 +13,8 @@ from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.chat.entry import ChatEntryRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
+from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
-from kumc_agent.usecases.indexing.update import UpdateIndexRequest
 from kumc_agent.utils.logging import configure_logging, default_execution_log_path
 
 logger = logging.getLogger(__name__)
@@ -443,29 +443,18 @@ def main() -> None:
                     )
                 )
                 return
-            from kumc_agent.apps.ingestion import build_ingestion_app_context
-            from kumc_agent.domain.models.source import BackfillScope
-
-            ingestion = build_ingestion_app_context()
-            source_kinds = (args.scope,) if args.scope else tuple()
-            results = asyncio.run(
-                ingestion.service.backfill_many(
-                    source_kinds=source_kinds,
-                    scope=BackfillScope(
-                        limit=args.limit,
-                        force=bool(args.force or args.action == "reindex"),
-                    ),
+            context = build_runtime_context()
+            result = context.auto_index_update.execute(
+                AutoIndexUpdateRequest(
+                    trigger="admin",
+                    source_filter=(args.scope,) if args.scope else tuple(),
+                    force=bool(args.force or args.action == "reindex"),
+                    full_rebuild=bool(args.action == "reindex"),
                 )
             )
-            print(
-                json.dumps(
-                    {
-                        "action": args.action,
-                        "results": [result.__dict__ for result in results],
-                    },
-                    ensure_ascii=False,
-                )
-            )
+            payload = result.as_payload()
+            payload["action"] = args.action
+            print(json.dumps(payload, ensure_ascii=False, default=str))
             return
         if args.action == "eval":
             from kumc_agent.apps.automation import build_automation_app_context
@@ -842,13 +831,18 @@ def main() -> None:
             )
         else:
             logger.info("Running index update")
-            result = context.update_index.execute(
-                UpdateIndexRequest(
+            auto_result = context.auto_index_update.execute(
+                AutoIndexUpdateRequest(
+                    trigger="manual",
                     refresh_sources=not args.no_refresh_sources,
+                    force=bool(args.full_rebuild),
                     full_rebuild=bool(args.full_rebuild),
                     stage_selection=tuple(args.stages or ()) or None,
                 )
             )
+            logger.info("Index update completed. status=%s run_id=%s", auto_result.status, auto_result.run_id)
+            print(json.dumps(auto_result.as_payload(), ensure_ascii=False, default=str))
+            return
         logger.info(
             "Index command completed. loaded_sources=%d documents=%d chunks=%d",
             result.loaded_sources,
@@ -862,6 +856,7 @@ def main() -> None:
                     "documents": result.documents,
                     "chunks": result.chunks,
                     "index_dir": str(result.index_dir),
+                    "metadata": {},
                 },
                 ensure_ascii=False,
             )

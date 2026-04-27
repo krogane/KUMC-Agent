@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,7 +126,17 @@ class IndexingService:
         stage_selection: tuple[str, ...] | None = None,
         allow_cancel: bool = False,
         cancel_event: threading.Event | None = None,
+        index_dir: Path | None = None,
     ) -> IndexBuildResult:
+        if index_dir is not None and index_dir != self._runtime.app.index_dir:
+            return self._build_with_index_dir(
+                loaded_sources=loaded_sources,
+                full_rebuild=full_rebuild,
+                stage_selection=stage_selection,
+                allow_cancel=allow_cancel,
+                cancel_event=cancel_event,
+                index_dir=index_dir,
+            )
         selected = {
             value.strip()
             for value in (stage_selection or ())
@@ -192,6 +202,7 @@ class IndexingService:
         stage_selection: tuple[str, ...] | None = None,
         allow_cancel: bool = False,
         cancel_event: threading.Event | None = None,
+        index_dir: Path | None = None,
     ) -> IndexBuildResult:
         return self.build(
             loaded_sources=loaded_sources,
@@ -199,7 +210,51 @@ class IndexingService:
             stage_selection=stage_selection,
             allow_cancel=allow_cancel,
             cancel_event=cancel_event,
+            index_dir=index_dir,
         )
+
+    def _build_with_index_dir(
+        self,
+        *,
+        loaded_sources: int,
+        full_rebuild: bool,
+        stage_selection: tuple[str, ...] | None,
+        allow_cancel: bool,
+        cancel_event: threading.Event | None,
+        index_dir: Path,
+    ) -> IndexBuildResult:
+        from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
+        from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
+
+        previous_runtime = self._runtime
+        previous_faiss = self._faiss_index
+        previous_bm25 = self._bm25_index
+        index_dir.mkdir(parents=True, exist_ok=True)
+        self._runtime = replace(
+            self._runtime,
+            app=replace(self._runtime.app, index_dir=index_dir),
+        )
+        self._faiss_index = FaissLikeIndex(index_dir=index_dir)
+        self._bm25_index = SudachiBM25Retriever(
+            index_dir=index_dir,
+            sudachi_mode=self._runtime.features.retrieval.sudachi_mode,
+            bm25_k1=self._runtime.features.retrieval.sparse_bm25_k1,
+            bm25_b=self._runtime.features.retrieval.sparse_bm25_b,
+            use_normalized_form=self._runtime.features.retrieval.sparse_use_normalized_form,
+            remove_symbols=self._runtime.features.retrieval.sparse_remove_symbols,
+        )
+        try:
+            return self.build(
+                loaded_sources=loaded_sources,
+                full_rebuild=full_rebuild,
+                stage_selection=stage_selection,
+                allow_cancel=allow_cancel,
+                cancel_event=cancel_event,
+            )
+        finally:
+            self._runtime = previous_runtime
+            self._faiss_index = previous_faiss
+            self._bm25_index = previous_bm25
 
     def _apply_clear_flags(self, *, full_rebuild: bool) -> None:
         refresh = self._runtime.indexing.refresh

@@ -10,6 +10,7 @@ from kumc_agent.domain.models.source import BackfillScope, SourceDeleteItem, Sou
 from kumc_agent.domain.ports.connectors import SourceConnector
 from kumc_agent.features.foundation.tracing import current_trace_id
 from kumc_agent.features.ingestion.chunking import IngestionChunker
+from kumc_agent.features.indexing.change_detection import detect_source_change
 from kumc_agent.infra.audit.repository import AuditLogRepository
 from kumc_agent.infra.ingestion.repository import IngestionRepository
 from kumc_agent.infra.object_storage.raw_snapshot import RawSnapshotStore
@@ -64,7 +65,7 @@ class IngestionService:
             raise KeyError(f"Unknown source connector: {source_kind}")
         connector = self._connectors[source_kind]
         resolved_scope = scope or BackfillScope()
-        known_checksums = self._repository.load_checksums(source_kind)
+        item_states = self._repository.load_item_states(source_kind)
         seen = changed = skipped = deleted = documents = chunks = findings_count = 0
 
         async for item in connector.backfill(resolved_scope):
@@ -72,14 +73,21 @@ class IngestionService:
                 self._repository.mark_deleted(
                     source_kind=item.source_kind,
                     external_id=item.external_id,
+                    status=(
+                        "permission_lost"
+                        if item.reason == "permission_lost"
+                        else "deleted"
+                    ),
                 )
                 deleted += 1
                 continue
             seen += 1
-            if (
-                not resolved_scope.force
-                and known_checksums.get(item.external_id) == item.checksum
-            ):
+            decision = detect_source_change(
+                item=item,
+                previous=item_states.get(item.external_id),
+                force=resolved_scope.force,
+            )
+            if decision.change_kind == "skipped":
                 skipped += 1
                 continue
             outcome = await self._ingest_raw_item(connector=connector, raw=item)

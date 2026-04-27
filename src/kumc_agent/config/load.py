@@ -330,6 +330,16 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     migrations.setdefault("directory", "infrastructure/migrations")
     migrations.setdefault("table_name", "schema_migrations")
 
+    scheduler = updated.get("scheduler")
+    if not isinstance(scheduler, dict):
+        scheduler = {}
+        updated["scheduler"] = scheduler
+    scheduler.setdefault("auto_index_max_runtime_minutes", 120)
+    scheduler.setdefault("auto_index_lock_ttl_minutes", 180)
+    scheduler.setdefault("quality_min_chunk_ratio", 0.5)
+    scheduler.setdefault("quality_smoke_queries", [])
+    scheduler.setdefault("rollback_keep_snapshots", 3)
+
     features = updated.get("features")
     if not isinstance(features, dict):
         features = {}
@@ -757,6 +767,19 @@ def _to_runtime_config(
             auto_index_enabled=bool(scheduler["auto_index_enabled"]),
             auto_index_time=str(scheduler["auto_index_time"]),
             auto_index_weekdays=[int(v) for v in scheduler["auto_index_weekdays"]],
+            auto_index_max_runtime_minutes=int(
+                scheduler.get("auto_index_max_runtime_minutes", 120)
+            ),
+            auto_index_lock_ttl_minutes=int(
+                scheduler.get("auto_index_lock_ttl_minutes", 180)
+            ),
+            quality_min_chunk_ratio=float(
+                scheduler.get("quality_min_chunk_ratio", 0.5)
+            ),
+            quality_smoke_queries=[
+                str(v) for v in scheduler.get("quality_smoke_queries", [])
+            ],
+            rollback_keep_snapshots=int(scheduler.get("rollback_keep_snapshots", 3)),
         ),
         infrastructure=InfrastructureSection(
             database=DatabaseSection(

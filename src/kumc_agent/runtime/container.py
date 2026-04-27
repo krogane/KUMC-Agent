@@ -20,6 +20,11 @@ from kumc_agent.infra.loaders.notion import NotionLoader
 from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.database.postgres import PostgresClient
+from kumc_agent.infra.audit.repository import build_audit_repository
+from kumc_agent.infra.connectors import build_source_connectors
+from kumc_agent.infra.ingestion import build_ingestion_repository
+from kumc_agent.infra.object_storage.raw_snapshot import RawSnapshotStore
+from kumc_agent.infra.object_storage.s3 import S3ObjectStorageClient
 from kumc_agent.infra.operations import build_operations_repository
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
@@ -32,6 +37,8 @@ from kumc_agent.features.image_search import (
     LocalImageOcrExtractor,
 )
 from kumc_agent.features.indexing.service import IndexingService
+from kumc_agent.features.ingestion.chunking import ChunkingSettings, IngestionChunker
+from kumc_agent.features.ingestion.service import IngestionService
 from kumc_agent.features.rag.config import (
     RagConfig,
     RagGenerationSettings,
@@ -53,11 +60,13 @@ from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
 from kumc_agent.usecases.chat.entry import ChatEntryUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
 from kumc_agent.usecases.eval.ragas import EvaluateRagasUsecase
+from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateUsecase
 from kumc_agent.usecases.indexing.build import BuildIndexUsecase
 from kumc_agent.usecases.indexing.update import UpdateIndexUsecase
 from kumc_agent.usecases.summarization.run import SummarizationUsecase
 from kumc_agent.usecases.vc.run import VCUsecase
 from kumc_agent.utils.migrate_summary_dir import migrate_summery_chunk_dir
+from kumc_agent.infra.secret_finding import SecretFindingDetector
 
 
 def _build_llm_for_route(
@@ -161,6 +170,10 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     operations_repository = build_operations_repository(
         postgres=PostgresClient(config.infrastructure.database),
         fallback_dir=config.base_dir / "data" / "operations",
+    )
+    audit_log = build_audit_repository(
+        postgres=PostgresClient(config.infrastructure.database),
+        fallback_path=config.base_dir / "logs" / "audit.jsonl",
     )
 
     retrieval_component = RetrievalComponent(
@@ -441,6 +454,26 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         x_loader=x_loader,
         notion_loader=notion_loader,
     )
+    ingestion_service = IngestionService(
+        connectors=build_source_connectors(config),
+        repository=build_ingestion_repository(
+            postgres=PostgresClient(config.infrastructure.database),
+            fallback_dir=config.base_dir / "data" / "ingestion",
+        ),
+        raw_snapshots=RawSnapshotStore(
+            config=config.infrastructure.object_storage,
+            local_root=config.base_dir / "data" / "object_storage",
+            s3=S3ObjectStorageClient(config.infrastructure.object_storage),
+        ),
+        chunker=IngestionChunker(
+            ChunkingSettings(
+                max_characters=config.indexing.chunking.second_recursive_chunk_size * 4,
+                overlap_characters=config.indexing.chunking.second_recursive_chunk_overlap * 4,
+            )
+        ),
+        secret_detector=SecretFindingDetector(),
+        audit_log=audit_log,
+    )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
     entry_router = EntryQueryRouter(
@@ -480,6 +513,12 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         update_index=UpdateIndexUsecase(
             build_usecase=build_index_usecase,
             indexing_service=indexing_service,
+        ),
+        auto_index_update=AutoIndexUpdateUsecase(
+            config=config,
+            build_usecase=build_index_usecase,
+            operations=operations_repository,
+            ingestion_service=ingestion_service,
         ),
         eval_ragas=EvaluateRagasUsecase(
             chat_usecase=chat_answer_usecase,

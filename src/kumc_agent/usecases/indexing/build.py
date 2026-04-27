@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+from pathlib import Path
 
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
@@ -19,6 +20,7 @@ class BuildIndexRequest:
     stage_selection: tuple[str, ...] | None = None
     allow_cancel: bool = False
     cancel_event: threading.Event | None = None
+    index_dir: Path | None = None
 
 
 class BuildIndexUsecase:
@@ -61,4 +63,5 @@ class BuildIndexUsecase:
             stage_selection=request.stage_selection,
             allow_cancel=request.allow_cancel,
             cancel_event=request.cancel_event,
+            index_dir=request.index_dir,
         )

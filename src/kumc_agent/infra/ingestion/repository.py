@@ -9,12 +9,19 @@ from typing import Protocol
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.secret import SecretFinding
 from kumc_agent.domain.models.source import NormalizedDocument, SourceRawItem
+from kumc_agent.features.indexing.change_detection import (
+    SourceItemState,
+    state_from_source_item_payload,
+)
 from kumc_agent.infra.database.postgres import PostgresClient
 from kumc_agent.utils.hashing import stable_hash
 
 
 class IngestionRepository(Protocol):
     def load_checksums(self, source_kind: str) -> dict[str, str]:
+        ...
+
+    def load_item_states(self, source_kind: str) -> dict[str, SourceItemState]:
         ...
 
     def save_item(
@@ -28,7 +35,13 @@ class IngestionRepository(Protocol):
     ) -> None:
         ...
 
-    def mark_deleted(self, *, source_kind: str, external_id: str) -> None:
+    def mark_deleted(
+        self,
+        *,
+        source_kind: str,
+        external_id: str,
+        status: str = "deleted",
+    ) -> None:
         ...
 
 
@@ -37,18 +50,24 @@ class FileIngestionRepository:
     root_dir: Path
 
     def load_checksums(self, source_kind: str) -> dict[str, str]:
+        return {
+            external_id: state.checksum
+            for external_id, state in self.load_item_states(source_kind).items()
+        }
+
+    def load_item_states(self, source_kind: str) -> dict[str, SourceItemState]:
         path = self.root_dir / "source_items.jsonl"
-        checksums: dict[str, str] = {}
+        states: dict[str, SourceItemState] = {}
         if not path.exists():
-            return checksums
+            return states
         with path.open("r", encoding="utf-8") as fr:
             for line in fr:
                 payload = json.loads(line)
-                if payload.get("source_kind") == source_kind:
-                    checksums[str(payload.get("external_id") or "")] = str(
-                        payload.get("checksum") or ""
-                    )
-        return checksums
+                if payload.get("source_kind") != source_kind:
+                    continue
+                state = state_from_source_item_payload(payload)
+                states[state.external_id] = state
+        return states
 
     def save_item(
         self,
@@ -72,13 +91,20 @@ class FileIngestionRepository:
         for finding in findings:
             _append_jsonl(self.root_dir / "secret_findings.jsonl", asdict(finding))
 
-    def mark_deleted(self, *, source_kind: str, external_id: str) -> None:
+    def mark_deleted(
+        self,
+        *,
+        source_kind: str,
+        external_id: str,
+        status: str = "deleted",
+    ) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         _append_jsonl(
             self.root_dir / "source_deletes.jsonl",
             {
                 "source_kind": source_kind,
                 "external_id": external_id,
+                "index_status": status,
                 "deleted_at": datetime.now(UTC).isoformat(),
             },
         )
@@ -89,13 +115,37 @@ class PostgresIngestionRepository:
     postgres: PostgresClient
 
     def load_checksums(self, source_kind: str) -> dict[str, str]:
+        return {
+            external_id: state.checksum
+            for external_id, state in self.load_item_states(source_kind).items()
+        }
+
+    def load_item_states(self, source_kind: str) -> dict[str, SourceItemState]:
         with self.postgres.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "select external_id, checksum from source_items where source_kind = %s",
+                    """
+                    select external_id, checksum, metadata, access_scope, index_status
+                    from source_items
+                    where source_kind = %s
+                    """,
                     (source_kind,),
                 )
-                return {str(row[0]): str(row[1]) for row in cur.fetchall()}
+                states: dict[str, SourceItemState] = {}
+                for row in cur.fetchall():
+                    metadata = dict(row[2] or {})
+                    access_scope = dict(row[3] or {})
+                    payload = {
+                        "source_kind": source_kind,
+                        "external_id": str(row[0]),
+                        "checksum": str(row[1] or ""),
+                        "metadata": metadata,
+                        "access_scope": access_scope,
+                        "index_status": str(row[4] or "active"),
+                    }
+                    state = state_from_source_item_payload(payload)
+                    states[state.external_id] = state
+                return states
 
     def save_item(
         self,
@@ -235,27 +285,34 @@ class PostgresIngestionRepository:
                     )
             conn.commit()
 
-    def mark_deleted(self, *, source_kind: str, external_id: str) -> None:
+    def mark_deleted(
+        self,
+        *,
+        source_kind: str,
+        external_id: str,
+        status: str = "deleted",
+    ) -> None:
+        index_status = status if status in {"deleted", "permission_lost"} else "deleted"
         with self.postgres.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     update source_items
-                    set deleted_at = now(), index_status = 'deleted'
+                    set deleted_at = now(), index_status = %s
                     where source_kind = %s and external_id = %s
                     """,
-                    (source_kind, external_id),
+                    (index_status, source_kind, external_id),
                 )
                 cur.execute(
                     """
                     update chunks
-                    set index_status = 'deleted'
+                    set index_status = %s
                     where source_item_id in (
                       select id from source_items
                       where source_kind = %s and external_id = %s
                     )
                     """,
-                    (source_kind, external_id),
+                    (index_status, source_kind, external_id),
                 )
             conn.commit()
 

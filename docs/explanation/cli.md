@@ -156,14 +156,16 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index build
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index update
 ```
 
-`build` はインデックス作成、`update` は更新の入口です。
+`build` は従来互換のインデックス作成、`update` は自動インデックス更新 usecase の手動入口です。
 どちらも次のオプションを持ちます。
 
 - `--no-refresh-sources`: 元データの再取得をしない
 - `--full-rebuild`: 全体を作り直す
 - `--stage`: 実行する stage を絞る。複数回指定可能
 
-実行後は、読み込んだ source 数、document 数、chunk 数、index directory を JSON で表示します。
+`index update` は差分取り込み、lock、staging build、quality smoke check、publish を同じ run として扱い、`indexing_runs` に保存します。
+CLI payload の安定フィールドは `status`、`run_id`、`seen`、`changed`、`skipped`、`deleted` で、差分内訳、品質結果、snapshot 情報、skip 理由などの診断情報は `metadata` 配下に入ります。
+`index build` は読み込んだ source 数、document 数、chunk 数、index directory を JSON で表示します。
 
 ### `eval ragas`
 
@@ -184,11 +186,12 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli eval ragas --eval-file dat
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli bot
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli api --host 127.0.0.1 --port 8000
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker --job-type auto_index_update
 ```
 
 - `bot`: Discord slash-command bot を起動する
 - `api`: API app を指定 host / port で起動する
-- `worker`: worker skeleton を 1 回実行する
+- `worker`: worker job を 1 回実行する。`--job-type auto_index_update` は自動インデックス更新 usecase を呼びます。
 
 これらは `main()` の中で必要になったタイミングで import されています。
 常にすべての app を読み込むのではなく、実行するコマンドに必要なものだけを読み込む構成です。
@@ -209,8 +212,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker
 - `permissions`: 管理者 ID や guild allow list の設定状況を出す
 - `cost_report`: automation のコスト関連レポートを出す
 
-`sync` と `reindex` では ingestion context を作り、`backfill_many(...)` を呼びます。
-`reindex` の場合は `force` が有効になるため、より強制的な再処理として扱われます。
+`sync` と `reindex` では自動インデックス更新 usecase を呼びます。
+`reindex` の場合は `force` と `full_rebuild` が有効になるため、差分にかかわらず全体再構築寄りの処理として扱われます。
 
 ### `db migrate`
 
