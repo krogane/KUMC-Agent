@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -23,10 +24,13 @@ from kumc_agent.domain.models.workflow import (
     ScheduleCandidate,
     ScheduleEvent,
     Task,
+    TaskApprovalBatch,
+    TaskChangeCandidate,
     TaskCandidate,
     WorkRequest,
     WorkResponse,
 )
+from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.features.announcement.service import (
     AnnouncementDraftRequest,
     AnnouncementDraftService,
@@ -34,6 +38,12 @@ from kumc_agent.features.announcement.service import (
 from kumc_agent.features.agentic import AgenticSearchService
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.minecraft import MinecraftSupportService
+from kumc_agent.features.task_management import (
+    DuplicateTaskDetector,
+    TaskAccessPolicy,
+    TaskExtractionService,
+    TaskNotificationPlanner,
+)
 from kumc_agent.infra.audit.repository import AuditLogRepository
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.infra.workflow.repository import WorkflowRepository
@@ -74,6 +84,13 @@ class WorkflowService:
         operations: OperationsRepository | None = None,
         member_search_service: Any | None = None,
         image_search_service: Any | None = None,
+        task_extractor: TaskExtractionService | None = None,
+        task_access_policy: TaskAccessPolicy | None = None,
+        task_duplicate_detector: DuplicateTaskDetector | None = None,
+        task_notification_planner: TaskNotificationPlanner | None = None,
+        llm: LLMPort | None = None,
+        prompts_dir: Path | None = None,
+        llm_model_name: str = "",
     ) -> None:
         self.repository = repository
         self.ask_service = ask_service
@@ -85,6 +102,14 @@ class WorkflowService:
         self.operations = operations
         self.member_search_service = member_search_service
         self.image_search_service = image_search_service
+        self.task_extractor = task_extractor or TaskExtractionService(
+            llm=llm,
+            prompts_dir=prompts_dir,
+            model_name=llm_model_name,
+        )
+        self.task_access_policy = task_access_policy or TaskAccessPolicy()
+        self.task_duplicate_detector = task_duplicate_detector or DuplicateTaskDetector()
+        self.task_notification_planner = task_notification_planner or TaskNotificationPlanner()
 
     def run(self, request: WorkRequest) -> WorkResponse:
         run_record = self._start_workflow_run(request)
@@ -98,6 +123,8 @@ class WorkflowService:
             status=_workflow_response_status(response),
             metadata={
                 "task_candidates": len(response.task_candidates),
+                "task_change_candidates": len(response.task_change_candidates),
+                "task_approval_batches": len(response.task_approval_batches),
                 "event_candidates": len(response.event_candidates),
                 "schedule_candidates": len(response.schedule_candidates),
                 "workflow_candidates": len(response.workflow_candidates),
@@ -124,6 +151,14 @@ class WorkflowService:
             return self.task_list(request)
         if work_type == "task_done":
             return self.task_done(request)
+        if work_type == "task_update":
+            return self.task_update(request)
+        if work_type == "task_delete":
+            return self.task_delete(request)
+        if work_type == "task_notify_due":
+            return self.task_notify_due(request)
+        if work_type == "task_batch_approval":
+            return self.task_batch_approval(request)
         if work_type == "event_add":
             return self.event_add(request)
         if work_type == "event_list":
@@ -204,7 +239,7 @@ class WorkflowService:
             fallback_query=request.target or request.instruction or "議事録 ToDo 決定事項",
         )
         combined = _join_text(source_text, retrieved["text"])
-        candidates = self._extract_and_store_candidates(
+        candidates, extraction_metadata = self._extract_and_store_candidates(
             combined,
             request.access,
             evidence=tuple(retrieved["citations"]),
@@ -235,17 +270,23 @@ class WorkflowService:
             detail_markdown=minutes,
             task_candidates=tuple(candidates),
             meetings=(meeting,),
-            metadata={"decisions": len(decisions), "open_questions": len(open_questions)},
+            metadata={
+                "decisions": len(decisions),
+                "open_questions": len(open_questions),
+                "extraction": extraction_metadata,
+            },
         )
 
     def task_extract(self, request: WorkRequest) -> WorkResponse:
+        if not self.task_access_policy.can_create_candidate(request.access):
+            return self._task_forbidden_response("workflow.task_extract", request.access)
         source_text = self._source_text(request)
         retrieved = self._retrieve(
             request,
             fallback_query=request.target or request.instruction or "タスク 担当 期限 ToDo",
         )
         combined = _join_text(source_text, retrieved["text"])
-        candidates = self._extract_and_store_candidates(
+        candidates, extraction_metadata = self._extract_and_store_candidates(
             combined,
             request.access,
             evidence=tuple(retrieved["citations"]),
@@ -257,30 +298,61 @@ class WorkflowService:
             text=f"TaskCandidate を {len(candidates)} 件登録しました。承認されるまで Task 正本には入りません。",
             detail_markdown=detail,
             task_candidates=tuple(candidates),
-            metadata={"candidate_count": len(candidates)},
+            metadata={
+                "candidate_count": len(candidates),
+                "extraction": extraction_metadata,
+            },
         )
 
     def task_add(self, request: WorkRequest) -> WorkResponse:
+        if not self.task_access_policy.can_create_candidate(request.access):
+            return self._task_forbidden_response("workflow.task_add", request.access)
         text = self._source_text(request)
         title = _extract_labeled_value(text, ("task", "タスク", "title", "件名"))
         title = title or _task_title(_first_nonempty_line(text) or text)
         if not title:
-            raise ValueError("task_add requires a task title.")
+            return WorkResponse(
+                text="タスク名を確認してください。例: タスク: 会場予約",
+                detail_markdown="TaskCandidate は作成していません。",
+                metadata={
+                    "missing_fields": ["title"],
+                    "candidate_created": False,
+                },
+            )
         due_at = _extract_datetime(text)
+        due_mentioned = bool(re.search(r"(期限|due)[:：]?\s*\S+", text, flags=re.IGNORECASE))
+        if due_mentioned and due_at is None:
+            return WorkResponse(
+                text="期限の解釈を確認してください。YYYY-MM-DD 形式で指定してください。",
+                detail_markdown="TaskCandidate は作成していません。",
+                metadata={
+                    "ambiguous_fields": ["due_at"],
+                    "candidate_created": False,
+                },
+            )
         assignee = _extract_assignee(text)
+        priority = _extract_priority(text)
+        related_event_id = _extract_labeled_value(text, ("event", "event_id", "イベントID", "関連イベント"))
         candidate = self.repository.save_task_candidate(
-            TaskCandidate(
-                id=stable_hash(
-                    f"task-candidate:manual:{title}:{assignee or ''}:{due_at.isoformat() if due_at else ''}"
-                )[:32],
-                title=_clean_title(title),
-                description=text.strip() or None,
-                proposed_assignee_user_id=assignee,
-                proposed_due_at=due_at,
-                confidence="high",
-                status="proposed",
-                created_by="user",
-                metadata={"source": "task_add", "created_by_user_id": request.access.user_id},
+            self._annotate_task_duplicate(
+                TaskCandidate(
+                    id=stable_hash(
+                        f"task-candidate:manual:{title}:{assignee or ''}:{due_at.isoformat() if due_at else ''}:{related_event_id or ''}"
+                    )[:32],
+                    title=_clean_title(title),
+                    description=text.strip() or None,
+                    proposed_assignee_user_id=assignee,
+                    proposed_due_at=due_at,
+                    related_event_id=related_event_id,
+                    confidence="high",
+                    status="proposed",
+                    created_by="user",
+                    metadata={
+                        "source": "task_add",
+                        "created_by_user_id": request.access.user_id,
+                        "priority": priority,
+                    },
+                )
             )
         )
         self._audit("workflow.task_add", request.access, "proposed", candidate.id)
@@ -291,9 +363,17 @@ class WorkflowService:
         )
 
     def task_list(self, request: WorkRequest) -> WorkResponse:
-        status = _extract_labeled_value(request.instruction, ("status", "状態"))
-        tasks = self.repository.list_tasks(status=status)
+        if not self.task_access_policy.can_list(request.access):
+            return self._task_forbidden_response("workflow.task_list", request.access)
+        conditions = _extract_task_list_conditions(request.instruction)
+        tasks = self.repository.list_tasks(**conditions)
         candidates = self.repository.list_task_candidates(status="proposed")
+        if conditions.get("related_event_id"):
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.related_event_id == conditions["related_event_id"]
+            ]
         detail = "\n\n".join(
             [
                 self._format_tasks(tasks),
@@ -305,6 +385,7 @@ class WorkflowService:
             detail_markdown=detail,
             tasks=tuple(tasks),
             task_candidates=tuple(candidates),
+            metadata={"filters": _serializable_task_filters(conditions)},
         )
 
     def task_done(self, request: WorkRequest) -> WorkResponse:
@@ -317,6 +398,8 @@ class WorkflowService:
         task = self.repository.get_task(target_id)
         if task is None:
             raise KeyError(target_id)
+        if not self.task_access_policy.can_update_task_status(request.access, task):
+            return self._task_forbidden_response("workflow.task_done", request.access)
         stored = self.repository.save_task(
             replace(
                 task,
@@ -333,6 +416,186 @@ class WorkflowService:
             text=f"Task を done にしました: {stored.title}",
             detail_markdown=self._format_tasks([stored]),
             tasks=(stored,),
+        )
+
+    def task_update(self, request: WorkRequest) -> WorkResponse:
+        target_id = request.target.strip() or _extract_labeled_value(
+            request.instruction,
+            ("task_id", "id", "タスクID"),
+        )
+        if not target_id:
+            raise ValueError("task_update requires target task id.")
+        task = self.repository.get_task(target_id)
+        if task is None:
+            raise KeyError(target_id)
+        if not self.task_access_policy.can_update_task_status(request.access, task):
+            return self._task_forbidden_response("workflow.task_update", request.access)
+        after = _task_payload_for_change(task)
+        title = _extract_labeled_value(request.instruction, ("title", "タイトル", "件名"))
+        assignee = _extract_assignee(request.instruction)
+        due_at = _extract_datetime(request.instruction)
+        status = _extract_task_status(request.instruction)
+        priority = _extract_priority(request.instruction)
+        description = _extract_labeled_value(request.instruction, ("description", "説明", "本文"))
+        if title:
+            after["title"] = _clean_title(title)
+        if assignee:
+            after["assignee_user_id"] = assignee
+        if due_at:
+            after["due_at"] = due_at.isoformat()
+        if status:
+            after["status"] = status
+        if priority:
+            after["priority"] = priority
+        if description:
+            after["description"] = description
+        if after == _task_payload_for_change(task):
+            return WorkResponse(
+                text="変更内容を解釈できませんでした。title/status/担当/期限/priority などを指定してください。",
+                metadata={"candidate_created": False, "missing_fields": ["change"]},
+            )
+        candidate = self.repository.save_task_change_candidate(
+            TaskChangeCandidate(
+                id=stable_hash(f"task-change:update:{target_id}:{json.dumps(after, sort_keys=True, default=str)}")[:32],
+                task_id=target_id,
+                operation="update",
+                before=_task_payload_for_change(task),
+                after=after,
+                reason=request.instruction,
+                confidence="high",
+                status="proposed",
+                created_by="user",
+                metadata={"source": "task_update", "created_by_user_id": request.access.user_id},
+            )
+        )
+        self._audit("workflow.task_update", request.access, "proposed", candidate.id)
+        return WorkResponse(
+            text=f"Task変更候補を作成しました。承認されるまで正本は変更されません: {target_id}",
+            detail_markdown=self._format_task_change_candidates([candidate]),
+            task_change_candidates=(candidate,),
+        )
+
+    def task_delete(self, request: WorkRequest) -> WorkResponse:
+        target_id = request.target.strip() or _extract_labeled_value(
+            request.instruction,
+            ("task_id", "id", "タスクID"),
+        )
+        if not target_id:
+            raise ValueError("task_delete requires target task id.")
+        task = self.repository.get_task(target_id)
+        if task is None:
+            raise KeyError(target_id)
+        if not self.task_access_policy.can_update_task_status(request.access, task):
+            return self._task_forbidden_response("workflow.task_delete", request.access)
+        candidate = self.repository.save_task_change_candidate(
+            TaskChangeCandidate(
+                id=stable_hash(f"task-change:delete:{target_id}:{request.instruction}")[:32],
+                task_id=target_id,
+                operation="delete",
+                before=_task_payload_for_change(task),
+                after={"status": "deleted"},
+                reason=request.instruction,
+                confidence="high",
+                status="proposed",
+                created_by="user",
+                metadata={"source": "task_delete", "created_by_user_id": request.access.user_id},
+            )
+        )
+        self._audit("workflow.task_delete", request.access, "proposed", candidate.id)
+        return WorkResponse(
+            text=f"Task削除候補を作成しました。承認されるまで正本は削除されません: {target_id}",
+            detail_markdown=self._format_task_change_candidates([candidate]),
+            task_change_candidates=(candidate,),
+        )
+
+    def task_notify_due(self, request: WorkRequest) -> WorkResponse:
+        if not request.access.is_admin:
+            return self._task_forbidden_response("workflow.task_notify_due", request.access)
+        before_days = _extract_int_labeled_value(request.instruction, ("days", "日数")) or 1
+        tasks = self.repository.list_tasks()
+        selected = self.task_notification_planner.due_notifications(
+            tasks=tasks,
+            before_days=before_days,
+        )
+        stored: list[Task] = []
+        now_text = datetime.now(UTC).isoformat()
+        for task in selected:
+            key = "overdue" if task.due_at and task.due_at < datetime.now(UTC) else "due_soon"
+            notifications = dict(task.metadata.get("notifications") or {})
+            notifications[key] = now_text
+            stored.append(
+                self.repository.save_task(
+                    replace(
+                        task,
+                        metadata={
+                            **task.metadata,
+                            "notifications": notifications,
+                        },
+                    )
+                )
+            )
+        self._audit("workflow.task_notify_due", request.access, "succeeded", "tasks")
+        return WorkResponse(
+            text=f"通知対象 Task は {len(stored)} 件です。",
+            detail_markdown=self._format_tasks(stored),
+            tasks=tuple(stored),
+            metadata={"notification_count": len(stored), "before_days": before_days},
+        )
+
+    def task_batch_approval(self, request: WorkRequest) -> WorkResponse:
+        if not request.access.is_admin:
+            return self._task_forbidden_response("workflow.task_batch_approval", request.access)
+        candidates = [
+            candidate
+            for candidate in self.repository.list_task_candidates(status="proposed")
+            if candidate.created_by == "agent"
+        ]
+        change_candidates = self.repository.list_task_change_candidates(status="proposed")
+        idempotency_key = stable_hash(
+            "task-batch:"
+            + ":".join(candidate.id for candidate in candidates)
+            + ":"
+            + ":".join(candidate.id for candidate in change_candidates)
+        )[:32]
+        existing = self.repository.get_task_approval_batch(idempotency_key)
+        if existing is not None:
+            batch = existing
+        else:
+            batch = self.repository.save_task_approval_batch(
+                TaskApprovalBatch(
+                    id=idempotency_key,
+                    candidate_ids=tuple(candidate.id for candidate in candidates),
+                    change_candidate_ids=tuple(candidate.id for candidate in change_candidates),
+                    period_start=None,
+                    period_end=datetime.now(UTC),
+                    notification_channel_id=_extract_labeled_value(
+                        request.instruction,
+                        ("channel", "channel_id", "通知先"),
+                    ),
+                    status="pending",
+                    metadata={
+                        "source": "task_batch_approval",
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+            )
+        detail = "\n\n".join(
+            [
+                self._format_task_candidates(candidates),
+                self._format_task_change_candidates(change_candidates),
+            ]
+        )
+        self._audit("workflow.task_batch_approval", request.access, "succeeded", batch.id)
+        return WorkResponse(
+            text=(
+                f"Task承認batchを作成しました: {batch.id} "
+                f"候補 {len(candidates)} 件 / 変更候補 {len(change_candidates)} 件"
+            ),
+            detail_markdown=detail,
+            task_candidates=tuple(candidates),
+            task_change_candidates=tuple(change_candidates),
+            task_approval_batches=(batch,),
+            metadata={"batch_id": batch.id},
         )
 
     def event_add(self, request: WorkRequest) -> WorkResponse:
@@ -684,21 +947,46 @@ class WorkflowService:
         if normalized_type != "task":
             raise ValueError("Unsupported approval target type.")
         if normalized_action == "list":
+            if not self.task_access_policy.can_list(access):
+                return self._task_forbidden_response("workflow.approval.list", access)
             candidates = self.repository.list_task_candidates(status="proposed")
+            change_candidates = self.repository.list_task_change_candidates(status="proposed")
             return WorkResponse(
-                text=f"承認待ち TaskCandidate は {len(candidates)} 件です。",
-                detail_markdown=self._format_task_candidates(candidates),
+                text=(
+                    f"承認待ち TaskCandidate は {len(candidates)} 件、"
+                    f"Task変更候補は {len(change_candidates)} 件です。"
+                ),
+                detail_markdown="\n\n".join(
+                    [
+                        self._format_task_candidates(candidates),
+                        self._format_task_change_candidates(change_candidates),
+                    ]
+                ),
                 task_candidates=tuple(candidates),
+                task_change_candidates=tuple(change_candidates),
             )
         if normalized_action == "show":
             candidate = self.repository.get_task_candidate(target_id) if target_id else None
+            change_candidate = (
+                self.repository.get_task_change_candidate(target_id) if target_id else None
+            )
             task = self.repository.get_task(target_id) if target_id else None
             approvals = self.repository.list_approvals(target_type="task", target_id=target_id)
-            if candidate is None and task is None:
+            if candidate is None and task is None and change_candidate is None:
                 raise KeyError(target_id)
+            if candidate and not self.task_access_policy.can_show_candidate(access, candidate):
+                return self._task_forbidden_response("workflow.approval.show", access)
+            if task and not self.task_access_policy.can_show_task(access, task):
+                return self._task_forbidden_response("workflow.approval.show", access)
+            if change_candidate:
+                target_task = self.repository.get_task(change_candidate.task_id)
+                if target_task and not self.task_access_policy.can_show_task(access, target_task):
+                    return self._task_forbidden_response("workflow.approval.show", access)
             details = []
             if candidate is not None:
                 details.append(self._format_task_candidates([candidate]))
+            if change_candidate is not None:
+                details.append(self._format_task_change_candidates([change_candidate]))
             if task is not None:
                 details.append(self._format_tasks([task]))
             if approvals:
@@ -707,15 +995,35 @@ class WorkflowService:
                 text=f"task approval target を表示します: {target_id}",
                 detail_markdown="\n\n".join(details),
                 task_candidates=(candidate,) if candidate else tuple(),
+                task_change_candidates=(change_candidate,) if change_candidate else tuple(),
                 tasks=(task,) if task else tuple(),
                 approvals=tuple(approvals),
             )
         if normalized_action == "edit":
-            candidate, record = self._edit_task_candidate(
-                target_id=target_id,
-                comment=comment,
-                access=access,
-            )
+            if self.repository.get_task_change_candidate(target_id) is not None:
+                try:
+                    change_candidate, record = self._edit_task_change_candidate(
+                        target_id=target_id,
+                        comment=comment,
+                        access=access,
+                    )
+                except PermissionError:
+                    return self._task_forbidden_response("workflow.approval.edit", access)
+                self._audit("workflow.approval.edit", access, "succeeded", target_id)
+                return WorkResponse(
+                    text=f"Task変更候補を編集しました: {change_candidate.task_id}",
+                    detail_markdown=self._format_task_change_candidates([change_candidate]),
+                    task_change_candidates=(change_candidate,),
+                    approvals=(record,),
+                )
+            try:
+                candidate, record = self._edit_task_candidate(
+                    target_id=target_id,
+                    comment=comment,
+                    access=access,
+                )
+            except PermissionError:
+                return self._task_forbidden_response("workflow.approval.edit", access)
             self._audit("workflow.approval.edit", access, "succeeded", target_id)
             return WorkResponse(
                 text=f"TaskCandidate を編集しました: {candidate.title}",
@@ -724,19 +1032,64 @@ class WorkflowService:
                 approvals=(record,),
             )
         if normalized_action == "approve":
-            task, record = self._approve_task_candidate(
-                target_id=target_id,
-                comment=comment,
-                access=access,
-            )
+            change_candidate = self.repository.get_task_change_candidate(target_id)
+            try:
+                if change_candidate is not None:
+                    task, record = self._approve_task_change_candidate(
+                        target_id=target_id,
+                        comment=comment,
+                        access=access,
+                    )
+                else:
+                    task, record = self._approve_task_candidate(
+                        target_id=target_id,
+                        comment=comment,
+                        access=access,
+                    )
+            except PermissionError:
+                return self._task_forbidden_response("workflow.approval.approve", access)
             self._audit("workflow.approval.approve", access, "succeeded", target_id)
             return WorkResponse(
-                text=f"TaskCandidate を承認し Task 正本に登録しました: {task.title}",
+                text=f"Task承認を反映しました: {task.title}",
                 detail_markdown=self._format_tasks([task]),
                 tasks=(task,),
                 approvals=(record,),
             )
         if normalized_action == "reject":
+            change_candidate = self.repository.get_task_change_candidate(target_id)
+            if change_candidate is not None:
+                if not self.task_access_policy.can_approve(access):
+                    return self._task_forbidden_response("workflow.approval.reject", access)
+                rejected_change = self.repository.update_task_change_candidate_status(
+                    candidate_id=target_id,
+                    status="rejected",
+                    metadata={"rejected_by": access.user_id, "rejection_comment": comment},
+                )
+                record = self.repository.save_approval(
+                    ApprovalRecord(
+                        id=str(uuid4()),
+                        target_type="task",
+                        target_id=target_id,
+                        action="reject",
+                        actor_id=access.user_id,
+                        comment=comment,
+                        before={},
+                        after=asdict(rejected_change),
+                        evidence=rejected_change.evidence,
+                    )
+                )
+                self._audit("workflow.approval.reject", access, "succeeded", target_id)
+                return WorkResponse(
+                    text=f"Task変更候補を却下しました: {rejected_change.task_id}",
+                    detail_markdown=self._format_task_change_candidates([rejected_change]),
+                    task_change_candidates=(rejected_change,),
+                    approvals=(record,),
+                )
+            candidate_for_policy = self.repository.get_task_candidate(target_id)
+            if candidate_for_policy is None:
+                raise KeyError(target_id)
+            if not self.task_access_policy.can_reject_candidate(access, candidate_for_policy):
+                return self._task_forbidden_response("workflow.approval.reject", access)
             candidate = self.repository.update_task_candidate_status(
                 candidate_id=target_id,
                 status="rejected",
@@ -1209,6 +1562,8 @@ class WorkflowService:
             raise KeyError(target_id)
         if candidate.status not in {"proposed", "approved"}:
             raise ValueError(f"TaskCandidate is not editable: {candidate.status}")
+        if not self.task_access_policy.can_edit_candidate(access, candidate):
+            raise PermissionError("TaskCandidate edit is not authorized.")
         title = _extract_labeled_value(comment, ("title", "タイトル", "件名"))
         assignee = _extract_assignee(comment)
         due_at = _extract_datetime(comment) or candidate.proposed_due_at
@@ -1220,6 +1575,66 @@ class WorkflowService:
                 description=description or candidate.description,
                 proposed_assignee_user_id=assignee or candidate.proposed_assignee_user_id,
                 proposed_due_at=due_at,
+                metadata={
+                    **candidate.metadata,
+                    "edited_by": access.user_id,
+                    "edit_comment": comment,
+                },
+            )
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="task",
+                target_id=target_id,
+                action="edit",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after=asdict(edited),
+                evidence=edited.evidence,
+            )
+        )
+        return edited, record
+
+    def _edit_task_change_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[TaskChangeCandidate, ApprovalRecord]:
+        candidate = self.repository.get_task_change_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskChangeCandidate is not editable: {candidate.status}")
+        task = self.repository.get_task(candidate.task_id)
+        if task is None:
+            raise KeyError(candidate.task_id)
+        if not self.task_access_policy.can_update_task_status(access, task):
+            raise PermissionError("TaskChangeCandidate edit is not authorized.")
+        after = dict(candidate.after)
+        title = _extract_labeled_value(comment, ("title", "タイトル", "件名"))
+        assignee = _extract_assignee(comment)
+        due_at = _extract_datetime(comment)
+        status = _extract_task_status(comment)
+        priority = _extract_priority(comment)
+        if title:
+            after["title"] = _clean_title(title)
+        if assignee:
+            after["assignee_user_id"] = assignee
+        if due_at:
+            after["due_at"] = due_at.isoformat()
+        if status:
+            after["status"] = status
+        if priority:
+            after["priority"] = priority
+        edited = self.repository.save_task_change_candidate(
+            replace(
+                candidate,
+                after=after,
+                reason=comment or candidate.reason,
                 metadata={
                     **candidate.metadata,
                     "edited_by": access.user_id,
@@ -1254,6 +1669,8 @@ class WorkflowService:
             raise KeyError(target_id)
         if candidate.status not in {"proposed", "approved"}:
             raise ValueError(f"TaskCandidate is not approvable: {candidate.status}")
+        if not self.task_access_policy.can_approve(access):
+            raise PermissionError("TaskCandidate approve is not authorized.")
         task = self.repository.save_task(
             Task(
                 id=stable_hash(f"task:{candidate.id}")[:32],
@@ -1288,6 +1705,66 @@ class WorkflowService:
         )
         return task, record
 
+    def _approve_task_change_candidate(
+        self,
+        *,
+        target_id: str,
+        comment: str,
+        access: AccessContext,
+    ) -> tuple[Task, ApprovalRecord]:
+        candidate = self.repository.get_task_change_candidate(target_id)
+        if candidate is None:
+            raise KeyError(target_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskChangeCandidate is not approvable: {candidate.status}")
+        if not self.task_access_policy.can_approve(access):
+            raise PermissionError("TaskChangeCandidate approve is not authorized.")
+        task = self.repository.get_task(candidate.task_id)
+        if task is None:
+            raise KeyError(candidate.task_id)
+        if candidate.operation == "delete":
+            updated = replace(
+                task,
+                status="deleted",
+                metadata={
+                    **task.metadata,
+                    "deleted_by": access.user_id,
+                    "delete_candidate_id": candidate.id,
+                    "delete_reason": candidate.reason,
+                },
+            )
+        else:
+            updated = _replace_task_from_payload(
+                task,
+                candidate.after,
+                metadata={
+                    **task.metadata,
+                    "updated_by": access.user_id,
+                    "change_candidate_id": candidate.id,
+                    "change_reason": candidate.reason,
+                },
+            )
+        stored = self.repository.save_task(updated)
+        merged = self.repository.update_task_change_candidate_status(
+            candidate_id=candidate.id,
+            status="merged",
+            metadata={"merged_task_id": stored.id, "approved_by": access.user_id},
+        )
+        record = self.repository.save_approval(
+            ApprovalRecord(
+                id=str(uuid4()),
+                target_type="task",
+                target_id=candidate.id,
+                action="approve",
+                actor_id=access.user_id,
+                comment=comment,
+                before=asdict(candidate),
+                after={"candidate": asdict(merged), "task": asdict(stored)},
+                evidence=candidate.evidence,
+            )
+        )
+        return stored, record
+
     def _extract_and_store_candidates(
         self,
         text: str,
@@ -1295,12 +1772,17 @@ class WorkflowService:
         *,
         evidence: tuple[Citation, ...],
         metadata: dict[str, Any],
-    ) -> list[TaskCandidate]:
-        candidates = self._extract_task_candidates(text, evidence=evidence, metadata=metadata)
+    ) -> tuple[list[TaskCandidate], dict[str, Any]]:
+        result = self.task_extractor.extract(
+            text=text,
+            evidence=evidence,
+            access=access,
+            metadata=metadata,
+        )
         stored: list[TaskCandidate] = []
-        for candidate in candidates:
-            stored.append(self.repository.save_task_candidate(candidate))
-        return stored
+        for candidate in result.candidates:
+            stored.append(self.repository.save_task_candidate(self._annotate_task_duplicate(candidate)))
+        return stored, result.metadata
 
     def _extract_task_candidates(
         self,
@@ -1526,9 +2008,24 @@ class WorkflowService:
         for candidate in candidates:
             due = candidate.proposed_due_at.isoformat() if candidate.proposed_due_at else "未定"
             assignee = candidate.proposed_assignee_user_id or "未定"
+            priority = candidate.metadata.get("priority") or "normal"
+            duplicate_count = len(candidate.metadata.get("duplicate_candidates") or [])
+            duplicate_note = f" / duplicates: {duplicate_count}" if duplicate_count else ""
             lines.append(
-                f"- `{candidate.id}` {candidate.title} / 担当: {assignee} / 期限: {due} / status: {candidate.status} / confidence: {candidate.confidence}"
+                f"- `{candidate.id}` {candidate.title} / 担当: {assignee} / 期限: {due} / priority: {priority} / status: {candidate.status} / confidence: {candidate.confidence}{duplicate_note}"
             )
+        return "\n".join(lines)
+
+    def _format_task_change_candidates(self, candidates: list[TaskChangeCandidate]) -> str:
+        if not candidates:
+            return "TaskChangeCandidate はありません。"
+        lines = ["# TaskChangeCandidate"]
+        for candidate in candidates:
+            lines.append(
+                f"- `{candidate.id}` task={candidate.task_id} / operation: {candidate.operation} / status: {candidate.status} / confidence: {candidate.confidence}"
+            )
+            if candidate.reason:
+                lines.append(f"  - reason: {_truncate(candidate.reason, 160)}")
         return "\n".join(lines)
 
     def _format_tasks(self, tasks: list[Task]) -> str:
@@ -1645,6 +2142,21 @@ class WorkflowService:
             )
         )
 
+    def _annotate_task_duplicate(self, candidate: TaskCandidate) -> TaskCandidate:
+        return self.task_duplicate_detector.annotate(
+            candidate,
+            existing_candidates=self.repository.list_task_candidates(),
+            existing_tasks=self.repository.list_tasks(include_deleted=False),
+        )
+
+    def _task_forbidden_response(self, action: str, access: AccessContext) -> WorkResponse:
+        self._audit(action, access, "denied", "task")
+        return WorkResponse(
+            text="権限がありません。対象情報の有無は表示しません。",
+            detail_markdown="",
+            metadata=self.task_access_policy.forbidden_response_metadata(),
+        )
+
     def _finish_workflow_run(
         self,
         run: WorkflowRun | None,
@@ -1722,13 +2234,122 @@ def _extract_assignee(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _extract_priority(text: str) -> str:
+    match = re.search(r"(?:priority|優先度)[:：]\s*([A-Za-z\u3040-\u30ff\u3400-\u9fff]+)", text, flags=re.IGNORECASE)
+    value = match.group(1) if match else _extract_labeled_value(text, ("priority", "優先度"))
+    lowered = (value or text or "").lower()
+    if "urgent" in lowered or "至急" in lowered:
+        return "urgent"
+    if "high" in lowered or "高" in lowered:
+        return "high"
+    if "low" in lowered or "低" in lowered:
+        return "low"
+    if "normal" in lowered or "通常" in lowered:
+        return "normal"
+    return "normal"
+
+
+def _extract_task_status(text: str) -> str | None:
+    match = re.search(r"(?:status|状態)[:：]\s*([A-Za-z_]+|未着手|対応中|保留|完了)", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1).lower()
+    mapping = {
+        "未着手": "todo",
+        "対応中": "doing",
+        "保留": "blocked",
+        "完了": "done",
+    }
+    return mapping.get(value, value)
+
+
+def _extract_task_list_conditions(text: str) -> dict[str, object]:
+    status = _extract_task_status(text)
+    assignee = _extract_assignee(text) or _extract_labeled_value(text, ("assignee", "担当"))
+    related_event_id = _extract_labeled_value(text, ("event", "event_id", "イベントID", "関連イベント"))
+    priority = _extract_labeled_value(text, ("priority", "優先度"))
+    due_to = _extract_datetime(text) if re.search(r"(期限|due|まで)", text, flags=re.IGNORECASE) else None
+    conditions: dict[str, object] = {}
+    if status:
+        conditions["status"] = status
+    if assignee:
+        conditions["assignee_user_id"] = assignee.lstrip("@")
+    if related_event_id:
+        conditions["related_event_id"] = related_event_id
+    if priority:
+        conditions["priority"] = priority.lower()
+    if due_to:
+        conditions["due_to"] = due_to
+    return conditions
+
+
+def _serializable_task_filters(filters: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value.isoformat() if hasattr(value, "isoformat") else value
+        for key, value in filters.items()
+    }
+
+
+def _extract_int_labeled_value(text: str, labels: tuple[str, ...]) -> int | None:
+    value = _extract_labeled_value(text, labels)
+    if not value:
+        return None
+    match = re.search(r"\d+", value)
+    return int(match.group(0)) if match else None
+
+
+def _task_payload_for_change(task: Task) -> dict[str, object]:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "assignee_user_id": task.assignee_user_id,
+        "due_at": task.due_at.isoformat() if task.due_at else None,
+        "related_event_id": task.related_event_id,
+        "status": task.status,
+        "priority": task.priority,
+    }
+
+
+def _replace_task_from_payload(
+    task: Task,
+    payload: dict[str, object],
+    *,
+    metadata: dict[str, Any],
+) -> Task:
+    due_at = payload.get("due_at")
+    parsed_due = task.due_at
+    if isinstance(due_at, datetime):
+        parsed_due = due_at
+    elif isinstance(due_at, str) and due_at:
+        parsed_due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+    return replace(
+        task,
+        title=str(payload.get("title") or task.title),
+        description=payload.get("description") and str(payload["description"]),
+        assignee_user_id=payload.get("assignee_user_id") and str(payload["assignee_user_id"]),
+        due_at=parsed_due,
+        related_event_id=payload.get("related_event_id") and str(payload["related_event_id"]),
+        status=str(payload.get("status") or task.status),
+        priority=str(payload.get("priority") or task.priority),
+        metadata=metadata,
+    )
+
+
 def _can_search_members(access: AccessContext) -> bool:
     roles = {role.lower() for role in access.role_ids}
     return access.is_admin or "admin" in roles or "organizer" in roles
 
 
 def _workflow_response_status(response: WorkResponse) -> str:
-    if response.server_operations or response.task_candidates or response.event_candidates or response.schedule_candidates:
+    if (
+        response.server_operations
+        or response.task_candidates
+        or response.task_change_candidates
+        or response.task_approval_batches
+        or response.event_candidates
+        or response.schedule_candidates
+    ):
         return "waiting_approval"
     if response.workflow_candidates:
         return "waiting_approval"
@@ -1811,7 +2432,7 @@ def _quote_lines(text: str, *, limit: int) -> list[str]:
 def _task_line(task: Task) -> str:
     due = task.due_at.isoformat() if task.due_at else "未定"
     assignee = task.assignee_user_id or "未定"
-    return f"- `{task.id}` {task.title} / 担当: {assignee} / 期限: {due} / status: {task.status}"
+    return f"- `{task.id}` {task.title} / 担当: {assignee} / 期限: {due} / priority: {task.priority} / status: {task.status}"
 
 
 def _event_line(event: Event | None) -> str:

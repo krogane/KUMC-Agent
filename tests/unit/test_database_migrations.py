@@ -177,6 +177,17 @@ class DatabaseMigrationsTests(unittest.TestCase):
         ):
             self.assertIn(f"create table if not exists {table}", sql)
 
+    def test_task_management_hardening_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "016_task_management_hardening.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
+            "task_change_candidates",
+            "task_approval_batches",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+        self.assertIn("idx_tasks_assignee_due", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

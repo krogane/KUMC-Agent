@@ -48,6 +48,38 @@ class Task:
 
 
 @dataclass(frozen=True)
+class TaskChangeCandidate:
+    id: str
+    task_id: str
+    operation: str
+    before: dict[str, Any] = field(default_factory=dict)
+    after: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    evidence: tuple[Citation, ...] = tuple()
+    confidence: str = "medium"
+    status: str = "proposed"
+    created_by: str = "user"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TaskApprovalBatch:
+    id: str
+    candidate_ids: tuple[str, ...] = tuple()
+    change_candidate_ids: tuple[str, ...] = tuple()
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    notification_channel_id: str | None = None
+    notification_message_id: str | None = None
+    status: str = "pending"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Event:
     id: str
     title: str
@@ -155,6 +187,8 @@ class WorkResponse:
     text: str
     detail_markdown: str = ""
     task_candidates: tuple[TaskCandidate, ...] = tuple()
+    task_change_candidates: tuple[TaskChangeCandidate, ...] = tuple()
+    task_approval_batches: tuple[TaskApprovalBatch, ...] = tuple()
     event_candidates: tuple[EventCandidate, ...] = tuple()
     schedule_candidates: tuple[ScheduleCandidate, ...] = tuple()
     workflow_candidates: tuple[WorkflowCandidate, ...] = tuple()

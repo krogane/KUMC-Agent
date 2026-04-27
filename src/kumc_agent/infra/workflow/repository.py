@@ -15,6 +15,8 @@ from kumc_agent.domain.models.workflow import (
     ScheduleCandidate,
     ScheduleEvent,
     Task,
+    TaskApprovalBatch,
+    TaskChangeCandidate,
     TaskCandidate,
 )
 from kumc_agent.infra.database.postgres import PostgresClient
@@ -30,7 +32,53 @@ class WorkflowRepository(Protocol):
     def get_task_candidate(self, candidate_id: str) -> TaskCandidate | None:
         ...
 
-    def list_task_candidates(self, *, status: str | None = None) -> list[TaskCandidate]:
+    def list_task_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        related_event_id: str | None = None,
+        confidence: str | None = None,
+    ) -> list[TaskCandidate]:
+        ...
+
+    def list_task_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        task_id: str | None = None,
+    ) -> list[TaskChangeCandidate]:
+        ...
+
+    def save_task_change_candidate(
+        self,
+        candidate: TaskChangeCandidate,
+    ) -> TaskChangeCandidate:
+        ...
+
+    def get_task_change_candidate(self, candidate_id: str) -> TaskChangeCandidate | None:
+        ...
+
+    def update_task_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskChangeCandidate:
+        ...
+
+    def save_task_approval_batch(self, batch: TaskApprovalBatch) -> TaskApprovalBatch:
+        ...
+
+    def get_task_approval_batch(self, batch_id: str) -> TaskApprovalBatch | None:
+        ...
+
+    def list_task_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[TaskApprovalBatch]:
         ...
 
     def update_task_candidate_status(
@@ -53,6 +101,11 @@ class WorkflowRepository(Protocol):
         *,
         status: str | None = None,
         related_event_id: str | None = None,
+        assignee_user_id: str | None = None,
+        due_from: datetime | None = None,
+        due_to: datetime | None = None,
+        priority: str | None = None,
+        include_deleted: bool = False,
     ) -> list[Task]:
         ...
 
@@ -152,7 +205,14 @@ class FileWorkflowRepository:
             _task_candidate_from_payload,
         ).get(candidate_id)
 
-    def list_task_candidates(self, *, status: str | None = None) -> list[TaskCandidate]:
+    def list_task_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        related_event_id: str | None = None,
+        confidence: str | None = None,
+    ) -> list[TaskCandidate]:
         candidates = list(
             _latest_by_id(
                 self.root_dir / "task_candidates.jsonl",
@@ -161,7 +221,95 @@ class FileWorkflowRepository:
         )
         if status:
             candidates = [candidate for candidate in candidates if candidate.status == status]
+        if created_by:
+            candidates = [candidate for candidate in candidates if candidate.created_by == created_by]
+        if related_event_id:
+            candidates = [
+                candidate for candidate in candidates if candidate.related_event_id == related_event_id
+            ]
+        if confidence:
+            candidates = [candidate for candidate in candidates if candidate.confidence == confidence]
         return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
+
+    def save_task_change_candidate(
+        self,
+        candidate: TaskChangeCandidate,
+    ) -> TaskChangeCandidate:
+        stored = _touch(candidate)
+        _append_jsonl(
+            self.root_dir / "task_change_candidates.jsonl",
+            _task_change_candidate_payload(stored),
+        )
+        return stored
+
+    def get_task_change_candidate(self, candidate_id: str) -> TaskChangeCandidate | None:
+        return _latest_by_id(
+            self.root_dir / "task_change_candidates.jsonl",
+            _task_change_candidate_from_payload,
+        ).get(candidate_id)
+
+    def list_task_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        task_id: str | None = None,
+    ) -> list[TaskChangeCandidate]:
+        candidates = list(
+            _latest_by_id(
+                self.root_dir / "task_change_candidates.jsonl",
+                _task_change_candidate_from_payload,
+            ).values()
+        )
+        if status:
+            candidates = [candidate for candidate in candidates if candidate.status == status]
+        if task_id:
+            candidates = [candidate for candidate in candidates if candidate.task_id == task_id]
+        return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
+
+    def update_task_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskChangeCandidate:
+        candidate = self.get_task_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_task_change_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def save_task_approval_batch(self, batch: TaskApprovalBatch) -> TaskApprovalBatch:
+        stored = _touch(batch)
+        _append_jsonl(
+            self.root_dir / "task_approval_batches.jsonl",
+            _task_approval_batch_payload(stored),
+        )
+        return stored
+
+    def get_task_approval_batch(self, batch_id: str) -> TaskApprovalBatch | None:
+        return _latest_by_id(
+            self.root_dir / "task_approval_batches.jsonl",
+            _task_approval_batch_from_payload,
+        ).get(batch_id)
+
+    def list_task_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[TaskApprovalBatch]:
+        batches = list(
+            _latest_by_id(
+                self.root_dir / "task_approval_batches.jsonl",
+                _task_approval_batch_from_payload,
+            ).values()
+        )
+        if status:
+            batches = [batch for batch in batches if batch.status == status]
+        return sorted(batches, key=lambda batch: batch.created_at or _MIN_DT)
 
     def update_task_candidate_status(
         self,
@@ -192,12 +340,27 @@ class FileWorkflowRepository:
         *,
         status: str | None = None,
         related_event_id: str | None = None,
+        assignee_user_id: str | None = None,
+        due_from: datetime | None = None,
+        due_to: datetime | None = None,
+        priority: str | None = None,
+        include_deleted: bool = False,
     ) -> list[Task]:
         tasks = list(_latest_by_id(self.root_dir / "tasks.jsonl", _task_from_payload).values())
+        if not include_deleted:
+            tasks = [task for task in tasks if task.status != "deleted"]
         if status:
             tasks = [task for task in tasks if task.status == status]
         if related_event_id:
             tasks = [task for task in tasks if task.related_event_id == related_event_id]
+        if assignee_user_id:
+            tasks = [task for task in tasks if task.assignee_user_id == assignee_user_id]
+        if due_from:
+            tasks = [task for task in tasks if task.due_at and task.due_at >= due_from]
+        if due_to:
+            tasks = [task for task in tasks if task.due_at and task.due_at <= due_to]
+        if priority:
+            tasks = [task for task in tasks if task.priority == priority]
         return sorted(tasks, key=lambda task: task.created_at or _MIN_DT)
 
     def save_event(self, event: Event) -> Event:
@@ -420,15 +583,180 @@ class PostgresWorkflowRepository:
         )
         return _task_candidate_from_row(rows[0]) if rows else None
 
-    def list_task_candidates(self, *, status: str | None = None) -> list[TaskCandidate]:
+    def list_task_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        related_event_id: str | None = None,
+        confidence: str | None = None,
+    ) -> list[TaskCandidate]:
+        where: list[str] = []
+        params: list[object] = []
+        if status:
+            where.append("status = %s")
+            params.append(status)
+        if created_by:
+            where.append("created_by = %s")
+            params.append(created_by)
+        if related_event_id:
+            where.append("related_event_id = %s")
+            params.append(related_event_id)
+        if confidence:
+            where.append("confidence = %s")
+            params.append(confidence)
+        sql = "select * from task_candidates"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by created_at asc"
+        rows = self._fetch(sql, tuple(params))
+        return [_task_candidate_from_row(row) for row in rows]
+
+    def save_task_change_candidate(
+        self,
+        candidate: TaskChangeCandidate,
+    ) -> TaskChangeCandidate:
+        stored = _touch(candidate)
+        payload = _task_change_candidate_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into task_change_candidates (
+                      id, task_id, operation, before_payload, after_payload,
+                      reason, evidence, confidence, status, created_by,
+                      metadata, created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      task_id = excluded.task_id,
+                      operation = excluded.operation,
+                      before_payload = excluded.before_payload,
+                      after_payload = excluded.after_payload,
+                      reason = excluded.reason,
+                      evidence = excluded.evidence,
+                      confidence = excluded.confidence,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        payload["task_id"],
+                        payload["operation"],
+                        json.dumps(payload["before"], ensure_ascii=False, default=str),
+                        json.dumps(payload["after"], ensure_ascii=False, default=str),
+                        payload["reason"],
+                        json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                        payload["confidence"],
+                        payload["status"],
+                        payload["created_by"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_task_change_candidate(self, candidate_id: str) -> TaskChangeCandidate | None:
+        rows = self._fetch("select * from task_change_candidates where id = %s", (candidate_id,))
+        return _task_change_candidate_from_row(rows[0]) if rows else None
+
+    def list_task_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        task_id: str | None = None,
+    ) -> list[TaskChangeCandidate]:
+        where: list[str] = []
+        params: list[object] = []
+        if status:
+            where.append("status = %s")
+            params.append(status)
+        if task_id:
+            where.append("task_id = %s")
+            params.append(task_id)
+        sql = "select * from task_change_candidates"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by created_at asc"
+        return [_task_change_candidate_from_row(row) for row in self._fetch(sql, tuple(params))]
+
+    def update_task_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskChangeCandidate:
+        candidate = self.get_task_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_task_change_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def save_task_approval_batch(self, batch: TaskApprovalBatch) -> TaskApprovalBatch:
+        stored = _touch(batch)
+        payload = _task_approval_batch_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into task_approval_batches (
+                      id, candidate_ids, change_candidate_ids, period_start,
+                      period_end, notification_channel_id, notification_message_id,
+                      status, metadata, created_at, updated_at
+                    )
+                    values (%s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      candidate_ids = excluded.candidate_ids,
+                      change_candidate_ids = excluded.change_candidate_ids,
+                      period_start = excluded.period_start,
+                      period_end = excluded.period_end,
+                      notification_channel_id = excluded.notification_channel_id,
+                      notification_message_id = excluded.notification_message_id,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        json.dumps(payload["candidate_ids"], ensure_ascii=False),
+                        json.dumps(payload["change_candidate_ids"], ensure_ascii=False),
+                        _parse_datetime(payload["period_start"]),
+                        _parse_datetime(payload["period_end"]),
+                        payload["notification_channel_id"],
+                        payload["notification_message_id"],
+                        payload["status"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_task_approval_batch(self, batch_id: str) -> TaskApprovalBatch | None:
+        rows = self._fetch("select * from task_approval_batches where id = %s", (batch_id,))
+        return _task_approval_batch_from_row(rows[0]) if rows else None
+
+    def list_task_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[TaskApprovalBatch]:
         if status:
             rows = self._fetch(
-                "select * from task_candidates where status = %s order by created_at asc",
+                "select * from task_approval_batches where status = %s order by created_at asc",
                 (status,),
             )
         else:
-            rows = self._fetch("select * from task_candidates order by created_at asc", ())
-        return [_task_candidate_from_row(row) for row in rows]
+            rows = self._fetch("select * from task_approval_batches order by created_at asc", ())
+        return [_task_approval_batch_from_row(row) for row in rows]
 
     def update_task_candidate_status(
         self,
@@ -499,15 +827,35 @@ class PostgresWorkflowRepository:
         *,
         status: str | None = None,
         related_event_id: str | None = None,
+        assignee_user_id: str | None = None,
+        due_from: datetime | None = None,
+        due_to: datetime | None = None,
+        priority: str | None = None,
+        include_deleted: bool = False,
     ) -> list[Task]:
         where: list[str] = []
         params: list[object] = []
+        if not include_deleted:
+            where.append("status <> %s")
+            params.append("deleted")
         if status:
             where.append("status = %s")
             params.append(status)
         if related_event_id:
             where.append("related_event_id = %s")
             params.append(related_event_id)
+        if assignee_user_id:
+            where.append("assignee_user_id = %s")
+            params.append(assignee_user_id)
+        if due_from:
+            where.append("due_at >= %s")
+            params.append(due_from)
+        if due_to:
+            where.append("due_at <= %s")
+            params.append(due_to)
+        if priority:
+            where.append("priority = %s")
+            params.append(priority)
         sql = "select * from tasks"
         if where:
             sql += " where " + " and ".join(where)
@@ -1077,6 +1425,117 @@ def _task_from_row(row: tuple[object, ...]) -> Task:
             "metadata": row[10],
             "created_at": row[11],
             "updated_at": row[12],
+        }
+    )
+
+
+def _task_change_candidate_payload(candidate: TaskChangeCandidate) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "task_id": candidate.task_id,
+        "operation": candidate.operation,
+        "before": dict(candidate.before),
+        "after": dict(candidate.after),
+        "reason": candidate.reason,
+        "evidence": [_citation_payload(citation) for citation in candidate.evidence],
+        "confidence": candidate.confidence,
+        "status": candidate.status,
+        "created_by": candidate.created_by,
+        "metadata": dict(candidate.metadata),
+        "created_at": _dt(candidate.created_at),
+        "updated_at": _dt(candidate.updated_at),
+    }
+
+
+def _task_change_candidate_from_payload(payload: dict[str, object]) -> TaskChangeCandidate:
+    evidence = _json_payload(payload.get("evidence") or [])
+    return TaskChangeCandidate(
+        id=str(payload["id"]),
+        task_id=str(payload["task_id"]),
+        operation=str(payload.get("operation") or "update"),
+        before=dict(_json_payload(payload.get("before") or {})),
+        after=dict(_json_payload(payload.get("after") or {})),
+        reason=str(payload.get("reason") or ""),
+        evidence=tuple(_citation_from_payload(dict(item)) for item in evidence),
+        confidence=str(payload.get("confidence") or "medium"),
+        status=str(payload.get("status") or "proposed"),
+        created_by=str(payload.get("created_by") or "user"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _task_change_candidate_from_row(row: tuple[object, ...]) -> TaskChangeCandidate:
+    return _task_change_candidate_from_payload(
+        {
+            "id": row[0],
+            "task_id": row[1],
+            "operation": row[2],
+            "before": row[3],
+            "after": row[4],
+            "reason": row[5],
+            "evidence": row[6],
+            "confidence": row[7],
+            "status": row[8],
+            "created_by": row[9],
+            "metadata": row[10],
+            "created_at": row[11],
+            "updated_at": row[12],
+        }
+    )
+
+
+def _task_approval_batch_payload(batch: TaskApprovalBatch) -> dict[str, object]:
+    return {
+        "id": batch.id,
+        "candidate_ids": list(batch.candidate_ids),
+        "change_candidate_ids": list(batch.change_candidate_ids),
+        "period_start": _dt(batch.period_start),
+        "period_end": _dt(batch.period_end),
+        "notification_channel_id": batch.notification_channel_id,
+        "notification_message_id": batch.notification_message_id,
+        "status": batch.status,
+        "metadata": dict(batch.metadata),
+        "created_at": _dt(batch.created_at),
+        "updated_at": _dt(batch.updated_at),
+    }
+
+
+def _task_approval_batch_from_payload(payload: dict[str, object]) -> TaskApprovalBatch:
+    return TaskApprovalBatch(
+        id=str(payload["id"]),
+        candidate_ids=tuple(str(item) for item in _json_payload(payload.get("candidate_ids") or [])),
+        change_candidate_ids=tuple(
+            str(item) for item in _json_payload(payload.get("change_candidate_ids") or [])
+        ),
+        period_start=_parse_datetime(payload.get("period_start")),
+        period_end=_parse_datetime(payload.get("period_end")),
+        notification_channel_id=payload.get("notification_channel_id")
+        and str(payload["notification_channel_id"]),
+        notification_message_id=payload.get("notification_message_id")
+        and str(payload["notification_message_id"]),
+        status=str(payload.get("status") or "pending"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _task_approval_batch_from_row(row: tuple[object, ...]) -> TaskApprovalBatch:
+    return _task_approval_batch_from_payload(
+        {
+            "id": row[0],
+            "candidate_ids": row[1],
+            "change_candidate_ids": row[2],
+            "period_start": row[3],
+            "period_end": row[4],
+            "notification_channel_id": row[5],
+            "notification_message_id": row[6],
+            "status": row[7],
+            "metadata": row[8],
+            "created_at": row[9],
+            "updated_at": row[10],
         }
     )
 

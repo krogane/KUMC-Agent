@@ -1,0 +1,7 @@
+task_management:
+  approval_batch_interval_days: 7
+  due_soon_notice_days: 1
+  notification_channel_id: ""
+  admin_user_ids: []
+  admin_role_ids: []
+  prompt_name: task_extraction.md

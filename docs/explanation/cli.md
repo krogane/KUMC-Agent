@@ -281,6 +281,10 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 - `task_add`: タスク追加
 - `task_list`: タスク一覧
 - `task_done`: タスク完了
+- `task_update`: 正本 Task の変更候補を作成
+- `task_delete`: 正本 Task の論理削除候補を作成
+- `task_notify_due`: 期限前・期限超過通知対象を抽出し通知済み情報を記録
+- `task_batch_approval`: 自動抽出候補と変更候補をまとめ承認 batch に集約
 - `event_add`: イベント候補を作成
 - `event_list`: イベント一覧
 - `event_brief`: イベント概要
@@ -296,7 +300,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 
 入力は `WorkRequest` にまとめられ、`workflow.workflow.run(...)` に渡されます。
 結果は `_workflow_response_payload()` で JSON 向けに整形されます。
-`event_add` と `schedule_add` は正本を直接登録せず、`event_candidates` / `schedule_candidates` として返します。正本の `events` / `schedules` に入るのは、`approval --type event|schedule --action approve` で承認された後です。
+`task_add`、`task_extract`、`event_add`、`schedule_add` は正本を直接登録せず、候補として返します。Task 正本の変更・削除も `task_change_candidates` に保存され、承認されるまで `tasks` には反映されません。正本に入るのは、`approval --type task|event|schedule --action approve` で承認された後です。
+タスク系の診断情報、抽出器、重複検出結果、通知条件、batch id はトップレベルではなく `metadata` に入ります。
 `member_search` は organizer / admin 権限がない場合、対象情報の有無を示唆しない拒否応答を返します。
 
 ### `approval`
@@ -318,7 +323,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type event --ac
 - `edit`: 編集
 
 `work` と同じ workflow app context を使い、`workflow.workflow.approval(...)` を呼びます。
-`task`、`event`、`schedule` は候補を正本へ昇格できます。それ以外の type は現時点では承認記録のみを保存し、外部投稿、サーバー操作、会計確定などの副作用は実行しません。
+`task`、`event`、`schedule` は候補を正本へ昇格できます。`task` では `TaskCandidate` の承認に加え、`TaskChangeCandidate` の承認も扱います。変更候補は承認後に正本 Task を更新し、削除候補は物理削除ではなく `status=deleted` の論理削除として扱います。それ以外の type は現時点では承認記録のみを保存し、外部投稿、サーバー操作、会計確定などの副作用は実行しません。
 
 ### `automation`
 

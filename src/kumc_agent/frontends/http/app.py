@@ -34,6 +34,8 @@ def _dump_workflow_item(item: object) -> dict[str, object]:
         key: value.isoformat() if hasattr(value, "isoformat") else value
         for key, value in getattr(item, "__dict__", {}).items()
     }
+    if "metadata" in payload:
+        payload["metadata"] = _sanitize_payload_metadata(payload.get("metadata"))
     if "media_type" not in payload or "metadata" not in payload:
         return payload
     metadata = dict(payload.get("metadata") or {})
@@ -45,6 +47,16 @@ def _dump_workflow_item(item: object) -> dict[str, object]:
             metadata[key] = _compact_payload_text(_mask_payload_secret(value), limit)
     payload["metadata"] = metadata
     return payload
+
+
+def _sanitize_payload_metadata(value: object) -> dict[str, object]:
+    metadata = dict(value or {}) if isinstance(value, dict) else {}
+    for key in ("contexts", "context", "llm_prompt", "raw", "secret"):
+        metadata.pop(key, None)
+    for key, item in list(metadata.items()):
+        if isinstance(item, str):
+            metadata[key] = _compact_payload_text(_mask_payload_secret(item), 1200)
+    return metadata
 
 
 def _compact_payload_text(text: str, limit: int) -> str:
@@ -67,6 +79,8 @@ def _workflow_payload(response: object) -> dict[str, object]:
         "text": getattr(response, "text", ""),
         "detail_markdown": getattr(response, "detail_markdown", ""),
         "task_candidates": _dump_items(getattr(response, "task_candidates", ())),
+        "task_change_candidates": _dump_items(getattr(response, "task_change_candidates", ())),
+        "task_approval_batches": _dump_items(getattr(response, "task_approval_batches", ())),
         "event_candidates": _dump_items(getattr(response, "event_candidates", ())),
         "schedule_candidates": _dump_items(getattr(response, "schedule_candidates", ())),
         "workflow_candidates": _dump_items(getattr(response, "workflow_candidates", ())),
@@ -79,7 +93,7 @@ def _workflow_payload(response: object) -> dict[str, object]:
         "approvals": _dump_items(getattr(response, "approvals", ())),
         "server_operations": _dump_items(getattr(response, "server_operations", ())),
         "warnings": list(getattr(response, "warnings", ())),
-        "metadata": dict(getattr(response, "metadata", {}) or {}),
+        "metadata": _sanitize_payload_metadata(getattr(response, "metadata", {}) or {}),
     }
 
 

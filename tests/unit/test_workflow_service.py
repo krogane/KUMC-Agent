@@ -16,13 +16,43 @@ from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.workflow import FileWorkflowRepository
 
 
+class FakeTaskLLM:
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> str:
+        return """
+        {
+          "tasks": [
+            {
+              "title": "新歓資料を作成",
+              "description": "TODO: 新歓資料を作成 担当: alice 期限: 2026-05-01",
+              "assignee_user_id": "alice",
+              "due_at": "2026-05-01T00:00:00+00:00",
+              "related_event_id": null,
+              "priority": "high",
+              "confidence": "high",
+              "evidence": ["input"]
+            }
+          ]
+        }
+        """
+
+
 class WorkflowServiceTests(unittest.TestCase):
-    def _service(self, root: Path) -> WorkflowService:
-        return WorkflowService(repository=FileWorkflowRepository(root_dir=root / "workflow"))
+    def _service(self, root: Path, *, llm: object | None = None) -> WorkflowService:
+        return WorkflowService(
+            repository=FileWorkflowRepository(root_dir=root / "workflow"),
+            llm=llm,
+        )
 
     def test_task_extract_creates_candidate_not_task_until_approved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(Path(tmp))
+            service = self._service(Path(tmp), llm=FakeTaskLLM())
 
             response = service.run(
                 WorkRequest(
@@ -52,7 +82,7 @@ class WorkflowServiceTests(unittest.TestCase):
 
     def test_meeting_minutes_registers_task_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(Path(tmp))
+            service = self._service(Path(tmp), llm=FakeTaskLLM())
 
             response = service.run(
                 WorkRequest(
@@ -100,7 +130,12 @@ class WorkflowServiceTests(unittest.TestCase):
                 target_id=candidate.id,
                 access=AccessContext(user_id="organizer", is_admin=True),
             )
-            listed = service.run(WorkRequest(work_type="task_list"))
+            listed = service.run(
+                WorkRequest(
+                    work_type="task_list",
+                    access=AccessContext(user_id="organizer", is_admin=True),
+                )
+            )
             done = service.run(
                 WorkRequest(
                     work_type="task_done",
@@ -113,6 +148,122 @@ class WorkflowServiceTests(unittest.TestCase):
             self.assertEqual(edited.task_candidates[0].proposed_assignee_user_id, "bob")
             self.assertEqual(len(listed.tasks), 1)
             self.assertEqual(done.tasks[0].status, "done")
+
+    def test_task_extract_degrades_without_llm_and_does_not_create_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+
+            response = service.run(
+                WorkRequest(
+                    work_type="task_extract",
+                    instruction="TODO: 新歓資料を作成 担当: @alice 期限: 2026-05-01",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertEqual(response.task_candidates, tuple())
+            self.assertTrue(response.metadata["extraction"]["degraded"])
+            self.assertEqual(service.repository.list_tasks(), [])
+
+    def test_task_update_and_delete_require_approval_before_changing_master_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+            task = service.repository.save_task(
+                Task(
+                    id="task-1",
+                    title="会場予約",
+                    assignee_user_id="alice",
+                    status="todo",
+                )
+            )
+
+            update = service.run(
+                WorkRequest(
+                    work_type="task_update",
+                    target=task.id,
+                    instruction="status: doing priority: high",
+                    access=AccessContext(user_id="alice"),
+                )
+            )
+            self.assertEqual(len(update.task_change_candidates), 1)
+            self.assertEqual(service.repository.get_task(task.id).status, "todo")
+
+            approved = service.approval(
+                action="approve",
+                target_type="task",
+                target_id=update.task_change_candidates[0].id,
+                access=AccessContext(user_id="admin", is_admin=True),
+            )
+            self.assertEqual(approved.tasks[0].status, "doing")
+
+            delete = service.run(
+                WorkRequest(
+                    work_type="task_delete",
+                    target=task.id,
+                    instruction="不要になった",
+                    access=AccessContext(user_id="alice"),
+                )
+            )
+            self.assertEqual(service.repository.get_task(task.id).status, "doing")
+            approved_delete = service.approval(
+                action="approve",
+                target_type="task",
+                target_id=delete.task_change_candidates[0].id,
+                access=AccessContext(user_id="admin", is_admin=True),
+            )
+            self.assertEqual(approved_delete.tasks[0].status, "deleted")
+
+    def test_task_access_denial_does_not_leak_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+            service.repository.save_task(Task(id="task-1", title="秘匿タスク"))
+
+            response = service.run(
+                WorkRequest(
+                    work_type="task_list",
+                    access=AccessContext(user_id="outsider"),
+                )
+            )
+
+            self.assertEqual(response.tasks, tuple())
+            self.assertNotIn("1", response.text)
+            self.assertFalse(response.metadata["authorized"])
+
+    def test_task_notify_due_marks_notifications_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+            approved = service.run(
+                WorkRequest(
+                    work_type="task_add",
+                    instruction="タスク: 会場予約 担当: alice 期限: 2026-05-01",
+                    access=AccessContext(user_id="organizer", is_admin=True),
+                )
+            )
+            task = service.approval(
+                action="approve",
+                target_type="task",
+                target_id=approved.task_candidates[0].id,
+                access=AccessContext(user_id="admin", is_admin=True),
+            ).tasks[0]
+
+            notified = service.run(
+                WorkRequest(
+                    work_type="task_notify_due",
+                    instruction="days: 999",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+            notified_again = service.run(
+                WorkRequest(
+                    work_type="task_notify_due",
+                    instruction="days: 999",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertEqual(len(notified.tasks), 1)
+            self.assertEqual(len(notified_again.tasks), 0)
+            self.assertIn("notifications", service.repository.get_task(task.id).metadata)
 
     def test_event_brief_includes_related_open_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -175,6 +175,9 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             operations=operations_repository,
             member_search_service=member_search,
             image_search_service=image_search,
+            llm=llm,
+            prompts_dir=prompts_dir,
+            llm_model_name=foundation.config.providers.llm.gemini_model,
         ),
         member_profile_builder=member_profile_builder,
     )

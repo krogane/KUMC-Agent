@@ -104,12 +104,32 @@ def _dispatch_job(
         workflow = build_workflow_app_context(base_dir=base_dir)
         response = workflow.workflow.run(
             WorkRequest(
-                work_type="task_list",
-                instruction="status: todo",
+                work_type="task_notify_due",
+                instruction=f"days: {payload.get('days', 1)}",
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {"open_tasks": len(response.tasks), "side_effects": "none"}
+        return {
+            "notified_tasks": len(response.tasks),
+            "metadata": response.metadata,
+            "side_effects": "notification_state_recorded",
+        }
+    if job_type == "task_approval_batch":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type="task_batch_approval",
+                instruction=str(payload.get("instruction") or ""),
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {
+            "candidate_count": len(response.task_candidates),
+            "change_candidate_count": len(response.task_change_candidates),
+            "batch_count": len(response.task_approval_batches),
+            "metadata": response.metadata,
+            "side_effects": "approval_batch_recorded",
+        }
     if job_type == "workflow_prepare":
         workflow = build_workflow_app_context(base_dir=base_dir)
         response = workflow.workflow.run(

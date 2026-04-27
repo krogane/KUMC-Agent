@@ -82,6 +82,47 @@ def create_bot(
             is_admin=_is_authorized(interaction),
         )
 
+    def _task_approval_view(target_id: str):
+        if not target_id:
+            return None
+
+        class TaskApprovalView(discord.ui.View):
+            def __init__(self, candidate_id: str) -> None:
+                super().__init__(timeout=86400)
+                self.candidate_id = candidate_id
+
+            async def _run(self, interaction: discord.Interaction, action: str) -> None:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.approval,
+                    action=action,
+                    target_type="task",
+                    target_id=self.candidate_id,
+                    comment=f"discord_component:{action}",
+                    access=_access_context(interaction),
+                )
+                kwargs = {"content": response.text, "ephemeral": True}
+                if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+                    kwargs["file"] = _format_markdown_attachment(
+                        content=response.detail_markdown,
+                        filename="kumc-agent-task-approval-detail.md",
+                    )
+                await interaction.followup.send(**kwargs)
+
+            @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="task:approve")
+            async def approve_button(self, interaction: discord.Interaction, button) -> None:
+                await self._run(interaction, "approve")
+
+            @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, custom_id="task:reject")
+            async def reject_button(self, interaction: discord.Interaction, button) -> None:
+                await self._run(interaction, "reject")
+
+            @discord.ui.button(label="Show", style=discord.ButtonStyle.secondary, custom_id="task:show")
+            async def show_button(self, interaction: discord.Interaction, button) -> None:
+                await self._run(interaction, "show")
+
+        return TaskApprovalView(target_id)
+
     @admin.command(name="action", description="Run an approved admin action")
     @app_commands.describe(action="Admin action to run")
     @app_commands.choices(
@@ -321,6 +362,10 @@ def create_bot(
             app_commands.Choice(name="task_add", value="task_add"),
             app_commands.Choice(name="task_list", value="task_list"),
             app_commands.Choice(name="task_done", value="task_done"),
+            app_commands.Choice(name="task_update", value="task_update"),
+            app_commands.Choice(name="task_delete", value="task_delete"),
+            app_commands.Choice(name="task_notify_due", value="task_notify_due"),
+            app_commands.Choice(name="task_batch_approval", value="task_batch_approval"),
             app_commands.Choice(name="event_add", value="event_add"),
             app_commands.Choice(name="event_list", value="event_list"),
             app_commands.Choice(name="event_brief", value="event_brief"),
@@ -363,6 +408,11 @@ def create_bot(
                 content=response.detail_markdown,
                 filename="kumc-agent-work-detail.md",
             )
+        task_targets = tuple(getattr(response, "task_candidates", ()) or ()) + tuple(
+            getattr(response, "task_change_candidates", ()) or ()
+        )
+        if task_targets:
+            kwargs["view"] = _task_approval_view(task_targets[0].id)
         await interaction.followup.send(**kwargs)
 
     @bot.tree.command(name="approval", description="KUMC-Agent approval operations")
@@ -417,6 +467,11 @@ def create_bot(
                 content=response.detail_markdown,
                 filename="kumc-agent-approval-detail.md",
             )
+        task_targets = tuple(getattr(response, "task_candidates", ()) or ()) + tuple(
+            getattr(response, "task_change_candidates", ()) or ()
+        )
+        if task_targets and action.value in {"list", "show", "edit"}:
+            kwargs["view"] = _task_approval_view(task_targets[0].id)
         await interaction.followup.send(**kwargs)
 
     @bot.tree.command(name="automation", description="KUMC-Agent automation operations")
