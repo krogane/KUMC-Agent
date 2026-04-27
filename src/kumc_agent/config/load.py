@@ -15,6 +15,9 @@ from kumc_agent.config.env_map import ENV_BINDINGS
 from kumc_agent.config.merge import MergeError, deep_merge
 from kumc_agent.config.schema import (
     AppSection,
+    AutonomousAgentBudgetSection,
+    AutonomousAgentLookaheadSection,
+    AutonomousAgentSection,
     DatabaseSection,
     EmbeddingSection,
     FeatureSection,
@@ -70,6 +73,7 @@ OPS_FILES = (
     "providers.yaml",
     "security.yaml",
     "scheduler.yaml",
+    "autonomous_agent.yaml",
     "features.yaml",
     "server_management.yaml",
     "model.yaml",
@@ -345,6 +349,33 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     scheduler.setdefault("quality_smoke_queries", [])
     scheduler.setdefault("rollback_keep_snapshots", 3)
 
+    autonomous_agent = updated.get("autonomous_agent")
+    if not isinstance(autonomous_agent, dict):
+        autonomous_agent = {}
+        updated["autonomous_agent"] = autonomous_agent
+    autonomous_agent.setdefault("enabled", False)
+    autonomous_agent.setdefault("schedule_times", ["08:00", "13:00", "20:00"])
+    autonomous_agent.setdefault("timezone", "Asia/Tokyo")
+    autonomous_agent.setdefault("scopes", ["tasks", "events", "rag_delta", "server_ops", "automation"])
+    autonomous_agent.setdefault("notification_channel_id", "")
+    autonomous_agent.setdefault("dry_run", True)
+    autonomous_agent.setdefault("duplicate_suppression_hours", 24)
+    lookahead = autonomous_agent.get("lookahead_days")
+    if not isinstance(lookahead, dict):
+        lookahead = {}
+        autonomous_agent["lookahead_days"] = lookahead
+    lookahead.setdefault("tasks", 2)
+    lookahead.setdefault("events", 7)
+    budget = autonomous_agent.get("budget")
+    if not isinstance(budget, dict):
+        budget = {}
+        autonomous_agent["budget"] = budget
+    budget.setdefault("max_steps", 10)
+    budget.setdefault("max_search_calls", 6)
+    budget.setdefault("max_replans", 1)
+    budget.setdefault("max_cost_usd", 0.50)
+    budget.setdefault("max_latency_seconds", 120.0)
+
     features = updated.get("features")
     if not isinstance(features, dict):
         features = {}
@@ -503,7 +534,7 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
     merged: dict[str, Any] = {}
     for file_name in OPS_FILES:
         path = resolved_base_dir / "configs" / "ops" / file_name
-        if file_name == "server_management.yaml" and not path.exists():
+        if file_name in {"server_management.yaml", "autonomous_agent.yaml"} and not path.exists():
             payload = {}
         else:
             payload = _yaml_load(path)
@@ -546,6 +577,7 @@ def _to_runtime_config(
     providers = merged["providers"]
     security = merged["security"]
     scheduler = merged["scheduler"]
+    autonomous_agent = merged.get("autonomous_agent", {})
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
     image_search_raw = features.get("image_search", {})
@@ -808,6 +840,34 @@ def _to_runtime_config(
                 str(v) for v in scheduler.get("quality_smoke_queries", [])
             ],
             rollback_keep_snapshots=int(scheduler.get("rollback_keep_snapshots", 3)),
+        ),
+        autonomous_agent=AutonomousAgentSection(
+            enabled=bool(autonomous_agent.get("enabled", False)),
+            schedule_times=[str(value) for value in autonomous_agent.get("schedule_times", [])],
+            timezone=str(autonomous_agent.get("timezone", "Asia/Tokyo")),
+            scopes=[str(value) for value in autonomous_agent.get("scopes", [])],
+            notification_channel_id=str(autonomous_agent.get("notification_channel_id", "")),
+            dry_run=bool(autonomous_agent.get("dry_run", True)),
+            lookahead_days=AutonomousAgentLookaheadSection(
+                tasks=int((autonomous_agent.get("lookahead_days") or {}).get("tasks", 2)),
+                events=int((autonomous_agent.get("lookahead_days") or {}).get("events", 7)),
+            ),
+            duplicate_suppression_hours=int(
+                autonomous_agent.get("duplicate_suppression_hours", 24)
+            ),
+            budget=AutonomousAgentBudgetSection(
+                max_steps=int((autonomous_agent.get("budget") or {}).get("max_steps", 10)),
+                max_search_calls=int(
+                    (autonomous_agent.get("budget") or {}).get("max_search_calls", 6)
+                ),
+                max_replans=int((autonomous_agent.get("budget") or {}).get("max_replans", 1)),
+                max_cost_usd=float(
+                    (autonomous_agent.get("budget") or {}).get("max_cost_usd", 0.50)
+                ),
+                max_latency_seconds=float(
+                    (autonomous_agent.get("budget") or {}).get("max_latency_seconds", 120.0)
+                ),
+            ),
         ),
         infrastructure=InfrastructureSection(
             database=DatabaseSection(

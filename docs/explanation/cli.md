@@ -207,6 +207,18 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker --job-type auto_ind
 常にすべての app を読み込むのではなく、実行するコマンドに必要なものだけを読み込む構成です。
 旧 `discord` / `http` 入口は削除され、Discord は `bot`、HTTP API は `api` に統一されています。
 
+### `autonomous`
+
+自律エージェントを手動で 1 回実行します。初期実装では通知送信や正本更新は行わず、通知候補、承認申請候補、候補参照、trace、実行履歴を作ります。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli autonomous --dry-run --slot 08:00 --scope tasks --scope events
+```
+
+主結果は `status`、`text`、`detail_markdown`、`notification_proposals`、`approval_requests`、`candidate_refs`、`warnings` です。
+`trace_id`、`idempotency_key`、dry-run状態、VERIFY decision などの診断情報は `metadata` 配下に入ります。
+worker からは `--job-type autonomous_agent_run` と `--payload-json` で同じ service を呼びます。
+
 ### `admin`
 
 運用・管理用のコマンドです。

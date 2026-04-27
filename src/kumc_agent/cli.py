@@ -152,6 +152,15 @@ def _automation_response_payload(response: object) -> dict[str, object]:
     }
 
 
+def _autonomous_response_payload(response: object) -> dict[str, object]:
+    if hasattr(response, "to_payload"):
+        payload = response.to_payload()  # type: ignore[attr-defined]
+        if isinstance(payload, dict):
+            payload["metadata"] = _sanitize_payload_metadata(payload.get("metadata", {}) or {})
+            return payload
+    return _sanitize_payload_value(response)  # type: ignore[return-value]
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kumc-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -369,6 +378,17 @@ def _build_parser() -> argparse.ArgumentParser:
     automation_parser.add_argument("--guild-id", default="")
     automation_parser.add_argument("--role-id", action="append", default=None)
     automation_parser.add_argument("--admin", action="store_true")
+
+    autonomous_parser = subparsers.add_parser("autonomous", help="Run autonomous agent")
+    autonomous_parser.add_argument("--dry-run", action="store_true")
+    autonomous_parser.add_argument("--slot", default="manual")
+    autonomous_parser.add_argument("--trigger", default="manual")
+    autonomous_parser.add_argument("--scope", action="append", default=None)
+    autonomous_parser.add_argument("--idempotency-key", default="")
+    autonomous_parser.add_argument("--user-id", default="")
+    autonomous_parser.add_argument("--guild-id", default="")
+    autonomous_parser.add_argument("--role-id", action="append", default=None)
+    autonomous_parser.add_argument("--admin", action="store_true")
 
     return parser
 
@@ -680,6 +700,30 @@ def main() -> None:
                 access=access,
             )
         print(json.dumps(_automation_response_payload(response), ensure_ascii=False, default=str))
+        return
+
+    if args.command == "autonomous":
+        from kumc_agent.apps.autonomous_agent import build_autonomous_agent_app_context
+        from kumc_agent.domain.models.autonomous_agent import AutonomousAgentRequest
+
+        app = build_autonomous_agent_app_context()
+        response = app.autonomous_agent.run(
+            AutonomousAgentRequest(
+                trigger=args.trigger,
+                slot=args.slot,
+                scopes=tuple(args.scope or ()),
+                dry_run=bool(args.dry_run or app.autonomous_agent.config.dry_run),
+                idempotency_key=args.idempotency_key,
+                access=AccessContext(
+                    user_id=args.user_id or "cli",
+                    guild_id=args.guild_id,
+                    role_ids=tuple(args.role_id or ()),
+                    is_admin=bool(args.admin),
+                ),
+                metadata={"frontend": "cli"},
+            )
+        )
+        print(json.dumps(_autonomous_response_payload(response), ensure_ascii=False, default=str))
         return
 
     context = build_runtime_context()

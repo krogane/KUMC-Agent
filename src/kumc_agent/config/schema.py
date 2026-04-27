@@ -87,6 +87,34 @@ class SchedulerSection:
 
 
 @dataclass(frozen=True)
+class AutonomousAgentLookaheadSection:
+    tasks: int
+    events: int
+
+
+@dataclass(frozen=True)
+class AutonomousAgentBudgetSection:
+    max_steps: int
+    max_search_calls: int
+    max_replans: int
+    max_cost_usd: float
+    max_latency_seconds: float
+
+
+@dataclass(frozen=True)
+class AutonomousAgentSection:
+    enabled: bool
+    schedule_times: list[str]
+    timezone: str
+    scopes: list[str]
+    notification_channel_id: str
+    dry_run: bool
+    lookahead_days: AutonomousAgentLookaheadSection
+    duplicate_suppression_hours: int
+    budget: AutonomousAgentBudgetSection
+
+
+@dataclass(frozen=True)
 class DatabaseSection:
     url: str
     connect_timeout_seconds: float
@@ -544,6 +572,7 @@ class RuntimeConfig:
     providers: ProviderSection
     security: SecuritySection
     scheduler: SchedulerSection
+    autonomous_agent: AutonomousAgentSection
     infrastructure: InfrastructureSection
     features: FeatureSection
     minecraft_wiki_rag: MinecraftWikiRagSection

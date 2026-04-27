@@ -1,0 +1,17 @@
+autonomous_agent:
+  enabled: false
+  schedule_times: ["08:00", "13:00", "20:00"]
+  timezone: "Asia/Tokyo"
+  scopes: ["tasks", "events", "rag_delta", "server_ops", "automation"]
+  notification_channel_id: ""
+  dry_run: true
+  lookahead_days:
+    tasks: 2
+    events: 7
+  duplicate_suppression_hours: 24
+  budget:
+    max_steps: 10
+    max_search_calls: 6
+    max_replans: 1
+    max_cost_usd: 0.50
+    max_latency_seconds: 120

@@ -94,6 +94,41 @@ def _dispatch_job(
         out = result.as_payload()
         out["side_effects"] = "indexing_snapshot_publish"
         return out
+    if job_type == "autonomous_agent_run":
+        from kumc_agent.apps.autonomous_agent import build_autonomous_agent_app_context
+        from kumc_agent.domain.models.autonomous_agent import AutonomousAgentRequest
+
+        app = build_autonomous_agent_app_context(base_dir=base_dir)
+        scopes_raw = payload.get("scopes") or payload.get("scope") or ()
+        if isinstance(scopes_raw, str):
+            scopes = tuple(part.strip() for part in scopes_raw.split(",") if part.strip())
+        elif isinstance(scopes_raw, (list, tuple)):
+            scopes = tuple(str(value) for value in scopes_raw if str(value).strip())
+        else:
+            scopes = tuple()
+        dry_run = (
+            bool(payload.get("dry_run"))
+            if "dry_run" in payload
+            else app.autonomous_agent.config.dry_run
+        )
+        response = app.autonomous_agent.run(
+            AutonomousAgentRequest(
+                trigger=str(payload.get("trigger") or "worker"),
+                slot=str(payload.get("slot") or "manual"),
+                scopes=scopes,
+                dry_run=dry_run,
+                idempotency_key=str(payload.get("idempotency_key") or ""),
+                access=AccessContext(
+                    user_id=str(payload.get("user_id") or "worker"),
+                    guild_id=str(payload.get("guild_id") or ""),
+                    is_admin=bool(payload.get("admin", True)),
+                ),
+                metadata={"frontend": "worker"},
+            )
+        )
+        out = response.to_payload()
+        out["side_effects"] = "none"
+        return out
     if job_type == "member_profiles_rebuild":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
