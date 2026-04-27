@@ -130,6 +130,37 @@ def _dispatch_job(
             "metadata": response.metadata,
             "side_effects": "approval_batch_recorded",
         }
+    if job_type == "event_reminder":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        kind = str(payload.get("kind") or "before")
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type="event_notify",
+                instruction=f"days: {payload.get('days', 1)} kind: {kind}",
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {
+            "notified_events": len(response.events),
+            "metadata": response.metadata,
+            "side_effects": "notification_state_recorded",
+        }
+    if job_type == "event_approval_batch":
+        workflow = build_workflow_app_context(base_dir=base_dir)
+        response = workflow.workflow.run(
+            WorkRequest(
+                work_type="event_batch_approval",
+                instruction=str(payload.get("instruction") or ""),
+                access=AccessContext(user_id="worker", is_admin=True),
+            )
+        )
+        return {
+            "candidate_count": len(response.event_candidates),
+            "change_candidate_count": len(response.event_change_candidates),
+            "batch_count": len(response.event_approval_batches),
+            "metadata": response.metadata,
+            "side_effects": "approval_batch_recorded",
+        }
     if job_type == "workflow_prepare":
         workflow = build_workflow_app_context(base_dir=base_dir)
         response = workflow.workflow.run(

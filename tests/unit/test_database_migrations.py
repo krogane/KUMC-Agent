@@ -188,6 +188,17 @@ class DatabaseMigrationsTests(unittest.TestCase):
             self.assertIn(f"create table if not exists {table}", sql)
         self.assertIn("idx_tasks_assignee_due", sql)
 
+    def test_event_management_hardening_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "017_event_management_hardening.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
+            "event_change_candidates",
+            "event_approval_batches",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+        self.assertIn("idx_events_status_starts_at", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

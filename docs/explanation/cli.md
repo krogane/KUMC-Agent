@@ -220,6 +220,69 @@ PostgreSQL migration を適用します。
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli db migrate
 ```
 
+### `work` の event 系操作
+
+イベント管理はadmin権限付きの workflow 操作として扱います。手動登録でもまず `EventCandidate` を作り、`approval --type event approve` で承認されるまで `Event` 正本には入りません。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work \
+  --type event_add \
+  --instruction "イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室" \
+  --user-id admin --admin
+
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval \
+  --type event --action approve --target-id "<candidate-id>" \
+  --user-id admin --admin
+```
+
+RAG差分や長文からの自動抽出は `event_extract` を使います。LLMが使えない、schemaが不正、根拠不足の場合は候補を作らず、理由は `metadata.extraction` 配下に入ります。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work \
+  --type event_extract \
+  --instruction "5/5 14:00から部室で新歓会を開催します。" \
+  --user-id admin --admin
+```
+
+表示は日時、場所、状態、関連未完了タスクで絞り込めます。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work \
+  --type event_list \
+  --instruction "状態: planning 場所: 部室 2026-05-01から2026-05-31まで 未完了タスクあり" \
+  --user-id admin --admin
+```
+
+正本Eventの変更・削除も直接反映せず、変更候補を作ってから承認します。削除は `status=canceled` への論理削除です。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work \
+  --type event_update --target "<event-id>" --instruction "場所: 第2会議室" \
+  --user-id admin --admin
+
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work \
+  --type event_delete --target "<event-id>" --instruction "中止になった" \
+  --user-id admin --admin
+```
+
+通知対象抽出、まとめ承認、完了確認も event 系 work type として利用できます。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type event_notify --instruction "days: 1" --user-id admin --admin
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type event_batch_approval --instruction "channel: events" --user-id admin --admin
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type event_complete --target "<event-id>" --instruction "完了確認済み" --user-id admin --admin
+```
+
+workerから定期実行する場合は、`event_reminder` と `event_approval_batch` のjob typeを使います。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker --job-type event_reminder --payload-json '{"days":1,"kind":"before"}'
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker --job-type event_reminder --payload-json '{"kind":"day_of"}'
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli worker --job-type event_approval_batch --payload-json '{"instruction":"channel: events"}'
+```
+
+workflow payloadでは、主結果は `event_candidates`、`event_change_candidates`、`event_approval_batches`、`events`、`tasks`、`approvals` に出ます。抽出条件、degraded理由、重複情報、batch id、通知件数などの診断情報はトップレベルではなく `metadata` 配下に入ります。
+
 内部では foundation app context を作り、`foundation.migrations.apply()` を呼びます。
 適用された migration と、スキップされた migration を JSON で表示します。
 

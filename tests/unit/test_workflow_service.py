@@ -43,6 +43,34 @@ class FakeTaskLLM:
         """
 
 
+class FakeEventLLM:
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> str:
+        return """
+        {
+          "events": [
+            {
+              "title": "新歓会",
+              "summary": "新入生歓迎イベント",
+              "starts_at": "2026-05-05T14:00:00+00:00",
+              "ends_at": null,
+              "place": "部室",
+              "related_source_ids": ["discord:1"],
+              "related_task_query": "新歓",
+              "confidence": "high",
+              "evidence": ["input"]
+            }
+          ]
+        }
+        """
+
+
 class WorkflowServiceTests(unittest.TestCase):
     def _service(self, root: Path, *, llm: object | None = None) -> WorkflowService:
         return WorkflowService(
@@ -272,6 +300,7 @@ class WorkflowServiceTests(unittest.TestCase):
                 WorkRequest(
                     work_type="event_add",
                     instruction="イベント: 新歓会 日時: 2026-05-05 場所: 部室",
+                    access=AccessContext(user_id="organizer", is_admin=True),
                 )
             ).event_candidates[0]
             self.assertEqual(event.status, "proposed")
@@ -305,6 +334,186 @@ class WorkflowServiceTests(unittest.TestCase):
 
             self.assertIn("新歓会", brief.detail_markdown)
             self.assertIn("受付表", brief.detail_markdown)
+
+    def test_event_add_requires_admin_and_required_fields_before_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+
+            denied = service.run(
+                WorkRequest(
+                    work_type="event_add",
+                    instruction="イベント: 新歓会 日時: 2026-05-05",
+                    access=AccessContext(user_id="outsider"),
+                )
+            )
+            missing = service.run(
+                WorkRequest(
+                    work_type="event_add",
+                    instruction="新歓会をやります",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertFalse(denied.metadata["authorized"])
+            self.assertEqual(denied.event_candidates, tuple())
+            self.assertEqual(missing.event_candidates, tuple())
+            self.assertIn("starts_at", missing.metadata["missing_fields"])
+            self.assertEqual(service.repository.list_event_candidates(), [])
+
+    def test_event_extract_uses_llm_and_degrades_without_candidate_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), llm=FakeEventLLM())
+            extracted = service.run(
+                WorkRequest(
+                    work_type="event_extract",
+                    instruction="5/5 14:00 新歓会を部室で開催します。",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+            self.assertEqual(len(extracted.event_candidates), 1)
+            self.assertEqual(service.repository.list_events(), [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+            degraded = service.run(
+                WorkRequest(
+                    work_type="event_extract",
+                    instruction="5/5 14:00 新歓会を部室で開催します。",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+            self.assertEqual(degraded.event_candidates, tuple())
+            self.assertTrue(degraded.metadata["extraction"]["degraded"])
+
+    def test_event_list_filters_duplicates_update_delete_and_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp))
+            access = AccessContext(user_id="admin", is_admin=True)
+            first = service.run(
+                WorkRequest(
+                    work_type="event_add",
+                    instruction="イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+                    access=access,
+                )
+            ).event_candidates[0]
+            second = service.run(
+                WorkRequest(
+                    work_type="event_add",
+                    instruction="イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+                    access=access,
+                )
+            ).event_candidates[0]
+            self.assertIn("duplicate_candidates", second.metadata)
+            event = service.approval(
+                action="approve",
+                target_type="event",
+                target_id=first.id,
+                access=access,
+            ).events[0]
+            with self.assertRaises(ValueError):
+                service.approval(
+                    action="approve",
+                    target_type="event",
+                    target_id=first.id,
+                    access=access,
+                )
+
+            listed = service.run(
+                WorkRequest(
+                    work_type="event_list",
+                    instruction="状態: planning 場所: 部室 2026-05-01から2026-05-31まで",
+                    access=access,
+                )
+            )
+            self.assertEqual(len(listed.events), 1)
+            self.assertIn("query_filters", listed.metadata)
+
+            update = service.run(
+                WorkRequest(
+                    work_type="event_update",
+                    target=event.id,
+                    instruction="場所: 第2会議室",
+                    access=access,
+                )
+            )
+            self.assertEqual(service.repository.get_event(event.id).place, "部室")
+            approved_update = service.approval(
+                action="approve",
+                target_type="event",
+                target_id=update.event_change_candidates[0].id,
+                access=access,
+            )
+            self.assertEqual(approved_update.events[0].place, "第2会議室")
+
+            notified = service.run(
+                WorkRequest(
+                    work_type="event_notify",
+                    instruction="days: 999",
+                    access=access,
+                )
+            )
+            notified_again = service.run(
+                WorkRequest(
+                    work_type="event_notify",
+                    instruction="days: 999",
+                    access=access,
+                )
+            )
+            self.assertEqual(len(notified.events), 1)
+            self.assertEqual(len(notified_again.events), 0)
+
+            delete = service.run(
+                WorkRequest(
+                    work_type="event_delete",
+                    target=event.id,
+                    instruction="中止になった",
+                    access=access,
+                )
+            )
+            self.assertNotEqual(service.repository.get_event(event.id).status, "canceled")
+            approved_delete = service.approval(
+                action="approve",
+                target_type="event",
+                target_id=delete.event_change_candidates[0].id,
+                access=access,
+            )
+            self.assertEqual(approved_delete.events[0].status, "canceled")
+
+    def test_event_batch_and_completion_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), llm=FakeEventLLM())
+            access = AccessContext(user_id="admin", is_admin=True)
+            extracted = service.run(
+                WorkRequest(
+                    work_type="event_extract",
+                    instruction="新歓会を開催します。",
+                    access=access,
+                )
+            )
+            batch = service.run(
+                WorkRequest(
+                    work_type="event_batch_approval",
+                    instruction="channel: events",
+                    access=access,
+                )
+            )
+            self.assertEqual(len(batch.event_approval_batches), 1)
+            event = service.approval(
+                action="approve",
+                target_type="event",
+                target_id=extracted.event_candidates[0].id,
+                access=access,
+            ).events[0]
+            completed = service.run(
+                WorkRequest(
+                    work_type="event_complete",
+                    target=event.id,
+                    instruction="完了確認済み",
+                    access=access,
+                )
+            )
+            self.assertEqual(completed.events[0].status, "done")
+            self.assertEqual(len(completed.approvals), 1)
 
     def test_schedule_add_and_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

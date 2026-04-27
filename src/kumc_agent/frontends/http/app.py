@@ -82,6 +82,8 @@ def _workflow_payload(response: object) -> dict[str, object]:
         "task_change_candidates": _dump_items(getattr(response, "task_change_candidates", ())),
         "task_approval_batches": _dump_items(getattr(response, "task_approval_batches", ())),
         "event_candidates": _dump_items(getattr(response, "event_candidates", ())),
+        "event_change_candidates": _dump_items(getattr(response, "event_change_candidates", ())),
+        "event_approval_batches": _dump_items(getattr(response, "event_approval_batches", ())),
         "schedule_candidates": _dump_items(getattr(response, "schedule_candidates", ())),
         "workflow_candidates": _dump_items(getattr(response, "workflow_candidates", ())),
         "assets": _dump_items(getattr(response, "assets", ())),

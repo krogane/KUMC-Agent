@@ -10,6 +10,8 @@ from kumc_agent.domain.models.retrieval import Citation
 from kumc_agent.domain.models.workflow import (
     ApprovalRecord,
     Event,
+    EventApprovalBatch,
+    EventChangeCandidate,
     EventCandidate,
     Meeting,
     ScheduleCandidate,
@@ -112,13 +114,41 @@ class WorkflowRepository(Protocol):
     def save_event(self, event: Event) -> Event:
         ...
 
+    def merge_event_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventCandidate, ApprovalRecord]:
+        ...
+
+    def merge_event_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventChangeCandidate, ApprovalRecord]:
+        ...
+
     def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
         ...
 
     def get_event_candidate(self, candidate_id: str) -> EventCandidate | None:
         ...
 
-    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+    def list_event_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        confidence: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+    ) -> list[EventCandidate]:
         ...
 
     def update_event_candidate_status(
@@ -130,10 +160,57 @@ class WorkflowRepository(Protocol):
     ) -> EventCandidate:
         ...
 
+    def list_event_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        event_id: str | None = None,
+    ) -> list[EventChangeCandidate]:
+        ...
+
+    def save_event_change_candidate(
+        self,
+        candidate: EventChangeCandidate,
+    ) -> EventChangeCandidate:
+        ...
+
+    def get_event_change_candidate(self, candidate_id: str) -> EventChangeCandidate | None:
+        ...
+
+    def update_event_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventChangeCandidate:
+        ...
+
+    def save_event_approval_batch(self, batch: EventApprovalBatch) -> EventApprovalBatch:
+        ...
+
+    def get_event_approval_batch(self, batch_id: str) -> EventApprovalBatch | None:
+        ...
+
+    def list_event_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[EventApprovalBatch]:
+        ...
+
     def get_event(self, event_id: str) -> Event | None:
         ...
 
-    def list_events(self, *, status: str | None = None) -> list[Event]:
+    def list_events(
+        self,
+        *,
+        status: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+        place: str | None = None,
+        include_canceled: bool = False,
+    ) -> list[Event]:
         ...
 
     def save_meeting(self, meeting: Meeting) -> Meeting:
@@ -368,6 +445,50 @@ class FileWorkflowRepository:
         _append_jsonl(self.root_dir / "events.jsonl", _event_payload(stored))
         return stored
 
+    def merge_event_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventCandidate, ApprovalRecord]:
+        candidate = self.get_event_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventCandidate is not approvable: {candidate.status}")
+        stored_event = self.save_event(event)
+        merged = self.update_event_candidate_status(
+            candidate_id=candidate_id,
+            status="merged",
+            metadata=metadata,
+        )
+        stored_approval = self.save_approval(approval)
+        return stored_event, merged, stored_approval
+
+    def merge_event_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventChangeCandidate, ApprovalRecord]:
+        candidate = self.get_event_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventChangeCandidate is not approvable: {candidate.status}")
+        stored_event = self.save_event(event)
+        merged = self.update_event_change_candidate_status(
+            candidate_id=candidate_id,
+            status="merged",
+            metadata=metadata,
+        )
+        stored_approval = self.save_approval(approval)
+        return stored_event, merged, stored_approval
+
     def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
         stored = _touch(candidate)
         _append_jsonl(self.root_dir / "event_candidates.jsonl", _event_candidate_payload(stored))
@@ -379,7 +500,15 @@ class FileWorkflowRepository:
             _event_candidate_from_payload,
         ).get(candidate_id)
 
-    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+    def list_event_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        confidence: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+    ) -> list[EventCandidate]:
         candidates = list(
             _latest_by_id(
                 self.root_dir / "event_candidates.jsonl",
@@ -388,6 +517,22 @@ class FileWorkflowRepository:
         )
         if status:
             candidates = [candidate for candidate in candidates if candidate.status == status]
+        if created_by:
+            candidates = [candidate for candidate in candidates if candidate.created_by == created_by]
+        if confidence:
+            candidates = [candidate for candidate in candidates if candidate.confidence == confidence]
+        if starts_from:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.starts_at and candidate.starts_at >= starts_from
+            ]
+        if starts_to:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.starts_at and candidate.starts_at <= starts_to
+            ]
         return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
 
     def update_event_candidate_status(
@@ -406,13 +551,110 @@ class FileWorkflowRepository:
             replace(candidate, status=status, metadata=next_metadata)
         )
 
+    def save_event_change_candidate(
+        self,
+        candidate: EventChangeCandidate,
+    ) -> EventChangeCandidate:
+        stored = _touch(candidate)
+        _append_jsonl(
+            self.root_dir / "event_change_candidates.jsonl",
+            _event_change_candidate_payload(stored),
+        )
+        return stored
+
+    def get_event_change_candidate(self, candidate_id: str) -> EventChangeCandidate | None:
+        return _latest_by_id(
+            self.root_dir / "event_change_candidates.jsonl",
+            _event_change_candidate_from_payload,
+        ).get(candidate_id)
+
+    def list_event_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        event_id: str | None = None,
+    ) -> list[EventChangeCandidate]:
+        candidates = list(
+            _latest_by_id(
+                self.root_dir / "event_change_candidates.jsonl",
+                _event_change_candidate_from_payload,
+            ).values()
+        )
+        if status:
+            candidates = [candidate for candidate in candidates if candidate.status == status]
+        if event_id:
+            candidates = [candidate for candidate in candidates if candidate.event_id == event_id]
+        return sorted(candidates, key=lambda candidate: candidate.created_at or _MIN_DT)
+
+    def update_event_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventChangeCandidate:
+        candidate = self.get_event_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_event_change_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def save_event_approval_batch(self, batch: EventApprovalBatch) -> EventApprovalBatch:
+        stored = _touch(batch)
+        _append_jsonl(
+            self.root_dir / "event_approval_batches.jsonl",
+            _event_approval_batch_payload(stored),
+        )
+        return stored
+
+    def get_event_approval_batch(self, batch_id: str) -> EventApprovalBatch | None:
+        return _latest_by_id(
+            self.root_dir / "event_approval_batches.jsonl",
+            _event_approval_batch_from_payload,
+        ).get(batch_id)
+
+    def list_event_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[EventApprovalBatch]:
+        batches = list(
+            _latest_by_id(
+                self.root_dir / "event_approval_batches.jsonl",
+                _event_approval_batch_from_payload,
+            ).values()
+        )
+        if status:
+            batches = [batch for batch in batches if batch.status == status]
+        return sorted(batches, key=lambda batch: batch.created_at or _MIN_DT)
+
     def get_event(self, event_id: str) -> Event | None:
         return _latest_by_id(self.root_dir / "events.jsonl", _event_from_payload).get(event_id)
 
-    def list_events(self, *, status: str | None = None) -> list[Event]:
+    def list_events(
+        self,
+        *,
+        status: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+        place: str | None = None,
+        include_canceled: bool = False,
+    ) -> list[Event]:
         events = list(_latest_by_id(self.root_dir / "events.jsonl", _event_from_payload).values())
+        if not include_canceled:
+            events = [event for event in events if event.status != "canceled"]
         if status:
             events = [event for event in events if event.status == status]
+        if starts_from:
+            events = [event for event in events if event.starts_at and event.starts_at >= starts_from]
+        if starts_to:
+            events = [event for event in events if event.starts_at and event.starts_at <= starts_to]
+        if place:
+            needle = place.lower()
+            events = [event for event in events if event.place and needle in event.place.lower()]
         return sorted(events, key=lambda event: event.starts_at or event.created_at or _MAX_DT)
 
     def save_meeting(self, meeting: Meeting) -> Meeting:
@@ -902,6 +1144,102 @@ class PostgresWorkflowRepository:
             conn.commit()
         return stored
 
+    def merge_event_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventCandidate, ApprovalRecord]:
+        candidate = self.get_event_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventCandidate is not approvable: {candidate.status}")
+        stored_event = _touch(event)
+        event_payload = _event_payload(stored_event)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        merged_candidate = replace(candidate, status="merged", metadata=next_metadata)
+        merged_candidate = _touch(merged_candidate)
+        candidate_payload = _event_candidate_payload(merged_candidate)
+        stored_approval = replace(approval, created_at=approval.created_at or datetime.now(UTC))
+        approval_payload = _approval_payload(stored_approval)
+        with self.postgres.connect() as conn:
+            try:
+                with conn.cursor() as cur:
+                    self._execute_event_upsert(cur, event_payload)
+                    cur.execute(
+                        """
+                        update event_candidates
+                        set status = %s, metadata = %s::jsonb, updated_at = %s
+                        where id = %s and status in ('proposed', 'approved')
+                        """,
+                        (
+                            candidate_payload["status"],
+                            json.dumps(candidate_payload["metadata"], ensure_ascii=False, default=str),
+                            _parse_datetime(candidate_payload["updated_at"]),
+                            candidate_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("EventCandidate state changed before approval")
+                    self._execute_approval_insert(cur, approval_payload)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return stored_event, merged_candidate, stored_approval
+
+    def merge_event_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        event: Event,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Event, EventChangeCandidate, ApprovalRecord]:
+        candidate = self.get_event_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"EventChangeCandidate is not approvable: {candidate.status}")
+        stored_event = _touch(event)
+        event_payload = _event_payload(stored_event)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        merged_candidate = replace(candidate, status="merged", metadata=next_metadata)
+        merged_candidate = _touch(merged_candidate)
+        candidate_payload = _event_change_candidate_payload(merged_candidate)
+        stored_approval = replace(approval, created_at=approval.created_at or datetime.now(UTC))
+        approval_payload = _approval_payload(stored_approval)
+        with self.postgres.connect() as conn:
+            try:
+                with conn.cursor() as cur:
+                    self._execute_event_upsert(cur, event_payload)
+                    cur.execute(
+                        """
+                        update event_change_candidates
+                        set status = %s, metadata = %s::jsonb, updated_at = %s
+                        where id = %s and status in ('proposed', 'approved')
+                        """,
+                        (
+                            candidate_payload["status"],
+                            json.dumps(candidate_payload["metadata"], ensure_ascii=False, default=str),
+                            _parse_datetime(candidate_payload["updated_at"]),
+                            candidate_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("EventChangeCandidate state changed before approval")
+                    self._execute_approval_insert(cur, approval_payload)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return stored_event, merged_candidate, stored_approval
+
     def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:
         stored = _touch(candidate)
         payload = _event_candidate_payload(stored)
@@ -952,14 +1290,37 @@ class PostgresWorkflowRepository:
         rows = self._fetch("select * from event_candidates where id = %s", (candidate_id,))
         return _event_candidate_from_row(rows[0]) if rows else None
 
-    def list_event_candidates(self, *, status: str | None = None) -> list[EventCandidate]:
+    def list_event_candidates(
+        self,
+        *,
+        status: str | None = None,
+        created_by: str | None = None,
+        confidence: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+    ) -> list[EventCandidate]:
+        where: list[str] = []
+        params: list[object] = []
         if status:
-            rows = self._fetch(
-                "select * from event_candidates where status = %s order by created_at asc",
-                (status,),
-            )
-        else:
-            rows = self._fetch("select * from event_candidates order by created_at asc", ())
+            where.append("status = %s")
+            params.append(status)
+        if created_by:
+            where.append("created_by = %s")
+            params.append(created_by)
+        if confidence:
+            where.append("confidence = %s")
+            params.append(confidence)
+        if starts_from:
+            where.append("starts_at >= %s")
+            params.append(starts_from)
+        if starts_to:
+            where.append("starts_at <= %s")
+            params.append(starts_to)
+        sql = "select * from event_candidates"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by created_at asc"
+        rows = self._fetch(sql, tuple(params))
         return [_event_candidate_from_row(row) for row in rows]
 
     def update_event_candidate_status(
@@ -978,21 +1339,187 @@ class PostgresWorkflowRepository:
             replace(candidate, status=status, metadata=next_metadata)
         )
 
+    def save_event_change_candidate(
+        self,
+        candidate: EventChangeCandidate,
+    ) -> EventChangeCandidate:
+        stored = _touch(candidate)
+        payload = _event_change_candidate_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into event_change_candidates (
+                      id, event_id, operation, before_payload, after_payload,
+                      reason, evidence, confidence, status, created_by,
+                      metadata, created_at, updated_at
+                    )
+                    values (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      event_id = excluded.event_id,
+                      operation = excluded.operation,
+                      before_payload = excluded.before_payload,
+                      after_payload = excluded.after_payload,
+                      reason = excluded.reason,
+                      evidence = excluded.evidence,
+                      confidence = excluded.confidence,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        payload["event_id"],
+                        payload["operation"],
+                        json.dumps(payload["before"], ensure_ascii=False, default=str),
+                        json.dumps(payload["after"], ensure_ascii=False, default=str),
+                        payload["reason"],
+                        json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                        payload["confidence"],
+                        payload["status"],
+                        payload["created_by"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_event_change_candidate(self, candidate_id: str) -> EventChangeCandidate | None:
+        rows = self._fetch("select * from event_change_candidates where id = %s", (candidate_id,))
+        return _event_change_candidate_from_row(rows[0]) if rows else None
+
+    def list_event_change_candidates(
+        self,
+        *,
+        status: str | None = None,
+        event_id: str | None = None,
+    ) -> list[EventChangeCandidate]:
+        where: list[str] = []
+        params: list[object] = []
+        if status:
+            where.append("status = %s")
+            params.append(status)
+        if event_id:
+            where.append("event_id = %s")
+            params.append(event_id)
+        sql = "select * from event_change_candidates"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by created_at asc"
+        return [_event_change_candidate_from_row(row) for row in self._fetch(sql, tuple(params))]
+
+    def update_event_change_candidate_status(
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventChangeCandidate:
+        candidate = self.get_event_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        return self.save_event_change_candidate(
+            replace(candidate, status=status, metadata=next_metadata)
+        )
+
+    def save_event_approval_batch(self, batch: EventApprovalBatch) -> EventApprovalBatch:
+        stored = _touch(batch)
+        payload = _event_approval_batch_payload(stored)
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into event_approval_batches (
+                      id, candidate_ids, change_candidate_ids, period_start,
+                      period_end, notification_channel_id, notification_message_id,
+                      status, metadata, created_at, updated_at
+                    )
+                    values (%s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    on conflict (id) do update set
+                      candidate_ids = excluded.candidate_ids,
+                      change_candidate_ids = excluded.change_candidate_ids,
+                      period_start = excluded.period_start,
+                      period_end = excluded.period_end,
+                      notification_channel_id = excluded.notification_channel_id,
+                      notification_message_id = excluded.notification_message_id,
+                      status = excluded.status,
+                      metadata = excluded.metadata,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        payload["id"],
+                        json.dumps(payload["candidate_ids"], ensure_ascii=False),
+                        json.dumps(payload["change_candidate_ids"], ensure_ascii=False),
+                        _parse_datetime(payload["period_start"]),
+                        _parse_datetime(payload["period_end"]),
+                        payload["notification_channel_id"],
+                        payload["notification_message_id"],
+                        payload["status"],
+                        json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                        _parse_datetime(payload["created_at"]),
+                        _parse_datetime(payload["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        return stored
+
+    def get_event_approval_batch(self, batch_id: str) -> EventApprovalBatch | None:
+        rows = self._fetch("select * from event_approval_batches where id = %s", (batch_id,))
+        return _event_approval_batch_from_row(rows[0]) if rows else None
+
+    def list_event_approval_batches(
+        self,
+        *,
+        status: str | None = None,
+    ) -> list[EventApprovalBatch]:
+        if status:
+            rows = self._fetch(
+                "select * from event_approval_batches where status = %s order by created_at asc",
+                (status,),
+            )
+        else:
+            rows = self._fetch("select * from event_approval_batches order by created_at asc", ())
+        return [_event_approval_batch_from_row(row) for row in rows]
+
     def get_event(self, event_id: str) -> Event | None:
         rows = self._fetch("select * from events where id = %s", (event_id,))
         return _event_from_row(rows[0]) if rows else None
 
-    def list_events(self, *, status: str | None = None) -> list[Event]:
+    def list_events(
+        self,
+        *,
+        status: str | None = None,
+        starts_from: datetime | None = None,
+        starts_to: datetime | None = None,
+        place: str | None = None,
+        include_canceled: bool = False,
+    ) -> list[Event]:
+        where: list[str] = []
+        params: list[object] = []
+        if not include_canceled:
+            where.append("status <> %s")
+            params.append("canceled")
         if status:
-            rows = self._fetch(
-                "select * from events where status = %s order by starts_at asc nulls last, created_at asc",
-                (status,),
-            )
-        else:
-            rows = self._fetch(
-                "select * from events order by starts_at asc nulls last, created_at asc",
-                (),
-            )
+            where.append("status = %s")
+            params.append(status)
+        if starts_from:
+            where.append("starts_at >= %s")
+            params.append(starts_from)
+        if starts_to:
+            where.append("starts_at <= %s")
+            params.append(starts_to)
+        if place:
+            where.append("place ilike %s")
+            params.append(f"%{place}%")
+        sql = "select * from events"
+        if where:
+            sql += " where " + " and ".join(where)
+        sql += " order by starts_at asc nulls last, created_at asc"
+        rows = self._fetch(sql, tuple(params))
         return [_event_from_row(row) for row in rows]
 
     def save_meeting(self, meeting: Meeting) -> Meeting:
@@ -1227,6 +1754,64 @@ class PostgresWorkflowRepository:
             sql += " where " + " and ".join(where)
         sql += " order by created_at asc"
         return [_approval_from_row(row) for row in self._fetch(sql, tuple(params))]
+
+    def _execute_event_upsert(self, cur: Any, payload: dict[str, object]) -> None:
+        cur.execute(
+            """
+            insert into events (
+              id, title, summary, starts_at, ends_at, place, status,
+              related_source_ids, metadata, created_at, updated_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            on conflict (id) do update set
+              title = excluded.title,
+              summary = excluded.summary,
+              starts_at = excluded.starts_at,
+              ends_at = excluded.ends_at,
+              place = excluded.place,
+              status = excluded.status,
+              related_source_ids = excluded.related_source_ids,
+              metadata = excluded.metadata,
+              updated_at = excluded.updated_at
+            """,
+            (
+                payload["id"],
+                payload["title"],
+                payload["summary"],
+                _parse_datetime(payload["starts_at"]),
+                _parse_datetime(payload["ends_at"]),
+                payload["place"],
+                payload["status"],
+                json.dumps(payload["related_source_ids"], ensure_ascii=False),
+                json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                _parse_datetime(payload["created_at"]),
+                _parse_datetime(payload["updated_at"]),
+            ),
+        )
+
+    def _execute_approval_insert(self, cur: Any, payload: dict[str, object]) -> None:
+        cur.execute(
+            """
+            insert into approval_records (
+              id, target_type, target_id, action, actor_id, comment,
+              before_payload, after_payload, evidence, created_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
+            on conflict (id) do nothing
+            """,
+            (
+                payload["id"],
+                payload["target_type"],
+                payload["target_id"],
+                payload["action"],
+                payload["actor_id"],
+                payload["comment"],
+                json.dumps(payload["before"], ensure_ascii=False, default=str),
+                json.dumps(payload["after"], ensure_ascii=False, default=str),
+                json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                _parse_datetime(payload["created_at"]),
+            ),
+        )
 
     def _fetch(self, sql: str, params: tuple[object, ...]) -> list[tuple[object, ...]]:
         with self.postgres.connect() as conn:
@@ -1646,6 +2231,117 @@ def _event_candidate_from_row(row: tuple[object, ...]) -> EventCandidate:
             "metadata": row[11],
             "created_at": row[12],
             "updated_at": row[13],
+        }
+    )
+
+
+def _event_change_candidate_payload(candidate: EventChangeCandidate) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "event_id": candidate.event_id,
+        "operation": candidate.operation,
+        "before": dict(candidate.before),
+        "after": dict(candidate.after),
+        "reason": candidate.reason,
+        "evidence": [_citation_payload(citation) for citation in candidate.evidence],
+        "confidence": candidate.confidence,
+        "status": candidate.status,
+        "created_by": candidate.created_by,
+        "metadata": dict(candidate.metadata),
+        "created_at": _dt(candidate.created_at),
+        "updated_at": _dt(candidate.updated_at),
+    }
+
+
+def _event_change_candidate_from_payload(payload: dict[str, object]) -> EventChangeCandidate:
+    evidence = _json_payload(payload.get("evidence") or [])
+    return EventChangeCandidate(
+        id=str(payload["id"]),
+        event_id=str(payload["event_id"]),
+        operation=str(payload.get("operation") or "update"),
+        before=dict(_json_payload(payload.get("before") or {})),
+        after=dict(_json_payload(payload.get("after") or {})),
+        reason=str(payload.get("reason") or ""),
+        evidence=tuple(_citation_from_payload(dict(item)) for item in evidence),
+        confidence=str(payload.get("confidence") or "medium"),
+        status=str(payload.get("status") or "proposed"),
+        created_by=str(payload.get("created_by") or "user"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _event_change_candidate_from_row(row: tuple[object, ...]) -> EventChangeCandidate:
+    return _event_change_candidate_from_payload(
+        {
+            "id": row[0],
+            "event_id": row[1],
+            "operation": row[2],
+            "before": row[3],
+            "after": row[4],
+            "reason": row[5],
+            "evidence": row[6],
+            "confidence": row[7],
+            "status": row[8],
+            "created_by": row[9],
+            "metadata": row[10],
+            "created_at": row[11],
+            "updated_at": row[12],
+        }
+    )
+
+
+def _event_approval_batch_payload(batch: EventApprovalBatch) -> dict[str, object]:
+    return {
+        "id": batch.id,
+        "candidate_ids": list(batch.candidate_ids),
+        "change_candidate_ids": list(batch.change_candidate_ids),
+        "period_start": _dt(batch.period_start),
+        "period_end": _dt(batch.period_end),
+        "notification_channel_id": batch.notification_channel_id,
+        "notification_message_id": batch.notification_message_id,
+        "status": batch.status,
+        "metadata": dict(batch.metadata),
+        "created_at": _dt(batch.created_at),
+        "updated_at": _dt(batch.updated_at),
+    }
+
+
+def _event_approval_batch_from_payload(payload: dict[str, object]) -> EventApprovalBatch:
+    return EventApprovalBatch(
+        id=str(payload["id"]),
+        candidate_ids=tuple(str(item) for item in _json_payload(payload.get("candidate_ids") or [])),
+        change_candidate_ids=tuple(
+            str(item) for item in _json_payload(payload.get("change_candidate_ids") or [])
+        ),
+        period_start=_parse_datetime(payload.get("period_start")),
+        period_end=_parse_datetime(payload.get("period_end")),
+        notification_channel_id=payload.get("notification_channel_id")
+        and str(payload["notification_channel_id"]),
+        notification_message_id=payload.get("notification_message_id")
+        and str(payload["notification_message_id"]),
+        status=str(payload.get("status") or "pending"),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
+        created_at=_parse_datetime(payload.get("created_at")),
+        updated_at=_parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _event_approval_batch_from_row(row: tuple[object, ...]) -> EventApprovalBatch:
+    return _event_approval_batch_from_payload(
+        {
+            "id": row[0],
+            "candidate_ids": row[1],
+            "change_candidate_ids": row[2],
+            "period_start": row[3],
+            "period_end": row[4],
+            "notification_channel_id": row[5],
+            "notification_message_id": row[6],
+            "status": row[7],
+            "metadata": row[8],
+            "created_at": row[9],
+            "updated_at": row[10],
         }
     )
 

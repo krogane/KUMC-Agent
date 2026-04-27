@@ -13,9 +13,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.cli import main
+from kumc_agent.cli import _workflow_response_payload, main
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.source import Source
+from kumc_agent.domain.models.workflow import WorkResponse
 
 
 class _FakeChatAnswer:
@@ -156,6 +157,27 @@ class CliToolRagTests(unittest.TestCase):
 
         queries = [getattr(request, "query") for request in chat_answer.requests]
         self.assertEqual(queries, ["first query", "second query"])
+
+    def test_workflow_payload_keeps_event_diagnostics_in_metadata(self) -> None:
+        payload = _workflow_response_payload(
+            WorkResponse(
+                text="events",
+                metadata={
+                    "routing_decision": {"selected_handler": "event_list"},
+                    "query_filters": {"status": "planning"},
+                    "contexts": ["omit-me"],
+                    "secret": "api_key=abc",
+                },
+            )
+        )
+
+        self.assertNotIn("routing_decision", payload)
+        self.assertNotIn("query_filters", payload)
+        self.assertIn("metadata", payload)
+        self.assertEqual(payload["metadata"]["routing_decision"], {"selected_handler": "event_list"})
+        self.assertEqual(payload["metadata"]["query_filters"], {"status": "planning"})
+        self.assertNotIn("contexts", payload["metadata"])
+        self.assertNotIn("secret", payload["metadata"])
 
 
 if __name__ == "__main__":

@@ -123,6 +123,90 @@ def create_bot(
 
         return TaskApprovalView(target_id)
 
+    def _event_approval_view(target_id: str, *, batch_id: str = ""):
+        if not target_id:
+            return None
+
+        class EventApprovalView(discord.ui.View):
+            def __init__(self, candidate_id: str) -> None:
+                super().__init__(timeout=86400)
+                self.candidate_id = candidate_id
+                nonce = "v1"
+                for label, action, style in (
+                    ("Approve", "approve", discord.ButtonStyle.success),
+                    ("Reject", "reject", discord.ButtonStyle.danger),
+                    ("Edit", "edit", discord.ButtonStyle.primary),
+                    ("Evidence", "show", discord.ButtonStyle.secondary),
+                    ("Diff", "show", discord.ButtonStyle.secondary),
+                ):
+                    button = discord.ui.Button(
+                        label=label,
+                        style=style,
+                        custom_id=f"event:{candidate_id}:{action}:{batch_id or 'single'}:{nonce}",
+                    )
+                    if action == "edit":
+                        button.callback = self._edit_callback
+                    else:
+                        button.callback = self._button_callback(action)
+                    self.add_item(button)
+
+            async def _run(self, interaction: discord.Interaction, action: str) -> None:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.approval,
+                    action=action,
+                    target_type="event",
+                    target_id=self.candidate_id,
+                    comment=f"discord_component:{action}:batch={batch_id}",
+                    access=_access_context(interaction),
+                )
+                kwargs = {"content": response.text, "ephemeral": True}
+                if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+                    kwargs["file"] = _format_markdown_attachment(
+                        content=response.detail_markdown,
+                        filename="kumc-agent-event-approval-detail.md",
+                    )
+                await interaction.followup.send(**kwargs)
+
+            def _button_callback(self, action: str):
+                async def _callback(interaction: discord.Interaction) -> None:
+                    await self._run(interaction, action)
+
+                return _callback
+
+            async def _edit_callback(self, interaction: discord.Interaction) -> None:
+                view = self
+
+                class EventEditModal(discord.ui.Modal, title="Edit Event Candidate"):
+                    comment = discord.ui.TextInput(
+                        label="修正内容",
+                        style=discord.TextStyle.paragraph,
+                        required=True,
+                        max_length=1000,
+                    )
+
+                    async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                        await modal_interaction.response.defer(ephemeral=True, thinking=True)
+                        response = await asyncio.to_thread(
+                            workflow_context.workflow.approval,
+                            action="edit",
+                            target_type="event",
+                            target_id=view.candidate_id,
+                            comment=str(self.comment.value),
+                            access=_access_context(modal_interaction),
+                        )
+                        kwargs = {"content": response.text, "ephemeral": True}
+                        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+                            kwargs["file"] = _format_markdown_attachment(
+                                content=response.detail_markdown,
+                                filename="kumc-agent-event-edit-detail.md",
+                            )
+                        await modal_interaction.followup.send(**kwargs)
+
+                await interaction.response.send_modal(EventEditModal())
+
+        return EventApprovalView(target_id)
+
     @admin.command(name="action", description="Run an approved admin action")
     @app_commands.describe(action="Admin action to run")
     @app_commands.choices(
@@ -355,30 +439,6 @@ def create_bot(
         format="出力形式",
     )
     @app_commands.choices(
-        type=[
-            app_commands.Choice(name="meeting_prepare", value="meeting_prepare"),
-            app_commands.Choice(name="meeting_minutes_draft", value="meeting_minutes_draft"),
-            app_commands.Choice(name="task_extract", value="task_extract"),
-            app_commands.Choice(name="task_add", value="task_add"),
-            app_commands.Choice(name="task_list", value="task_list"),
-            app_commands.Choice(name="task_done", value="task_done"),
-            app_commands.Choice(name="task_update", value="task_update"),
-            app_commands.Choice(name="task_delete", value="task_delete"),
-            app_commands.Choice(name="task_notify_due", value="task_notify_due"),
-            app_commands.Choice(name="task_batch_approval", value="task_batch_approval"),
-            app_commands.Choice(name="event_add", value="event_add"),
-            app_commands.Choice(name="event_list", value="event_list"),
-            app_commands.Choice(name="event_brief", value="event_brief"),
-            app_commands.Choice(name="schedule_add", value="schedule_add"),
-            app_commands.Choice(name="schedule_list", value="schedule_list"),
-            app_commands.Choice(name="doc_draft", value="doc_draft"),
-            app_commands.Choice(name="x_draft", value="x_draft"),
-            app_commands.Choice(name="announcement_draft", value="announcement_draft"),
-            app_commands.Choice(name="mc_status", value="mc_status"),
-            app_commands.Choice(name="mc_request", value="mc_request"),
-            app_commands.Choice(name="image_search", value="image_search"),
-            app_commands.Choice(name="member_search", value="member_search"),
-        ],
         format=[
             app_commands.Choice(name="compact", value="compact"),
             app_commands.Choice(name="markdown", value="markdown"),
@@ -386,7 +446,7 @@ def create_bot(
     )
     async def work(
         interaction: discord.Interaction,
-        type: app_commands.Choice[str],
+        type: str,
         instruction: str = "",
         target: str = "",
         format: app_commands.Choice[str] | None = None,
@@ -395,7 +455,7 @@ def create_bot(
         response = await asyncio.to_thread(
             workflow_context.workflow.run,
             WorkRequest(
-                work_type=type.value,
+                work_type=type,
                 instruction=instruction,
                 target=target,
                 output_format=(format.value if format else "markdown"),
@@ -413,6 +473,11 @@ def create_bot(
         )
         if task_targets:
             kwargs["view"] = _task_approval_view(task_targets[0].id)
+        event_targets = tuple(getattr(response, "event_candidates", ()) or ()) + tuple(
+            getattr(response, "event_change_candidates", ()) or ()
+        )
+        if event_targets:
+            kwargs["view"] = _event_approval_view(event_targets[0].id)
         await interaction.followup.send(**kwargs)
 
     @bot.tree.command(name="approval", description="KUMC-Agent approval operations")
@@ -472,6 +537,11 @@ def create_bot(
         )
         if task_targets and action.value in {"list", "show", "edit"}:
             kwargs["view"] = _task_approval_view(task_targets[0].id)
+        event_targets = tuple(getattr(response, "event_candidates", ()) or ()) + tuple(
+            getattr(response, "event_change_candidates", ()) or ()
+        )
+        if event_targets and type.value == "event" and action.value in {"list", "show", "edit"}:
+            kwargs["view"] = _event_approval_view(event_targets[0].id)
         await interaction.followup.send(**kwargs)
 
     @bot.tree.command(name="automation", description="KUMC-Agent automation operations")
