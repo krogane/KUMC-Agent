@@ -28,12 +28,12 @@ indexing:
 
 minecraft_wiki_rag:
   chunking:
-    first_recursive_chunk_size: 1400
-    first_recursive_chunk_overlap: 160
-    second_recursive_chunk_size: 420
-    second_recursive_chunk_overlap: 80
-    summary_characters: 260
-    summary_batch_size: 16
+    first_recursive_chunk_size: 1024
+    first_recursive_chunk_overlap: 128
+    second_recursive_chunk_size: 384
+    second_recursive_chunk_overlap: 64
+    summary_characters: 200
+    summary_batch_size: 2000
     summary_llm_provider: "gemini"
     summary_gemini_model: "gemini-2.5-flash-lite"
     summary_temperature: 0.0
