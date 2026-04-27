@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from kumc_agent.domain.models.agentic import AgenticSearchRequest
 from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
@@ -23,12 +24,42 @@ def _access(payload: dict[str, object] | None = None) -> AccessContext:
 
 def _dump_items(items: object) -> list[dict[str, object]]:
     return [
-        {
-            key: value.isoformat() if hasattr(value, "isoformat") else value
-            for key, value in getattr(item, "__dict__", {}).items()
-        }
+        _dump_workflow_item(item)
         for item in items or []
     ]
+
+
+def _dump_workflow_item(item: object) -> dict[str, object]:
+    payload = {
+        key: value.isoformat() if hasattr(value, "isoformat") else value
+        for key, value in getattr(item, "__dict__", {}).items()
+    }
+    if "media_type" not in payload or "metadata" not in payload:
+        return payload
+    metadata = dict(payload.get("metadata") or {})
+    for key in ("downloaded_image_path", "original_image_ref"):
+        metadata.pop(key, None)
+    for key, limit in (("ocr_text", 800), ("surrounding_text", 1200)):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            metadata[key] = _compact_payload_text(_mask_payload_secret(value), limit)
+    payload["metadata"] = metadata
+    return payload
+
+
+def _compact_payload_text(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _mask_payload_secret(text: str) -> str:
+    return re.sub(
+        r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        text,
+    )
 
 
 def _workflow_payload(response: object) -> dict[str, object]:

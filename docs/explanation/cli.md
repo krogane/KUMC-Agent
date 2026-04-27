@@ -291,7 +291,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 - `announcement_draft`: 告知文下書き
 - `mc_status`: Minecraft サーバー状態確認
 - `mc_request`: Minecraft 関連操作リクエスト
-- `image_search`: 登録済み Asset から画像候補を検索
+- `image_search`: 登録済み Asset と画像検索indexから画像候補を検索。再利用可否は判断しません。
 - `member_search`: 権限付きでメンバー候補を検索
 
 入力は `WorkRequest` にまとめられ、`workflow.workflow.run(...)` に渡されます。

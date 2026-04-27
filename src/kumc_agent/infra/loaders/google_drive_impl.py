@@ -5,6 +5,7 @@ import io
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
 import sys
@@ -45,6 +46,7 @@ _SUPPORTED_DRIVE_MIMES = {
     DRIVE_PDF_MIME,
     *_OFFICE_MIMES,
 }
+_DRIVE_IMAGE_MIME_PREFIX = "image/"
 _PP_OCR_V5_MOBILE_PREFIX = "PP-OCRv5_mobile"
 _PP_OCR_V5_TEXTLINE_CLS_NAMES = (
     "PP-LCNet_x0_25_textline_ori",
@@ -134,7 +136,7 @@ def _list_drive_files(
                     stack.append((file_id, next_path))
                     continue
 
-                if mime_type in _SUPPORTED_DRIVE_MIMES:
+                if mime_type in _SUPPORTED_DRIVE_MIMES or _is_drive_image_mime(mime_type):
                     file_path = f"{current_path}/{name}" if current_path else name
                     files.append(
                         DriveFile(
@@ -168,6 +170,10 @@ def _split_batches(
     if size <= 0:
         return [items]
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _is_drive_image_mime(mime_type: str) -> bool:
+    return str(mime_type or "").lower().startswith(_DRIVE_IMAGE_MIME_PREFIX)
 
 
 def _download_export_bytes(
@@ -1173,9 +1179,11 @@ def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
     metadata = {
         "drive_file_id": drive_file.file_id,
         "drive_file_name": drive_file.name,
+        "drive_name": drive_file.name,
         "drive_path": drive_file.path,
         "drive_mime_type": drive_file.mime_type,
         "drive_modified_time": drive_file.modified_time,
+        "drive_url": f"https://drive.google.com/file/d/{drive_file.file_id}/view",
     }
     meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
     meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
@@ -1247,6 +1255,8 @@ def download_drive_markdown(
 
     docs_count = 0
     sheets_count = 0
+    images_dir = docs_dir.parent / "images" / "google_drive"
+    ensure_dir(images_dir)
     download_retry_options = {
         "max_retries": drive_download_max_retries,
         "initial_delay_seconds": drive_download_retry_initial_delay_seconds,
@@ -1412,6 +1422,40 @@ def download_drive_markdown(
                     _write_drive_metadata(out_path, drive_file)
                     sheets_count += 1
                     logger.info("Downloaded sheet-like file: %s", drive_file.path)
+                elif _is_drive_image_mime(drive_file.mime_type):
+                    extension = (
+                        mimetypes.guess_extension(drive_file.mime_type)
+                        or Path(drive_file.name).suffix
+                        or ".img"
+                    )
+                    out_path = images_dir / _build_output_filename(
+                        drive_file, extension=extension
+                    )
+                    _cleanup_drive_duplicates(
+                        out_dir=images_dir, drive_file=drive_file, keep_path=out_path
+                    )
+                    if skip_existing and out_path.exists():
+                        if not update_existing:
+                            logger.info(
+                                "Skip Drive image download (exists): %s",
+                                out_path.name,
+                            )
+                            continue
+                        if _is_drive_file_up_to_date(out_path, drive_file):
+                            logger.info(
+                                "Skip Drive image download (up-to-date): %s",
+                                out_path.name,
+                            )
+                            continue
+                    content = _download_file_bytes(
+                        drive_service,
+                        file_id=drive_file.file_id,
+                        **download_retry_options,
+                    )
+                    out_path.write_bytes(content)
+                    _write_drive_metadata(out_path, drive_file)
+                    docs_count += 1
+                    logger.info("Downloaded Drive image file: %s", drive_file.path)
             except Exception:
                 logger.exception(
                     "Failed to download %s (%s)", drive_file.path, drive_file.file_id

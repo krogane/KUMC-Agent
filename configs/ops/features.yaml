@@ -44,3 +44,14 @@ features:
     sparse_bm25_b: 0.75
     sparse_use_normalized_form: true
     sparse_remove_symbols: true
+  image_search:
+    enabled: true
+    limit: 8
+    dense_top_k: 24
+    feature_top_k: 16
+    rrf_k: 60
+    ocr_text_char_limit: 800
+    surrounding_text_char_limit: 1200
+    caption_model: ""
+    ocr_model: ""
+    feature_model: "local_hash"

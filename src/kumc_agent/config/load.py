@@ -19,6 +19,7 @@ from kumc_agent.config.schema import (
     EmbeddingSection,
     FeatureSection,
     FunctionCallSection,
+    ImageSearchFeatureSection,
     InfrastructureSection,
     RagGenerationProfileSection,
     RagGenerationSection,
@@ -350,6 +351,20 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     risk_flags.setdefault("automation_auto_run", "disabled")
     risk_flags.setdefault("vc_recording", "disabled")
     risk_flags.setdefault("image_generation", "approval_required")
+    image_search = features.get("image_search")
+    if not isinstance(image_search, dict):
+        image_search = {}
+        features["image_search"] = image_search
+    image_search.setdefault("enabled", True)
+    image_search.setdefault("limit", retrieval.get("top_k", 8))
+    image_search.setdefault("dense_top_k", retrieval.get("dense_top_k", 24))
+    image_search.setdefault("feature_top_k", retrieval.get("sparse_top_k", 16))
+    image_search.setdefault("rrf_k", retrieval.get("rrf_k", 60))
+    image_search.setdefault("ocr_text_char_limit", 800)
+    image_search.setdefault("surrounding_text_char_limit", 1200)
+    image_search.setdefault("caption_model", "")
+    image_search.setdefault("ocr_model", "")
+    image_search.setdefault("feature_model", "local_hash")
 
     rag = updated.get("rag")
     if not isinstance(rag, dict):
@@ -496,6 +511,9 @@ def _to_runtime_config(
     scheduler = merged["scheduler"]
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
+    image_search_raw = features.get("image_search", {})
+    if not isinstance(image_search_raw, dict):
+        image_search_raw = {}
     minecraft_wiki_rag = merged.get("minecraft_wiki_rag", {})
     rag = merged.get("rag", {})
     indexing = merged.get("indexing", {})
@@ -880,6 +898,30 @@ def _to_runtime_config(
                         "approval_required",
                     )
                 ),
+            ),
+            image_search=ImageSearchFeatureSection(
+                enabled=bool(image_search_raw.get("enabled", True)),
+                limit=int(image_search_raw.get("limit", features["retrieval"]["top_k"])),
+                dense_top_k=int(
+                    image_search_raw.get(
+                        "dense_top_k",
+                        features["retrieval"]["dense_top_k"],
+                    )
+                ),
+                feature_top_k=int(
+                    image_search_raw.get(
+                        "feature_top_k",
+                        features["retrieval"]["sparse_top_k"],
+                    )
+                ),
+                rrf_k=int(image_search_raw.get("rrf_k", features["retrieval"].get("rrf_k", 60))),
+                ocr_text_char_limit=int(image_search_raw.get("ocr_text_char_limit", 800)),
+                surrounding_text_char_limit=int(
+                    image_search_raw.get("surrounding_text_char_limit", 1200)
+                ),
+                caption_model=str(image_search_raw.get("caption_model", "")),
+                ocr_model=str(image_search_raw.get("ocr_model", "")),
+                feature_model=str(image_search_raw.get("feature_model", "local_hash")),
             ),
         ),
         minecraft_wiki_rag=MinecraftWikiRagSection(

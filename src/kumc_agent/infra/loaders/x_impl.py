@@ -126,7 +126,8 @@ def _convert_tweet(tweet: dict[str, object]) -> dict[str, object] | None:
     if not tweet_id:
         return None
     text = str(tweet.get("full_text") or tweet.get("text") or "").strip()
-    if not text:
+    media_urls = _collect_media_image_urls(tweet)
+    if not text and not media_urls:
         return None
     created_at_raw = str(tweet.get("created_at") or "").strip()
     created_at = _parse_created_at(created_at_raw)
@@ -158,6 +159,7 @@ def _convert_tweet(tweet: dict[str, object]) -> dict[str, object] | None:
         "x_post_id": tweet_id,
         "x_post_url": canonical_url,
         "x_author_handle": handle or "",
+        "x_media_urls": media_urls,
     }
     return {
         "id": tweet_id,
@@ -215,3 +217,26 @@ def _extract_urls_from_entity(entity: dict[str, object]) -> list[str]:
             if url:
                 found.append(url)
     return found
+
+
+def _collect_media_image_urls(tweet: dict[str, object]) -> list[str]:
+    urls: list[str] = []
+    for entity_key in ("extended_entities", "entities"):
+        entity = tweet.get(entity_key)
+        if not isinstance(entity, dict):
+            continue
+        media = entity.get("media")
+        if not isinstance(media, list):
+            continue
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            media_type = str(item.get("type") or "").lower()
+            if media_type and media_type not in {"photo", "animated_gif"}:
+                continue
+            for key in ("media_url_https", "media_url"):
+                url = str(item.get(key) or "").strip()
+                if url:
+                    urls.append(url)
+                    break
+    return list(dict.fromkeys(urls))

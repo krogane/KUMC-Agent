@@ -1,0 +1,1132 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+import base64
+import html
+import json
+import logging
+import mimetypes
+import re
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
+
+import numpy as np
+
+from kumc_agent.domain.models.chunk import Chunk
+from kumc_agent.domain.models.operations import Asset, IndexingRun
+from kumc_agent.domain.models.retrieval import AccessContext
+from kumc_agent.domain.ports.embedders import EmbedderPort
+from kumc_agent.infra.operations import OperationsRepository
+from kumc_agent.utils.hashing import cosine_similarity_matrix, hashed_vector, stable_hash
+
+logger = logging.getLogger(__name__)
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+_PUBLIC_SOURCE_KINDS = frozenset({"hatena", "hatenablog", "crafters_colony", "x", "x_posts"})
+_PROTECTED_SOURCE_KINDS = frozenset({"discord", "google_drive", "drive"})
+_DENIED_INDEX_STATUSES = frozenset({"deleted", "quarantined", "permission_lost"})
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
+    re.compile(r"sk-[0-9A-Za-z_\-]{20,}"),
+)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*]\((?P<url>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_HTML_IMAGE_RE = re.compile(r"<img\b[^>]*\bsrc=[\"'](?P<url>[^\"']+)[\"'][^>]*>", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class ImageSearchConfig:
+    limit: int = 8
+    dense_top_k: int = 24
+    feature_top_k: int = 16
+    rrf_k: int = 60
+    surrounding_text_char_limit: int = 1200
+    ocr_text_char_limit: int = 800
+    caption_model: str = ""
+    ocr_model: str = ""
+    feature_dimensions: int = 128
+    max_download_bytes: int = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ImageSearchRequest:
+    query: str
+    access_context: AccessContext = field(default_factory=AccessContext)
+    limit: int | None = None
+    source_filter: tuple[str, ...] = tuple()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImageSearchResult:
+    text: str
+    detail_markdown: str
+    assets: tuple[Asset, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ImageSourceCandidate:
+    source_kind: str
+    source_item_id: str
+    title: str
+    image_ref: str
+    source_url: str = ""
+    source_label: str = ""
+    captured_at: datetime | None = None
+    surrounding_text: str = ""
+    image_index: int = 0
+    access_scope: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _RankedAsset:
+    asset: Asset
+    rank: int
+    score: float
+    sources: tuple[str, ...]
+
+
+class ImageAccessPolicy:
+    def __init__(
+        self,
+        *,
+        allowed_guild_ids: tuple[str, ...] = tuple(),
+        admin_user_ids: tuple[str, ...] = tuple(),
+    ) -> None:
+        self._allowed_guild_ids = tuple(str(value) for value in allowed_guild_ids if str(value))
+        self._admin_user_ids = tuple(str(value) for value in admin_user_ids if str(value))
+
+    def allow_asset(self, asset: Asset, *, access: AccessContext | None) -> bool:
+        metadata = dict(asset.metadata or {})
+        if str(metadata.get("index_status") or "").strip().lower() in _DENIED_INDEX_STATUSES:
+            return False
+        return self.allow_scope(
+            source_kind=asset.source_kind,
+            access_scope=dict(asset.access_scope or {}),
+            metadata=metadata,
+            access=access,
+        )
+
+    def allow_scope(
+        self,
+        *,
+        source_kind: str,
+        access_scope: dict[str, Any],
+        metadata: dict[str, Any],
+        access: AccessContext | None,
+    ) -> bool:
+        normalized_source = _normalize_source_kind(source_kind)
+        if normalized_source in _PUBLIC_SOURCE_KINDS:
+            return True
+        visibility = str(access_scope.get("visibility") or "").strip().lower()
+        if visibility == "public":
+            return True
+        if normalized_source not in _PROTECTED_SOURCE_KINDS and visibility not in {"guild", "admin", "private"}:
+            return True
+        if access is None:
+            return False
+
+        allowed_guilds = set(self._allowed_guild_ids)
+        admin_users = set(self._admin_user_ids)
+        request_guild_id = str(access.guild_id or "").strip()
+        asset_guild_id = str(access_scope.get("guild_id") or metadata.get("guild_id") or "").strip()
+        if request_guild_id:
+            if allowed_guilds and request_guild_id not in allowed_guilds:
+                return False
+            return not asset_guild_id or asset_guild_id == request_guild_id
+
+        request_user_id = str(access.user_id or "").strip()
+        if bool(access.is_admin) and (not admin_users or request_user_id in admin_users):
+            return True
+        return bool(request_user_id and request_user_id in admin_users)
+
+
+class GeminiImageCaptioner:
+    def __init__(
+        self,
+        *,
+        api_key: str = "",
+        model: str = "",
+        prompt_path: Path | None = None,
+        max_output_tokens: int = 512,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._prompt_path = prompt_path
+        self._max_output_tokens = max_output_tokens
+
+    def caption(self, *, image_path: Path, surrounding_text: str = "") -> tuple[str, dict[str, Any]]:
+        if not self._api_key or not self._model or not image_path.exists():
+            return "", {"caption_status": "fallback", "caption_error": "caption_model_unavailable"}
+        try:
+            from google import genai
+
+            image_bytes = image_path.read_bytes()
+            mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+            prompt = self._prompt_text().format(surrounding_text=surrounding_text[:2000])
+            client = genai.Client(api_key=self._api_key)
+            part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            response = client.models.generate_content(
+                model=self._model,
+                contents=[prompt, part],
+                config=genai.types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=self._max_output_tokens,
+                ),
+            )
+            text = _mask_secret_text((getattr(response, "text", "") or "").strip())
+            if not text:
+                return "", {"caption_status": "fallback", "caption_error": "empty_caption"}
+            return text, {"caption_status": "succeeded", "caption_model": self._model}
+        except Exception as exc:  # pragma: no cover - depends on Gemini SDK/network
+            logger.exception("Image caption generation failed: %s", image_path)
+            return "", {"caption_status": "fallback", "caption_error": type(exc).__name__}
+
+    def _prompt_text(self) -> str:
+        if self._prompt_path and self._prompt_path.exists():
+            return self._prompt_path.read_text(encoding="utf-8")
+        return (
+            "画像検索用の短い日本語説明文を作成してください。OCR結果は含めず、"
+            "主対象、画面や資料の概要、検索に役立つ視覚特徴を簡潔に書いてください。\n\n"
+            "周辺テキスト:\n{surrounding_text}"
+        )
+
+
+class LocalImageOcrExtractor:
+    def __init__(self, *, model_path: str = "") -> None:
+        self._model_path = model_path
+
+    def extract(self, *, image_path: Path) -> tuple[str, dict[str, Any]]:
+        if not self._model_path or not image_path.exists():
+            return "", {"ocr_status": "skipped", "ocr_error": "ocr_model_unavailable"}
+        try:
+            from PIL import Image
+            from kumc_agent.infra.loaders.google_drive_impl import (
+                _extract_generated_text,
+                _load_pdf_ocr_pipeline,
+            )
+
+            with Image.open(image_path) as image:
+                rgb_image = image.convert("RGB")
+            try:
+                ocr_pipeline = _load_pdf_ocr_pipeline(self._model_path)
+                try:
+                    result = ocr_pipeline(rgb_image, max_new_tokens=2048)
+                except TypeError:
+                    result = ocr_pipeline(rgb_image)
+                text = _mask_secret_text(_extract_generated_text(result).strip())
+                return text, {"ocr_status": "succeeded", "ocr_model": self._model_path}
+            finally:
+                rgb_image.close()
+        except Exception as exc:  # pragma: no cover - model/runtime dependent
+            logger.exception("Image OCR failed: %s", image_path)
+            return "", {"ocr_status": "failed", "ocr_error": type(exc).__name__}
+
+
+class ImageAssetBuildService:
+    def __init__(
+        self,
+        *,
+        repository: OperationsRepository,
+        raw_dir: Path,
+        image_dir: Path,
+        index_dir: Path,
+        embedder: EmbedderPort,
+        config: ImageSearchConfig,
+        captioner: GeminiImageCaptioner | None = None,
+        ocr: LocalImageOcrExtractor | None = None,
+    ) -> None:
+        self._repository = repository
+        self._raw_dir = raw_dir
+        self._image_dir = image_dir
+        self._index = _ImageSearchIndex(index_dir=index_dir, embedder=embedder, config=config)
+        self._config = config
+        self._captioner = captioner
+        self._ocr = ocr
+
+    def build_from_raw_sources(self) -> IndexingRun:
+        seen = changed = skipped = failed = 0
+        self._image_dir.mkdir(parents=True, exist_ok=True)
+        for candidate in self._scan_candidates():
+            seen += 1
+            try:
+                asset = self._asset_from_candidate(candidate)
+                existing = self._repository.get_asset(asset.id)
+                if existing and existing.metadata.get("source_fingerprint") == asset.metadata.get("source_fingerprint"):
+                    skipped += 1
+                    continue
+                self._repository.save_asset(asset)
+                changed += 1
+            except Exception:
+                failed += 1
+                logger.exception("Failed to build image asset from %s", candidate.image_ref)
+
+        searchable_assets = [
+            asset
+            for asset in self._repository.list_assets(query="")
+            if _normalize_source_kind(asset.source_kind) in _all_image_source_kinds()
+            and str(asset.metadata.get("index_status") or "active") not in _DENIED_INDEX_STATUSES
+        ]
+        self._index.build(searchable_assets)
+        run = IndexingRun(
+            id=stable_hash(f"image-search:{datetime.now(UTC).isoformat()}")[:32],
+            source_kind="image_search",
+            status="succeeded" if failed == 0 else "degraded",
+            seen=seen,
+            changed=changed,
+            skipped=skipped,
+            error="" if failed == 0 else f"{failed} image assets failed",
+            metadata={
+                "indexed_assets": len(searchable_assets),
+                "failed": failed,
+                "index_dir": str(self._index.index_dir),
+            },
+        )
+        return self._repository.save_indexing_run(run)
+
+    def _asset_from_candidate(self, candidate: _ImageSourceCandidate) -> Asset:
+        local_path, content_hash, download_metadata = self._materialize_image(candidate)
+        surrounding_text = _compact_text(candidate.surrounding_text, self._config.surrounding_text_char_limit)
+        caption = ""
+        caption_metadata: dict[str, Any] = {"caption_status": "fallback"}
+        if self._captioner is not None and local_path is not None:
+            caption, caption_metadata = self._captioner.caption(
+                image_path=local_path,
+                surrounding_text=surrounding_text,
+            )
+        if not caption:
+            caption = surrounding_text[:240]
+        ocr_text = ""
+        ocr_metadata: dict[str, Any] = {"ocr_status": "skipped"}
+        if self._ocr is not None and local_path is not None:
+            ocr_text, ocr_metadata = self._ocr.extract(image_path=local_path)
+        source_fingerprint = stable_hash(
+            json.dumps(
+                {
+                    "image_ref": candidate.image_ref,
+                    "content_hash": content_hash,
+                    "surrounding_text": surrounding_text,
+                    "caption": caption,
+                    "ocr_text": ocr_text,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        )
+        asset_id = stable_hash(
+            f"asset:{candidate.source_kind}:{candidate.source_item_id}:{candidate.image_index}:{content_hash}"
+        )[:32]
+        metadata = {
+            **candidate.metadata,
+            **download_metadata,
+            **caption_metadata,
+            **ocr_metadata,
+            "caption": caption,
+            "ocr_text": _compact_text(ocr_text, 12000),
+            "surrounding_text": surrounding_text,
+            "source_url": candidate.source_url,
+            "source_label": candidate.source_label,
+            "source_created_at": candidate.captured_at.isoformat() if candidate.captured_at else "",
+            "image_index": candidate.image_index,
+            "content_hash": content_hash,
+            "feature_vector_ref": f"image_search/features/{asset_id}",
+            "source_fingerprint": source_fingerprint,
+            "index_version": "image-search-v1",
+            "index_status": "active",
+        }
+        return Asset(
+            id=asset_id,
+            source_kind=_normalize_source_kind(candidate.source_kind),
+            source_item_id=candidate.source_item_id,
+            title=candidate.title,
+            description=caption,
+            uri=str(local_path) if local_path is not None else candidate.image_ref,
+            media_type=mimetypes.guess_type(candidate.image_ref)[0] or "image",
+            captured_at=candidate.captured_at,
+            access_scope=candidate.access_scope,
+            rights_status="unknown",
+            contains_people=False,
+            metadata=_mask_metadata(metadata),
+        )
+
+    def _materialize_image(self, candidate: _ImageSourceCandidate) -> tuple[Path | None, str, dict[str, Any]]:
+        ref = candidate.image_ref.strip()
+        metadata: dict[str, Any] = {"original_image_ref": ref}
+        if _is_http_url(ref):
+            try:
+                data, content_type = _download_bytes(ref, max_bytes=self._config.max_download_bytes)
+                content_hash = stable_hash(data.hex())
+                suffix = _suffix_from_content_type(content_type) or Path(ref.split("?", 1)[0]).suffix or ".img"
+                path = self._image_dir / _normalize_source_kind(candidate.source_kind) / f"{content_hash[:24]}{suffix}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_bytes(data)
+                metadata.update({"download_status": "succeeded", "downloaded_image_path": str(path)})
+                return path, content_hash, metadata
+            except Exception as exc:
+                logger.warning("Failed to download image %s: %s", ref, exc)
+                metadata.update({"download_status": "failed", "download_error": type(exc).__name__})
+                return None, stable_hash(ref), metadata
+        path = Path(ref)
+        if path.exists():
+            data = path.read_bytes()
+            metadata.update({"download_status": "local", "downloaded_image_path": str(path)})
+            return path, stable_hash(data.hex()), metadata
+        metadata.update({"download_status": "missing"})
+        return None, stable_hash(ref), metadata
+
+    def _scan_candidates(self) -> list[_ImageSourceCandidate]:
+        candidates: list[_ImageSourceCandidate] = []
+        candidates.extend(_scan_discord_images(self._raw_dir))
+        candidates.extend(_scan_google_drive_images(self._raw_dir))
+        candidates.extend(_scan_x_images(self._raw_dir))
+        candidates.extend(_scan_article_images(self._raw_dir / "hatenablog", source_kind="hatena"))
+        candidates.extend(_scan_article_images(self._raw_dir / "crafters_colony", source_kind="crafters_colony"))
+        return _dedupe_candidates(candidates)
+
+
+class ImageSearchService:
+    def __init__(
+        self,
+        *,
+        repository: OperationsRepository,
+        embedder: EmbedderPort,
+        index_dir: Path,
+        config: ImageSearchConfig | None = None,
+        allowed_guild_ids: tuple[str, ...] = tuple(),
+        admin_user_ids: tuple[str, ...] = tuple(),
+    ) -> None:
+        self._repository = repository
+        self._config = config or ImageSearchConfig()
+        self._policy = ImageAccessPolicy(
+            allowed_guild_ids=allowed_guild_ids,
+            admin_user_ids=admin_user_ids,
+        )
+        self._index = _ImageSearchIndex(index_dir=index_dir, embedder=embedder, config=self._config)
+
+    def search(self, request: ImageSearchRequest) -> ImageSearchResult:
+        query = request.query.strip()
+        limit = max(1, int(request.limit or self._config.limit))
+        source_filter = {_normalize_source_kind(value) for value in request.source_filter if value}
+        all_assets = self._candidate_assets(
+            access=request.access_context,
+            source_filter=source_filter,
+        )
+        metadata: dict[str, Any] = {
+            "route": "image_search",
+            "query": query,
+            "source_filter": sorted(source_filter),
+            **dict(request.metadata or {}),
+        }
+        if not all_assets:
+            metadata["candidate_count"] = 0
+            return ImageSearchResult(
+                text="画像候補は 0 件です。",
+                detail_markdown="# Image Search\n\n該当する画像候補は登録されていません。",
+                assets=tuple(),
+                metadata=metadata,
+            )
+
+        dense = self._index.search_dense(
+            query=query,
+            allowed_asset_ids={asset.id for asset in all_assets},
+            top_k=max(limit, self._config.dense_top_k),
+        )
+        degraded = False
+        if not dense:
+            degraded = True
+            dense = _fallback_keyword_results(query=query, assets=all_assets)
+        feature = self._index.search_similar_features(
+            seed_asset_ids=tuple(asset_id for asset_id, _score in dense[: max(1, limit)]),
+            allowed_asset_ids={asset.id for asset in all_assets},
+            top_k=self._config.feature_top_k,
+        )
+        if not feature:
+            metadata["feature_search"] = "unavailable"
+            degraded = True
+        ranked_ids = _rrf_merge(
+            ranked_lists=[
+                ("dense", [asset_id for asset_id, _ in dense]),
+                ("feature", [asset_id for asset_id, _ in feature]),
+            ],
+            k=self._config.rrf_k,
+        )
+        by_id = {asset.id: asset for asset in all_assets}
+        dense_scores = dict(dense)
+        feature_scores = dict(feature)
+        ranked: list[_RankedAsset] = []
+        for rank, (asset_id, score, source_names) in enumerate(ranked_ids, start=1):
+            asset = by_id.get(asset_id)
+            if asset is None:
+                continue
+            if not self._policy.allow_asset(asset, access=request.access_context):
+                continue
+            ranked.append(
+                _RankedAsset(
+                    asset=asset,
+                    rank=rank,
+                    score=score,
+                    sources=source_names,
+                )
+            )
+            if len(ranked) >= limit:
+                break
+
+        assets = tuple(
+            _asset_for_output(
+                item.asset,
+                rank=item.rank,
+                score=item.score,
+                sources=item.sources,
+                dense_score=dense_scores.get(item.asset.id),
+                feature_score=feature_scores.get(item.asset.id),
+                config=self._config,
+            )
+            for item in ranked
+        )
+        metadata.update(
+            {
+                "candidate_count": len(assets),
+                "degraded": degraded,
+                "degraded_reason": "image_feature_or_dense_fallback" if degraded else "",
+                "search_results": [
+                    {
+                        "asset_id": item.asset.id,
+                        "rank": item.rank,
+                        "score": item.score,
+                        "sources": list(item.sources),
+                    }
+                    for item in ranked
+                ],
+            }
+        )
+        return ImageSearchResult(
+            text=f"画像候補は {len(assets)} 件です。再利用可否はこの結果では判断しません。",
+            detail_markdown=_format_image_search_detail(assets),
+            assets=assets,
+            metadata=metadata,
+        )
+
+    def _candidate_assets(
+        self,
+        *,
+        access: AccessContext,
+        source_filter: set[str],
+    ) -> list[Asset]:
+        assets = []
+        for asset in self._repository.list_assets(query=""):
+            source = _normalize_source_kind(asset.source_kind)
+            if source_filter and source not in source_filter:
+                continue
+            if source not in _all_image_source_kinds():
+                continue
+            if self._policy.allow_asset(asset, access=access):
+                assets.append(asset)
+        return assets
+
+
+class _ImageSearchIndex:
+    def __init__(self, *, index_dir: Path, embedder: EmbedderPort, config: ImageSearchConfig) -> None:
+        self.index_dir = index_dir
+        self._embedder = embedder
+        self._config = config
+        self._text_vectors_path = self.index_dir / "image_text_vectors.npy"
+        self._feature_vectors_path = self.index_dir / "image_feature_vectors.npy"
+        self._items_path = self.index_dir / "image_assets.jsonl"
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+
+    def build(self, assets: list[Asset]) -> None:
+        texts = [_asset_embedding_text(asset) for asset in assets]
+        text_vectors = self._embedder.embed_documents(texts) if texts else np.empty((0, 1), dtype=np.float32)
+        feature_vectors = (
+            np.vstack([_feature_vector(asset, dimensions=self._config.feature_dimensions) for asset in assets])
+            if assets
+            else np.empty((0, self._config.feature_dimensions), dtype=np.float32)
+        )
+        np.save(self._text_vectors_path, text_vectors.astype(np.float32))
+        np.save(self._feature_vectors_path, feature_vectors.astype(np.float32))
+        with self._items_path.open("w", encoding="utf-8") as fw:
+            for asset in assets:
+                fw.write(json.dumps({"asset_id": asset.id}, ensure_ascii=False) + "\n")
+
+    def search_dense(
+        self,
+        *,
+        query: str,
+        allowed_asset_ids: set[str],
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        asset_ids = self._load_asset_ids()
+        if not asset_ids or not self._text_vectors_path.exists():
+            return []
+        matrix = np.load(self._text_vectors_path)
+        if matrix.size == 0:
+            return []
+        query_vector = self._embedder.embed_query(query)
+        scores = cosine_similarity_matrix(query_vector, matrix)
+        order = np.argsort(-scores)[: max(0, top_k)]
+        out: list[tuple[str, float]] = []
+        for idx in order:
+            pos = int(idx)
+            if pos >= len(asset_ids):
+                continue
+            asset_id = asset_ids[pos]
+            if asset_id in allowed_asset_ids:
+                out.append((asset_id, float(scores[pos])))
+        return out
+
+    def search_similar_features(
+        self,
+        *,
+        seed_asset_ids: tuple[str, ...],
+        allowed_asset_ids: set[str],
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        asset_ids = self._load_asset_ids()
+        if not asset_ids or not seed_asset_ids or not self._feature_vectors_path.exists():
+            return []
+        matrix = np.load(self._feature_vectors_path)
+        if matrix.size == 0:
+            return []
+        seed_positions = [asset_ids.index(asset_id) for asset_id in seed_asset_ids if asset_id in asset_ids]
+        if not seed_positions:
+            return []
+        query_vector = np.mean(matrix[seed_positions], axis=0)
+        scores = cosine_similarity_matrix(query_vector, matrix)
+        order = np.argsort(-scores)[: max(0, top_k + len(seed_positions))]
+        out: list[tuple[str, float]] = []
+        for idx in order:
+            pos = int(idx)
+            if pos >= len(asset_ids):
+                continue
+            asset_id = asset_ids[pos]
+            if asset_id in seed_asset_ids or asset_id not in allowed_asset_ids:
+                continue
+            out.append((asset_id, float(scores[pos])))
+            if len(out) >= top_k:
+                break
+        return out
+
+    def _load_asset_ids(self) -> list[str]:
+        if not self._items_path.exists():
+            return []
+        out: list[str] = []
+        with self._items_path.open("r", encoding="utf-8") as fr:
+            for line in fr:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                out.append(str(payload.get("asset_id") or ""))
+        return [asset_id for asset_id in out if asset_id]
+
+
+def _scan_discord_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+    candidates: list[_ImageSourceCandidate] = []
+    root = raw_dir / "messages"
+    if not root.exists():
+        return candidates
+    for path in root.glob("**/*.jsonl"):
+        for payload in _read_jsonl(path):
+            text = str(payload.get("text") or "")
+            metadata = dict(payload.get("metadata") or {})
+            attachments = metadata.get("attachments") or payload.get("attachments") or []
+            if not isinstance(attachments, list):
+                continue
+            for index, item in enumerate(attachments):
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or item.get("proxy_url") or "").strip()
+                content_type = str(item.get("content_type") or "").lower()
+                filename = str(item.get("filename") or "").strip()
+                if not _looks_like_image(url, filename=filename, content_type=content_type):
+                    continue
+                message_id = str(metadata.get("message_id") or payload.get("id") or stable_hash(url)[:16])
+                guild_id = str(metadata.get("guild_id") or "")
+                channel_id = str(metadata.get("channel_id") or "")
+                source_url = _discord_message_url(guild_id=guild_id, channel_id=channel_id, message_id=message_id)
+                candidates.append(
+                    _ImageSourceCandidate(
+                        source_kind="discord",
+                        source_item_id=message_id,
+                        title=filename or f"Discord image {message_id}",
+                        image_ref=url,
+                        source_url=source_url,
+                        source_label=str(metadata.get("channel_name") or "Discord"),
+                        captured_at=_dt_from(metadata.get("message_timestamp")),
+                        surrounding_text=_join_nonempty(
+                            text,
+                            str(metadata.get("author_name") or ""),
+                            str(metadata.get("channel_name") or ""),
+                        ),
+                        image_index=index,
+                        access_scope={"visibility": "guild", "guild_id": guild_id},
+                        metadata={
+                            "guild_id": guild_id,
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                            "source_type": "discord_message",
+                            "source_kind": "discord",
+                            "attachment_id": str(item.get("id") or ""),
+                        },
+                    )
+                )
+    return candidates
+
+
+def _scan_google_drive_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+    candidates: list[_ImageSourceCandidate] = []
+    root = raw_dir / "images" / "google_drive"
+    if root.exists():
+        for path in root.glob("**/*"):
+            if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+                continue
+            metadata = _read_sidecar(path)
+            source_item_id = str(metadata.get("drive_file_id") or path.stem)
+            candidates.append(
+                _ImageSourceCandidate(
+                    source_kind="google_drive",
+                    source_item_id=source_item_id,
+                    title=str(metadata.get("drive_name") or path.name),
+                    image_ref=str(path),
+                    source_url=str(metadata.get("drive_url") or ""),
+                    source_label=str(metadata.get("drive_path") or "Google Drive"),
+                    captured_at=_dt_from(metadata.get("drive_modified_time")),
+                    surrounding_text=str(metadata.get("drive_path") or metadata.get("drive_name") or ""),
+                    image_index=0,
+                    access_scope={"visibility": "guild", "guild_id": str(metadata.get("guild_id") or "")},
+                    metadata={"source_type": "docs", "source_kind": "google_drive", **metadata},
+                )
+            )
+    for path in (raw_dir / "docs").glob("*.md") if (raw_dir / "docs").exists() else []:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        metadata = _read_sidecar(path)
+        for index, image_ref, context in _extract_image_refs(text, base_url=str(metadata.get("drive_url") or "")):
+            candidates.append(
+                _ImageSourceCandidate(
+                    source_kind="google_drive",
+                    source_item_id=str(metadata.get("drive_file_id") or path.stem),
+                    title=str(metadata.get("drive_name") or path.name),
+                    image_ref=image_ref,
+                    source_url=str(metadata.get("drive_url") or ""),
+                    source_label=str(metadata.get("drive_path") or "Google Drive"),
+                    captured_at=_dt_from(metadata.get("drive_modified_time")),
+                    surrounding_text=context,
+                    image_index=index,
+                    access_scope={"visibility": "guild", "guild_id": str(metadata.get("guild_id") or "")},
+                    metadata={"source_type": "docs", "source_kind": "google_drive", **metadata},
+                )
+            )
+    return candidates
+
+
+def _scan_x_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+    candidates: list[_ImageSourceCandidate] = []
+    path = raw_dir / "x" / "posts.jsonl"
+    if not path.exists():
+        return candidates
+    for payload in _read_jsonl(path):
+        record = dict(payload.get("record") or payload)
+        text = str(record.get("text") or payload.get("text") or "")
+        metadata = dict(record.get("metadata") or payload.get("metadata") or {})
+        media_urls = metadata.get("x_media_urls") or record.get("media_urls") or []
+        if isinstance(media_urls, str):
+            media_urls = [media_urls]
+        if not isinstance(media_urls, list):
+            continue
+        post_id = str(metadata.get("x_post_id") or payload.get("id") or "")
+        for index, url in enumerate(media_urls):
+            image_ref = str(url).strip()
+            if not _looks_like_image(image_ref):
+                continue
+            candidates.append(
+                _ImageSourceCandidate(
+                    source_kind="x",
+                    source_item_id=post_id or stable_hash(image_ref)[:16],
+                    title=f"X post {post_id}" if post_id else "X image",
+                    image_ref=image_ref,
+                    source_url=str(metadata.get("x_post_url") or ""),
+                    source_label=str(metadata.get("x_author_handle") or "X"),
+                    captured_at=_dt_from(metadata.get("message_timestamp")),
+                    surrounding_text=text,
+                    image_index=index,
+                    access_scope={"visibility": "public"},
+                    metadata={"source_type": "x_posts", "source_kind": "x", **metadata},
+                )
+            )
+    return candidates
+
+
+def _scan_article_images(root: Path, *, source_kind: str) -> list[_ImageSourceCandidate]:
+    candidates: list[_ImageSourceCandidate] = []
+    if not root.exists():
+        return candidates
+    for path in root.glob("*.md"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        metadata = _read_sidecar(path)
+        source_url = _article_source_url(source_kind=source_kind, metadata=metadata)
+        title = str(
+            metadata.get("hatenablog_title")
+            or metadata.get("crafters_colony_title")
+            or _first_heading(text)
+            or path.stem
+        )
+        for index, image_ref, context in _extract_image_refs(text, base_url=source_url):
+            candidates.append(
+                _ImageSourceCandidate(
+                    source_kind=source_kind,
+                    source_item_id=str(
+                        metadata.get("hatenablog_entry_id")
+                        or metadata.get("crafters_colony_article_url")
+                        or source_url
+                        or path.stem
+                    ),
+                    title=title,
+                    image_ref=image_ref,
+                    source_url=source_url,
+                    source_label=title,
+                    captured_at=_dt_from(
+                        metadata.get("hatenablog_updated_at")
+                        or metadata.get("hatenablog_published_at")
+                        or metadata.get("crafters_colony_published_at")
+                    ),
+                    surrounding_text=context,
+                    image_index=index,
+                    access_scope={"visibility": "public"},
+                    metadata={"source_type": source_kind, "source_kind": source_kind, **metadata},
+                )
+            )
+    return candidates
+
+
+def _extract_image_refs(text: str, *, base_url: str = "") -> list[tuple[int, str, str]]:
+    refs: list[tuple[int, str, str]] = []
+    for match in _MARKDOWN_IMAGE_RE.finditer(text):
+        url = html.unescape(match.group("url").strip())
+        if url:
+            refs.append((len(refs), urljoin(base_url, url), _context_around(text, match.start())))
+    for match in _HTML_IMAGE_RE.finditer(text):
+        url = html.unescape(match.group("url").strip())
+        if url:
+            refs.append((len(refs), urljoin(base_url, url), _context_around(text, match.start())))
+    return refs
+
+
+def _dedupe_candidates(candidates: list[_ImageSourceCandidate]) -> list[_ImageSourceCandidate]:
+    seen: set[tuple[str, str, int, str]] = set()
+    out: list[_ImageSourceCandidate] = []
+    for item in candidates:
+        key = (
+            _normalize_source_kind(item.source_kind),
+            item.source_item_id,
+            item.image_index,
+            item.image_ref,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _fallback_keyword_results(*, query: str, assets: list[Asset]) -> list[tuple[str, float]]:
+    needle = query.strip().lower()
+    scored: list[tuple[str, float]] = []
+    for asset in assets:
+        text = _asset_embedding_text(asset).lower()
+        if not needle:
+            score = 0.1
+        elif needle in text:
+            score = 1.0 + text.count(needle) * 0.05
+        else:
+            terms = [term for term in re.split(r"\s+", needle) if term]
+            hits = sum(1 for term in terms if term in text)
+            score = hits / max(1, len(terms))
+        if score > 0:
+            scored.append((asset.id, score))
+    return sorted(scored, key=lambda item: item[1], reverse=True)
+
+
+def _rrf_merge(
+    *,
+    ranked_lists: list[tuple[str, list[str]]],
+    k: int,
+) -> list[tuple[str, float, tuple[str, ...]]]:
+    scores: dict[str, float] = {}
+    sources: dict[str, list[str]] = {}
+    for name, values in ranked_lists:
+        for rank, asset_id in enumerate(values, start=1):
+            scores[asset_id] = scores.get(asset_id, 0.0) + 1.0 / (k + rank)
+            sources.setdefault(asset_id, []).append(name)
+    return [
+        (asset_id, score, tuple(dict.fromkeys(sources.get(asset_id, []))))
+        for asset_id, score in sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
+def _asset_for_output(
+    asset: Asset,
+    *,
+    rank: int,
+    score: float,
+    sources: tuple[str, ...],
+    dense_score: float | None,
+    feature_score: float | None,
+    config: ImageSearchConfig,
+) -> Asset:
+    metadata = _mask_metadata(dict(asset.metadata or {}))
+    ocr_text = str(metadata.get("ocr_text") or "")
+    surrounding_text = str(metadata.get("surrounding_text") or "")
+    if ocr_text:
+        metadata["ocr_text"] = _compact_text(ocr_text, config.ocr_text_char_limit)
+    if surrounding_text:
+        metadata["surrounding_text"] = _compact_text(surrounding_text, config.surrounding_text_char_limit)
+    for key in ("downloaded_image_path", "original_image_ref"):
+        metadata.pop(key, None)
+    metadata["search"] = {
+        "rank": rank,
+        "score": score,
+        "sources": list(sources),
+        "dense_score": dense_score,
+        "feature_score": feature_score,
+    }
+    return replace(asset, metadata=metadata)
+
+
+def _format_image_search_detail(assets: tuple[Asset, ...]) -> str:
+    lines = ["# Image Search", ""]
+    if not assets:
+        lines.append("該当する画像候補は登録されていません。")
+        return "\n".join(lines)
+    for asset in assets:
+        metadata = dict(asset.metadata or {})
+        source_label = str(metadata.get("source_label") or asset.source_kind)
+        source_url = str(metadata.get("source_url") or asset.uri or "")
+        description = asset.description or str(metadata.get("caption") or "")
+        lines.append(f"- `{asset.id}` {asset.title or 'untitled'}")
+        if description:
+            lines.append(f"  - 説明: {_compact_text(description, 160)}")
+        lines.append(f"  - 出典: {source_label}{(' / ' + source_url) if source_url else ''}")
+    lines.append("")
+    lines.append("この結果は画像候補の提示のみで、外部公開・転載・再利用の可否は判断しません。")
+    return "\n".join(lines)
+
+
+def _asset_embedding_text(asset: Asset) -> str:
+    metadata = dict(asset.metadata or {})
+    return "\n".join(
+        line
+        for line in (
+            f"タイトル: {asset.title}",
+            f"投稿媒体: {_normalize_source_kind(asset.source_kind)}",
+            f"出典: {metadata.get('source_label') or metadata.get('source_url') or asset.uri}",
+            f"画像説明: {asset.description or metadata.get('caption') or ''}",
+            f"OCR: {metadata.get('ocr_text') or ''}",
+            f"周辺テキスト: {metadata.get('surrounding_text') or ''}",
+        )
+        if line.strip()
+    )
+
+
+def _feature_vector(asset: Asset, *, dimensions: int) -> np.ndarray:
+    metadata = dict(asset.metadata or {})
+    image_path_raw = str(metadata.get("downloaded_image_path") or "").strip()
+    image_path = Path(image_path_raw) if image_path_raw else None
+    if image_path is not None and image_path.exists():
+        try:
+            return _local_image_feature_vector(image_path=image_path, dimensions=dimensions)
+        except Exception as exc:
+            logger.debug(
+                "Local image feature extraction unavailable for %s: %s",
+                image_path,
+                exc,
+            )
+    seed = "image-feature:" + ":".join(
+        str(metadata.get(key) or "")
+        for key in ("content_hash", "duplicate_group_id", "source_url", "source_label")
+    )
+    return hashed_vector(seed or asset.id, dimensions=max(1, dimensions))
+
+
+def _local_image_feature_vector(*, image_path: Path, dimensions: int) -> np.ndarray:
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        rgb = image.convert("RGB").resize((32, 32))
+        arr = np.asarray(rgb, dtype=np.float32) / 255.0
+    means = arr.mean(axis=(0, 1))
+    stds = arr.std(axis=(0, 1))
+    hist_parts = []
+    for channel in range(3):
+        hist, _ = np.histogram(arr[:, :, channel], bins=16, range=(0.0, 1.0))
+        hist_parts.append(hist.astype(np.float32))
+    vector = np.concatenate([means, stds, *hist_parts]).astype(np.float32)
+    if vector.size < dimensions:
+        vector = np.pad(vector, (0, dimensions - vector.size))
+    elif vector.size > dimensions:
+        vector = vector[:dimensions]
+    norm = np.linalg.norm(vector)
+    if norm > 0:
+        vector = vector / norm
+    return vector.astype(np.float32)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not path.exists():
+        return out
+    with path.open("r", encoding="utf-8") as fr:
+        for line in fr:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                out.append(payload)
+    return out
+
+
+def _read_sidecar(path: Path) -> dict[str, Any]:
+    for meta_path in (path.with_suffix(path.suffix + ".meta.json"), path.with_suffix(".meta.json")):
+        if not meta_path.exists():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _download_bytes(url: str, *, max_bytes: int) -> tuple[bytes, str]:
+    request = Request(url=url, headers={"User-Agent": "KUMC-Agent/1.0"})
+    with urlopen(request, timeout=20) as response:  # noqa: S310 - configured source URLs.
+        content_type = str(response.headers.get("content-type") or "")
+        data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("image exceeds max download size")
+    return data, content_type
+
+
+def _mask_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if isinstance(value, str):
+            out[key] = _mask_secret_text(value)
+        elif isinstance(value, list):
+            out[key] = [_mask_secret_text(item) if isinstance(item, str) else item for item in value]
+        else:
+            out[key] = value
+    return out
+
+
+def _mask_secret_text(text: str) -> str:
+    masked = text
+    for pattern in _SECRET_PATTERNS:
+        masked = pattern.sub(lambda m: m.group(0).split(m.group(2), 1)[0] + "[REDACTED]" if len(m.groups()) >= 2 else "[REDACTED]", masked)
+    return masked
+
+
+def _compact_text(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if limit <= 0 or len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _context_around(text: str, position: int, *, radius: int = 700) -> str:
+    start = max(0, position - radius)
+    end = min(len(text), position + radius)
+    context = text[start:end]
+    context = _HTML_IMAGE_RE.sub("", context)
+    context = _MARKDOWN_IMAGE_RE.sub("", context)
+    context = re.sub(r"<[^>]+>", " ", context)
+    return html.unescape(_compact_text(context, radius * 2))
+
+
+def _first_heading(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()
+    return ""
+
+
+def _article_source_url(*, source_kind: str, metadata: dict[str, Any]) -> str:
+    if source_kind == "hatena":
+        return str(metadata.get("hatenablog_url") or "").strip()
+    return str(metadata.get("crafters_colony_article_url") or "").strip()
+
+
+def _discord_message_url(*, guild_id: str, channel_id: str, message_id: str) -> str:
+    if guild_id and channel_id and message_id:
+        return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+    return ""
+
+
+def _looks_like_image(url: str, *, filename: str = "", content_type: str = "") -> bool:
+    lowered_type = content_type.lower()
+    if lowered_type.startswith("image/"):
+        return True
+    suffix = Path((filename or url).split("?", 1)[0]).suffix.lower()
+    return suffix in _IMAGE_EXTENSIONS
+
+
+def _is_http_url(value: str) -> bool:
+    return value.lower().startswith(("http://", "https://"))
+
+
+def _suffix_from_content_type(content_type: str) -> str:
+    lowered = content_type.split(";", 1)[0].strip().lower()
+    return {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+    }.get(lowered, "")
+
+
+def _dt_from(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _join_nonempty(*parts: str) -> str:
+    return " ".join(part.strip() for part in parts if part and part.strip())
+
+
+def _normalize_source_kind(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized == "x_posts":
+        return "x"
+    if normalized == "hatenablog":
+        return "hatena"
+    if normalized == "drive":
+        return "google_drive"
+    return normalized
+
+
+def _all_image_source_kinds() -> set[str]:
+    return {"discord", "google_drive", "x", "hatena", "crafters_colony"}

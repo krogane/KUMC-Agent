@@ -206,6 +206,20 @@ class RiskFeatureFlagsSection:
 
 
 @dataclass(frozen=True)
+class ImageSearchFeatureSection:
+    enabled: bool = True
+    limit: int = 8
+    dense_top_k: int = 24
+    feature_top_k: int = 16
+    rrf_k: int = 60
+    ocr_text_char_limit: int = 800
+    surrounding_text_char_limit: int = 1200
+    caption_model: str = ""
+    ocr_model: str = ""
+    feature_model: str = "local_hash"
+
+
+@dataclass(frozen=True)
 class FeatureSection:
     rag: bool
     indexing: bool
@@ -218,6 +232,7 @@ class FeatureSection:
     sources: SourcesSection
     retrieval: RetrievalSection
     risk_flags: RiskFeatureFlagsSection
+    image_search: ImageSearchFeatureSection = field(default_factory=ImageSearchFeatureSection)
 
 
 @dataclass(frozen=True)

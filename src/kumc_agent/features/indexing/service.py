@@ -50,6 +50,7 @@ class IndexingService:
         raw_dir: Path,
         app_config: RuntimeConfig,
         summary_llm: LLMPort | None = None,
+        image_asset_builder: object | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -58,6 +59,7 @@ class IndexingService:
         self._raw_dir = raw_dir
         self._runtime = app_config
         self._summary_llm = summary_llm
+        self._image_asset_builder = image_asset_builder
         self._chunks_root = self._runtime.app.data_dir / "chunks"
         self._first_rec_dir = self._chunks_root / "first_rec_chunk"
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
@@ -166,6 +168,14 @@ class IndexingService:
         self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
         self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
         self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
+        if self._image_asset_builder is not None:
+            build_from_raw_sources = getattr(
+                self._image_asset_builder,
+                "build_from_raw_sources",
+                None,
+            )
+            if callable(build_from_raw_sources):
+                build_from_raw_sources()
 
         return IndexBuildResult(
             loaded_sources=loaded_sources,

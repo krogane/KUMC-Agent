@@ -8,6 +8,10 @@ from kumc_agent.apps.foundation import build_foundation_app_context
 from kumc_agent.apps.retrieval import build_retrieval_app_context
 from kumc_agent.features.announcement import AnnouncementDraftService
 from kumc_agent.features.docgen.service import DocGenService
+from kumc_agent.features.image_search import (
+    ImageSearchConfig,
+    ImageSearchService,
+)
 from kumc_agent.features.member_search import (
     MemberProfileBuildService,
     MemberSearchConfig,
@@ -104,6 +108,31 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         llm=llm,
         prompts_dir=prompts_dir,
     )
+    image_search = ImageSearchService(
+        repository=operations_repository,
+        config=ImageSearchConfig(
+            limit=foundation.config.features.image_search.limit,
+            dense_top_k=foundation.config.features.image_search.dense_top_k,
+            feature_top_k=foundation.config.features.image_search.feature_top_k,
+            rrf_k=foundation.config.features.image_search.rrf_k,
+            ocr_text_char_limit=foundation.config.features.image_search.ocr_text_char_limit,
+            surrounding_text_char_limit=(
+                foundation.config.features.image_search.surrounding_text_char_limit
+            ),
+            ocr_model=(
+                foundation.config.features.image_search.ocr_model
+                or foundation.config.integrations.drive.pdf_ocr_model_path
+            ),
+            caption_model=(
+                foundation.config.features.image_search.caption_model
+                or foundation.config.providers.llm.gemini_model
+            ),
+        ),
+        embedder=embedder,
+        index_dir=foundation.config.base_dir / "data" / "image_search",
+        allowed_guild_ids=tuple(str(value) for value in foundation.config.security.discord_guild_allow_list),
+        admin_user_ids=tuple(str(value) for value in foundation.config.security.maintenance_command_author_ids),
+    )
     member_profile_builder = MemberProfileBuildService(
         repository=operations_repository,
         directory=DiscordMemberDirectoryConnector(
@@ -145,6 +174,7 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             ),
             operations=operations_repository,
             member_search_service=member_search,
+            image_search_service=image_search,
         ),
         member_profile_builder=member_profile_builder,
     )

@@ -101,7 +101,7 @@ class FileOperationsRepository:
             assets = [
                 asset
                 for asset in assets
-                if needle in " ".join((asset.title, asset.description, asset.source_kind, asset.uri)).lower()
+                if needle in _asset_search_text(asset).lower()
             ]
         return sorted(assets, key=lambda item: item.created_at or _MIN_DT)
 
@@ -410,6 +410,32 @@ def _asset_from_payload(payload: dict[str, object]) -> Asset:
         metadata=dict(_json(payload.get("metadata") or {})),
         created_at=_dt_from(payload.get("created_at")),
         updated_at=_dt_from(payload.get("updated_at")),
+    )
+
+
+def _asset_search_text(asset: Asset) -> str:
+    metadata = dict(asset.metadata or {})
+    metadata_text = " ".join(
+        str(metadata.get(key) or "")
+        for key in (
+            "caption",
+            "ocr_text",
+            "surrounding_text",
+            "source_url",
+            "source_label",
+            "source_kind",
+            "content_hash",
+        )
+    )
+    return " ".join(
+        (
+            asset.title,
+            asset.description,
+            asset.source_kind,
+            asset.source_item_id,
+            asset.uri,
+            metadata_text,
+        )
     )
 
 

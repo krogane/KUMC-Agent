@@ -19,10 +19,18 @@ from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
 from kumc_agent.infra.loaders.notion import NotionLoader
 from kumc_agent.infra.openclaw.client import OpenClawClient
 from kumc_agent.infra.loaders.x import XPostsLoader
+from kumc_agent.infra.database.postgres import PostgresClient
+from kumc_agent.infra.operations import build_operations_repository
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.infra.storage.filesystem import FilePromptRepository, FileSystemStorage
+from kumc_agent.features.image_search import (
+    GeminiImageCaptioner,
+    ImageAssetBuildService,
+    ImageSearchConfig,
+    LocalImageOcrExtractor,
+)
 from kumc_agent.features.indexing.service import IndexingService
 from kumc_agent.features.rag.config import (
     RagConfig,
@@ -149,6 +157,10 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         bm25_b=config.features.retrieval.sparse_bm25_b,
         use_normalized_form=config.features.retrieval.sparse_use_normalized_form,
         remove_symbols=config.features.retrieval.sparse_remove_symbols,
+    )
+    operations_repository = build_operations_repository(
+        postgres=PostgresClient(config.infrastructure.database),
+        fallback_dir=config.base_dir / "data" / "operations",
     )
 
     retrieval_component = RetrievalComponent(
@@ -341,6 +353,33 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         answer_filter=answer_filter,
     )
 
+    image_search_config = ImageSearchConfig(
+        limit=config.features.image_search.limit,
+        dense_top_k=config.features.image_search.dense_top_k,
+        feature_top_k=config.features.image_search.feature_top_k,
+        rrf_k=config.features.image_search.rrf_k,
+        ocr_text_char_limit=config.features.image_search.ocr_text_char_limit,
+        surrounding_text_char_limit=config.features.image_search.surrounding_text_char_limit,
+        ocr_model=config.features.image_search.ocr_model or config.integrations.drive.pdf_ocr_model_path,
+        caption_model=config.features.image_search.caption_model or config.providers.llm.gemini_model,
+    )
+    image_asset_builder = ImageAssetBuildService(
+        repository=operations_repository,
+        raw_dir=config.app.raw_dir,
+        image_dir=config.base_dir / "data" / "image_search" / "images",
+        index_dir=config.base_dir / "data" / "image_search",
+        embedder=embedder,
+        config=image_search_config,
+        captioner=GeminiImageCaptioner(
+            api_key=config.integrations.gemini_api_key,
+            model=image_search_config.caption_model,
+            prompt_path=config.base_dir / "assets" / "prompts" / "image_caption.md",
+        ),
+        ocr=LocalImageOcrExtractor(
+            model_path=image_search_config.ocr_model
+        ),
+    )
+
     indexing_service = IndexingService(
         storage=storage,
         embedder=embedder,
@@ -349,6 +388,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         raw_dir=config.app.raw_dir,
         app_config=config,
         summary_llm=summary_chunk_llm,
+        image_asset_builder=image_asset_builder,
     )
 
     drive_loader = GoogleDriveLoader(

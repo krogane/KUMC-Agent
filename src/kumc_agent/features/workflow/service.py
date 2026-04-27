@@ -73,6 +73,7 @@ class WorkflowService:
         minecraft: MinecraftSupportService | None = None,
         operations: OperationsRepository | None = None,
         member_search_service: Any | None = None,
+        image_search_service: Any | None = None,
     ) -> None:
         self.repository = repository
         self.ask_service = ask_service
@@ -83,6 +84,7 @@ class WorkflowService:
         self.minecraft = minecraft
         self.operations = operations
         self.member_search_service = member_search_service
+        self.image_search_service = image_search_service
 
     def run(self, request: WorkRequest) -> WorkResponse:
         run_record = self._start_workflow_run(request)
@@ -571,6 +573,22 @@ class WorkflowService:
                 detail_markdown="Asset repository is not configured.",
                 metadata={"route": "image_search", "configured": False},
             )
+        if self.image_search_service is not None:
+            from kumc_agent.features.image_search import ImageSearchRequest
+
+            result = self.image_search_service.search(
+                ImageSearchRequest(
+                    query=query,
+                    access_context=request.access,
+                    metadata={"workflow": "image_search"},
+                )
+            )
+            return WorkResponse(
+                text=result.text,
+                detail_markdown=result.detail_markdown,
+                assets=result.assets,
+                metadata=result.metadata,
+            )
         assets = tuple(self.operations.list_assets(query=query))
         detail = self._format_assets(list(assets))
         if not assets:
@@ -582,10 +600,15 @@ class WorkflowService:
                 ]
             )
         return WorkResponse(
-            text=f"画像候補は {len(assets)} 件です。",
+            text=f"画像候補は {len(assets)} 件です。再利用可否はこの結果では判断しません。",
             detail_markdown=detail,
             assets=assets,
-            metadata={"route": "image_search", "query": query},
+            metadata={
+                "route": "image_search",
+                "query": query,
+                "degraded": True,
+                "degraded_reason": "image_search_service_unavailable",
+            },
         )
 
     def member_search(self, request: WorkRequest) -> WorkResponse:
@@ -1572,11 +1595,21 @@ class WorkflowService:
     def _format_assets(self, assets: list[object]) -> str:
         if not assets:
             return "Asset はありません。"
-        lines = ["# Asset"]
+        lines = ["# Image Search"]
         for asset in assets:
+            metadata = dict(getattr(asset, "metadata", {}) or {})
+            source = metadata.get("source_label") or getattr(asset, "source_kind", "")
+            source_url = metadata.get("source_url") or getattr(asset, "uri", "")
+            description = getattr(asset, "description", "") or metadata.get("caption") or ""
             lines.append(
-                f"- `{asset.id}` {asset.title or asset.uri or 'untitled'} / source: {asset.source_kind} / rights: {asset.rights_status} / people: {asset.contains_people}"
+                f"- `{asset.id}` {asset.title or asset.uri or 'untitled'} / source: {source}"
             )
+            if description:
+                lines.append(f"  - 説明: {_truncate(str(description), 160)}")
+            if source_url:
+                lines.append(f"  - 出典: {source_url}")
+        lines.append("")
+        lines.append("この結果は画像候補の提示のみで、外部公開・転載・再利用の可否は判断しません。")
         return "\n".join(lines)
 
     def _format_member_profiles(self, profiles: list[object]) -> str:
@@ -1761,6 +1794,13 @@ def _join_text(*parts: str) -> str:
 
 def _compact_lines(lines: list[str]) -> str:
     return "\n".join(line for line in lines if line)
+
+
+def _truncate(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _quote_lines(text: str, *, limit: int) -> list[str]:

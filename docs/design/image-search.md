@@ -249,7 +249,7 @@ RRF後、回答前に再度AccessScopeを確認する。
 
 ```markdown
 # Image Search
-- `asset-1` 新歓ポスター / source: google_drive / date: 2026-03-01
+- `asset-1` 新歓ポスター
   - 説明: 新歓告知用のポスター画像
   - 出典: Drive / 広報/2026新歓
 ```

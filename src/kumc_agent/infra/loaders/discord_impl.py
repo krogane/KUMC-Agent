@@ -194,9 +194,43 @@ def _message_record(
             "message_timestamp": timestamp,
             "author_id": str(getattr(author, "id", "")),
             "author_name": author_name,
+            "attachments": _attachment_records(message),
         }
     )
     return {"text": text, "metadata": metadata}
+
+
+def _attachment_records(message: discord.Message) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for attachment in getattr(message, "attachments", []) or []:
+        content_type = str(getattr(attachment, "content_type", "") or "")
+        filename = str(getattr(attachment, "filename", "") or "")
+        url = str(getattr(attachment, "url", "") or "")
+        proxy_url = str(getattr(attachment, "proxy_url", "") or "")
+        if not _looks_like_image_attachment(
+            url=url,
+            filename=filename,
+            content_type=content_type,
+        ):
+            continue
+        records.append(
+            {
+                "id": str(getattr(attachment, "id", "") or ""),
+                "filename": filename,
+                "url": url,
+                "proxy_url": proxy_url,
+                "content_type": content_type,
+                "size": int(getattr(attachment, "size", 0) or 0),
+            }
+        )
+    return records
+
+
+def _looks_like_image_attachment(*, url: str, filename: str, content_type: str) -> bool:
+    if content_type.lower().startswith("image/"):
+        return True
+    lowered = (filename or url).split("?", 1)[0].lower()
+    return lowered.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"))
 
 
 def _has_read_permissions(
@@ -498,7 +532,7 @@ class _DiscordMessageCollector(discord.Client):
                         observed_at=observed_at,
                     )
                 cleaned = _strip_urls(message.content or "")
-                if not cleaned:
+                if not cleaned and not _attachment_records(message):
                     continue
                 record = _message_record(
                     text=cleaned,
