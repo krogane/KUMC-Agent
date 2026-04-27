@@ -57,7 +57,6 @@ Discord 告知投稿、X 投稿、ブログ投稿などは、次を満たすま�
 - `external_posting=approval_required` を維持する。
 - Announcement draft の fact check が完了している。
 - source visibility が public または外部公開可能である。
-- 画像や第三者素材を使う場合は `AssetUsageRequest` 承認がある。
 - 投稿先 channel/account を user が明示する。
 - 投稿 preview を approver が確認する。
 
@@ -72,16 +71,14 @@ Minecraft 書き込み操作は、次を満たすまで dry-run のみとする�
 - high risk は admin approval、critical は two-person approval または disabled にする。
 - 実サーバーでなく staging server で rollback を実演する。
 
-## Image / Asset Workflow Gate
+## Image Search Gate
 
-画像検索・利用申請は、次が必要。
+画像検索は、次が必要。
 
 - 画像 attachment / Drive image / X image / blog image の indexing pipeline
 - caption/OCR/feature vector provider
-- `asset_usage_requests` repository
-- 人物有無、投稿者、出典 URL、利用条件 metadata
-- 画像利用承認 UI
-- 外部公開時の素材混入 safety eval
+- 投稿者、出典 URL、投稿日時、媒体、権限 metadata
+- 検索結果が候補提示であり、再利用可否を判定しないことを確認する safety eval
 
 ## Member Search Gate
 

@@ -60,22 +60,6 @@ class Asset:
 
 
 @dataclass(frozen=True)
-class AssetUsageRequest:
-    id: str
-    asset_id: str = ""
-    purpose: str = ""
-    medium: str = ""
-    requested_by: str = ""
-    status: str = "proposed"
-    needs_owner_check: bool = True
-    needs_people_check: bool = True
-    payload: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-@dataclass(frozen=True)
 class MemberProfile:
     id: str
     display_name: str = ""

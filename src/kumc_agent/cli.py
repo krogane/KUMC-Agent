@@ -56,7 +56,6 @@ def _workflow_response_payload(response: object) -> dict[str, object]:
         "schedule_candidates": _dump_items(getattr(response, "schedule_candidates", ())),
         "workflow_candidates": _dump_items(getattr(response, "workflow_candidates", ())),
         "assets": _dump_items(getattr(response, "assets", ())),
-        "asset_usage_requests": _dump_items(getattr(response, "asset_usage_requests", ())),
         "member_profiles": _dump_items(getattr(response, "member_profiles", ())),
         "tasks": _dump_items(getattr(response, "tasks", ())),
         "events": _dump_items(getattr(response, "events", ())),
@@ -241,7 +240,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "mc_status",
             "mc_request",
             "image_search",
-            "image_usage_request",
             "member_search",
         ),
     )
@@ -263,7 +261,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "schedule",
             "announcement",
             "automation_rule",
-            "asset_usage",
             "server_operation",
             "finance_record",
             "member_assignment",

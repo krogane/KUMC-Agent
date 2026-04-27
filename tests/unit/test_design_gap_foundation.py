@@ -46,7 +46,7 @@ class DesignGapFoundationTests(unittest.TestCase):
             self.assertEqual(repository.list_assets(query="新歓")[0].id, "asset-1")
             self.assertEqual(repository.search_member_profiles(query="poster")[0].id, profile.id)
 
-    def test_image_usage_and_member_search_are_safe_by_default(self) -> None:
+    def test_image_search_and_member_search_are_safe_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             operations = FileOperationsRepository(root_dir=root / "operations")
@@ -61,14 +61,6 @@ class DesignGapFoundationTests(unittest.TestCase):
             image = service.run(
                 WorkRequest(work_type="image_search", instruction="広報")
             )
-            usage = service.run(
-                WorkRequest(
-                    work_type="image_usage_request",
-                    target="asset-1",
-                    instruction="purpose: X告知 medium: X",
-                    access=AccessContext(user_id="organizer", is_admin=True),
-                )
-            )
             denied_member = service.run(
                 WorkRequest(
                     work_type="member_search",
@@ -78,8 +70,6 @@ class DesignGapFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(len(image.assets), 1)
-            self.assertEqual(len(usage.asset_usage_requests), 1)
-            self.assertTrue(usage.asset_usage_requests[0].needs_people_check)
             self.assertIn("権限", denied_member.text)
 
     def test_generic_approval_records_no_side_effects(self) -> None:
@@ -91,8 +81,8 @@ class DesignGapFoundationTests(unittest.TestCase):
 
             response = service.approval(
                 action="approve",
-                target_type="asset_usage",
-                target_id="asset-usage-1",
+                target_type="announcement",
+                target_id="announcement-1",
                 comment="ok",
                 access=AccessContext(user_id="admin", is_admin=True),
             )

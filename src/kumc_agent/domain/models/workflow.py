@@ -7,7 +7,6 @@ from typing import Any
 from kumc_agent.domain.models.minecraft import ServerOperation
 from kumc_agent.domain.models.operations import (
     Asset,
-    AssetUsageRequest,
     MemberProfile,
     WorkflowCandidate,
 )
@@ -160,7 +159,6 @@ class WorkResponse:
     schedule_candidates: tuple[ScheduleCandidate, ...] = tuple()
     workflow_candidates: tuple[WorkflowCandidate, ...] = tuple()
     assets: tuple[Asset, ...] = tuple()
-    asset_usage_requests: tuple[AssetUsageRequest, ...] = tuple()
     member_profiles: tuple[MemberProfile, ...] = tuple()
     tasks: tuple[Task, ...] = tuple()
     events: tuple[Event, ...] = tuple()

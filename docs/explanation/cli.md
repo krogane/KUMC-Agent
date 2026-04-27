@@ -292,13 +292,12 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli work --type task_add --ins
 - `mc_status`: Minecraft サーバー状態確認
 - `mc_request`: Minecraft 関連操作リクエスト
 - `image_search`: 登録済み Asset から画像候補を検索
-- `image_usage_request`: 画像利用の承認依頼候補を作成
 - `member_search`: 権限付きでメンバー候補を検索
 
 入力は `WorkRequest` にまとめられ、`workflow.workflow.run(...)` に渡されます。
 結果は `_workflow_response_payload()` で JSON 向けに整形されます。
 `event_add` と `schedule_add` は正本を直接登録せず、`event_candidates` / `schedule_candidates` として返します。正本の `events` / `schedules` に入るのは、`approval --type event|schedule --action approve` で承認された後です。
-`image_usage_request` は `asset_usage_requests` と汎用 `workflow_candidates` を返します。承認前に外部公開可能とは判断しません。`member_search` は organizer / admin 権限がない場合、対象情報の有無を示唆しない拒否応答を返します。
+`member_search` は organizer / admin 権限がない場合、対象情報の有無を示唆しない拒否応答を返します。
 
 ### `approval`
 
@@ -309,7 +308,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type task --act
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli approval --type event --action approve --target-id <candidate-id>
 ```
 
-`--type` には `task`、`event`、`schedule`、`announcement`、`automation_rule`、`asset_usage`、`server_operation`、`finance_record`、`member_assignment`、`other` を指定できます。
+`--type` には `task`、`event`、`schedule`、`announcement`、`automation_rule`、`server_operation`、`finance_record`、`member_assignment`、`other` を指定できます。
 `--action` では次の操作を指定できます。
 
 - `list`: 承認待ち一覧

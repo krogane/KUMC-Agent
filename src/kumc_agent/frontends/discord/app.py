@@ -332,7 +332,6 @@ def create_bot(
             app_commands.Choice(name="mc_status", value="mc_status"),
             app_commands.Choice(name="mc_request", value="mc_request"),
             app_commands.Choice(name="image_search", value="image_search"),
-            app_commands.Choice(name="image_usage_request", value="image_usage_request"),
             app_commands.Choice(name="member_search", value="member_search"),
         ],
         format=[
@@ -387,7 +386,6 @@ def create_bot(
             app_commands.Choice(name="schedule", value="schedule"),
             app_commands.Choice(name="announcement", value="announcement"),
             app_commands.Choice(name="automation_rule", value="automation_rule"),
-            app_commands.Choice(name="asset_usage", value="asset_usage"),
             app_commands.Choice(name="server_operation", value="server_operation"),
             app_commands.Choice(name="finance_record", value="finance_record"),
             app_commands.Choice(name="member_assignment", value="member_assignment"),

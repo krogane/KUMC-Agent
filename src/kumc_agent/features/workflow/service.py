@@ -11,7 +11,6 @@ from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.agentic import AgenticSearchRequest
 from kumc_agent.domain.models.docgen import DocGenRequest
 from kumc_agent.domain.models.operations import (
-    AssetUsageRequest,
     WorkflowCandidate,
     WorkflowRun,
 )
@@ -101,7 +100,6 @@ class WorkflowService:
                 "schedule_candidates": len(response.schedule_candidates),
                 "workflow_candidates": len(response.workflow_candidates),
                 "assets": len(response.assets),
-                "asset_usage_requests": len(response.asset_usage_requests),
                 "member_profiles": len(response.member_profiles),
                 "events": len(response.events),
                 "schedules": len(response.schedules),
@@ -146,8 +144,6 @@ class WorkflowService:
             return self.mc_request(request)
         if work_type == "image_search":
             return self.image_search(request)
-        if work_type == "image_usage_request":
-            return self.image_usage_request(request)
         if work_type == "member_search":
             return self.member_search(request)
         raise ValueError(f"Unsupported work type: {request.work_type}")
@@ -583,66 +579,13 @@ class WorkflowService:
                     "# Image Search",
                     "",
                     "該当する Asset は登録されていません。",
-                    "外部画像を再利用可能とは判断していません。",
                 ]
             )
         return WorkResponse(
-            text=f"画像候補は {len(assets)} 件です。利用する場合は image_usage_request で承認依頼を作成してください。",
+            text=f"画像候補は {len(assets)} 件です。",
             detail_markdown=detail,
             assets=assets,
             metadata={"route": "image_search", "query": query},
-        )
-
-    def image_usage_request(self, request: WorkRequest) -> WorkResponse:
-        if self.operations is None:
-            return WorkResponse(
-                text="画像利用申請 repository は未設定です。",
-                detail_markdown="Asset usage repository is not configured.",
-                metadata={"route": "image_usage_request", "configured": False},
-            )
-        asset_id = request.target.strip() or _extract_labeled_value(
-            request.instruction,
-            ("asset_id", "asset", "画像ID"),
-        ) or ""
-        asset = self.operations.get_asset(asset_id) if asset_id else None
-        purpose = _extract_labeled_value(request.instruction, ("purpose", "目的", "用途")) or request.instruction
-        medium = _extract_labeled_value(request.instruction, ("medium", "媒体", "掲載先")) or ""
-        usage = self.operations.save_asset_usage_request(
-            AssetUsageRequest(
-                id=stable_hash(f"asset-usage:{asset_id}:{purpose}:{medium}:{request.access.user_id}")[:32],
-                asset_id=asset_id,
-                purpose=purpose.strip(),
-                medium=medium.strip(),
-                requested_by=request.access.user_id,
-                status="proposed",
-                needs_owner_check=True,
-                needs_people_check=True if asset is None else bool(asset.contains_people),
-                payload={"instruction": request.instruction, "target": request.target},
-                metadata={
-                    "asset_found": asset is not None,
-                    "rights_status": asset.rights_status if asset else "unknown",
-                },
-            )
-        )
-        candidate = self.operations.save_workflow_candidate(
-            WorkflowCandidate(
-                id=stable_hash(f"workflow-candidate:asset_usage:{usage.id}")[:32],
-                candidate_type="asset_usage",
-                title=f"Asset usage request: {usage.asset_id or 'unresolved asset'}",
-                payload=asdict(usage),
-                confidence="medium" if asset else "low",
-                status="proposed",
-                created_by=request.access.user_id or "agent",
-                metadata={"target_type": "asset_usage", "target_id": usage.id},
-            )
-        )
-        return WorkResponse(
-            text=f"AssetUsageRequest を作成しました。承認前に外部公開可能とは判断しません: {usage.id}",
-            detail_markdown=self._format_asset_usage_requests([usage]),
-            workflow_candidates=(candidate,),
-            asset_usage_requests=(usage,),
-            assets=(asset,) if asset else tuple(),
-            metadata={"route": "image_usage_request", "approval_required": True},
         )
 
     def member_search(self, request: WorkRequest) -> WorkResponse:
@@ -703,7 +646,6 @@ class WorkflowService:
         if normalized_type in {
             "announcement",
             "automation_rule",
-            "asset_usage",
             "server_operation",
             "finance_record",
             "member_assignment",
@@ -1637,16 +1579,6 @@ class WorkflowService:
             )
         return "\n".join(lines)
 
-    def _format_asset_usage_requests(self, requests: list[AssetUsageRequest]) -> str:
-        if not requests:
-            return "AssetUsageRequest はありません。"
-        lines = ["# AssetUsageRequest"]
-        for request in requests:
-            lines.append(
-                f"- `{request.id}` asset={request.asset_id or '未指定'} / medium={request.medium or '未定'} / status={request.status} / owner_check={request.needs_owner_check} / people_check={request.needs_people_check}"
-            )
-        return "\n".join(lines)
-
     def _format_member_profiles(self, profiles: list[object]) -> str:
         if not profiles:
             return "MemberProfile はありません。"
@@ -1765,7 +1697,7 @@ def _can_search_members(access: AccessContext) -> bool:
 def _workflow_response_status(response: WorkResponse) -> str:
     if response.server_operations or response.task_candidates or response.event_candidates or response.schedule_candidates:
         return "waiting_approval"
-    if response.asset_usage_requests or response.workflow_candidates:
+    if response.workflow_candidates:
         return "waiting_approval"
     return "succeeded"
 

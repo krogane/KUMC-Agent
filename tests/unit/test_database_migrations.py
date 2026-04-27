@@ -44,21 +44,21 @@ class DatabaseMigrationsTests(unittest.TestCase):
 
     def test_ingestion_migration_contains_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "002_wave2_ingestion.sql"
+            ROOT / "infrastructure" / "migrations" / "002_ingestion_sources_documents.sql"
         ).read_text(encoding="utf-8")
         for table in ("source_items", "documents", "chunks", "secret_findings"):
             self.assertIn(f"create table if not exists {table}", sql)
 
     def test_retrieval_migration_contains_embedding_and_search_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "003_wave3_retrieval.sql"
+            ROOT / "infrastructure" / "migrations" / "003_retrieval_embeddings_search.sql"
         ).read_text(encoding="utf-8")
         for table in ("embeddings", "search_runs", "search_run_results"):
             self.assertIn(f"create table if not exists {table}", sql)
 
     def test_workflow_migration_contains_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "004_wave4_workflow.sql"
+            ROOT / "infrastructure" / "migrations" / "004_workflow_events_tasks_approvals.sql"
         ).read_text(encoding="utf-8")
         for table in (
             "events",
@@ -72,7 +72,10 @@ class DatabaseMigrationsTests(unittest.TestCase):
 
     def test_event_schedule_candidate_migration_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "008_event_schedule_candidates.sql"
+            ROOT
+            / "infrastructure"
+            / "migrations"
+            / "008_workflow_event_schedule_candidates.sql"
         ).read_text(encoding="utf-8")
         for table in ("event_candidates", "schedule_candidates"):
             self.assertIn(f"create table if not exists {table}", sql)
@@ -82,14 +85,14 @@ class DatabaseMigrationsTests(unittest.TestCase):
             ROOT
             / "infrastructure"
             / "migrations"
-            / "005_wave5_agentic_docgen_announcement.sql"
+            / "005_agentic_runs_announcements.sql"
         ).read_text(encoding="utf-8")
         for table in ("agent_runs", "agent_steps", "announcements"):
             self.assertIn(f"create table if not exists {table}", sql)
 
     def test_minecraft_support_migration_contains_server_operations_table(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "006_wave6_minecraft_support.sql"
+            ROOT / "infrastructure" / "migrations" / "006_minecraft_server_operations.sql"
         ).read_text(encoding="utf-8")
 
         self.assertIn("create table if not exists server_operations", sql)
@@ -97,16 +100,16 @@ class DatabaseMigrationsTests(unittest.TestCase):
 
     def test_automation_hardening_migration_contains_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "007_wave7_automation_hardening.sql"
+            ROOT / "infrastructure" / "migrations" / "007_automation_rules_runs.sql"
         ).read_text(encoding="utf-8")
 
         self.assertIn("create table if not exists automation_rules", sql)
         self.assertIn("create table if not exists automation_runs", sql)
         self.assertIn("idempotency_key text not null unique", sql)
 
-    def test_gap_migration_contains_required_tables(self) -> None:
+    def test_workflow_action_execution_migration_contains_required_tables(self) -> None:
         sql = (
-            ROOT / "infrastructure" / "migrations" / "009_design_gap_tables.sql"
+            ROOT / "infrastructure" / "migrations" / "009_workflow_action_execution.sql"
         ).read_text(encoding="utf-8")
         for table in (
             "workflow_candidates",
@@ -114,17 +117,62 @@ class DatabaseMigrationsTests(unittest.TestCase):
             "action_specs",
             "action_runs",
             "action_approvals",
-            "llm_calls",
-            "tool_calls",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+        self.assertIn("create unique index if not exists uq_action_runs_idempotency_key", sql)
+
+    def test_observability_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "010_observability_llm_tool_calls.sql"
+        ).read_text(encoding="utf-8")
+        for table in ("llm_calls", "tool_calls"):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_indexing_assets_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "011_ingestion_indexing_assets.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
             "indexing_runs",
             "assets",
-            "asset_usage_requests",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_member_profiles_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "012_member_profiles.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
             "member_profiles",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_finance_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "013_finance_records.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
             "finance_records",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_evaluations_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "014_evaluations.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
             "eval_sets",
             "eval_cases",
             "eval_runs",
             "eval_results",
+        ):
+            self.assertIn(f"create table if not exists {table}", sql)
+
+    def test_minecraft_wiki_migration_contains_required_tables(self) -> None:
+        sql = (
+            ROOT / "infrastructure" / "migrations" / "015_minecraft_wiki_articles.sql"
+        ).read_text(encoding="utf-8")
+        for table in (
             "minecraft_wiki_articles",
         ):
             self.assertIn(f"create table if not exists {table}", sql)

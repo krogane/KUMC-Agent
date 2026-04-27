@@ -115,10 +115,10 @@ class ProductionReadinessService:
         )
 
     def _migration_check(self) -> ProductionReadinessCheck:
-        path = self.config.infrastructure.migrations.directory / "007_wave7_automation_hardening.sql"
+        path = self.config.infrastructure.migrations.directory / "007_automation_rules_runs.sql"
         return ProductionReadinessCheck(
-            id="migration_007",
-            title="Wave 7 migration exists",
+            id="automation_migration",
+            title="Automation migration exists",
             status="pass" if path.exists() else "fail",
             detail=str(path),
         )

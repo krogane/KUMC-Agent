@@ -9,7 +9,6 @@ from typing import Any, Protocol
 from kumc_agent.domain.models.operations import (
     ActionRun,
     Asset,
-    AssetUsageRequest,
     EvalRun,
     IndexingRun,
     MemberProfile,
@@ -41,15 +40,6 @@ class OperationsRepository(Protocol):
         ...
 
     def get_asset(self, asset_id: str) -> Asset | None:
-        ...
-
-    def save_asset_usage_request(self, request: AssetUsageRequest) -> AssetUsageRequest:
-        ...
-
-    def get_asset_usage_request(self, request_id: str) -> AssetUsageRequest | None:
-        ...
-
-    def list_asset_usage_requests(self, *, status: str | None = None) -> list[AssetUsageRequest]:
         ...
 
     def save_member_profile(self, profile: MemberProfile) -> MemberProfile:
@@ -117,28 +107,6 @@ class FileOperationsRepository:
 
     def get_asset(self, asset_id: str) -> Asset | None:
         return _latest_by_id(self.root_dir / "assets.jsonl", _asset_from_payload).get(asset_id)
-
-    def save_asset_usage_request(self, request: AssetUsageRequest) -> AssetUsageRequest:
-        stored = _touch(request)
-        _append_jsonl(self.root_dir / "asset_usage_requests.jsonl", _payload(stored))
-        return stored
-
-    def get_asset_usage_request(self, request_id: str) -> AssetUsageRequest | None:
-        return _latest_by_id(
-            self.root_dir / "asset_usage_requests.jsonl",
-            _asset_usage_request_from_payload,
-        ).get(request_id)
-
-    def list_asset_usage_requests(self, *, status: str | None = None) -> list[AssetUsageRequest]:
-        requests = list(
-            _latest_by_id(
-                self.root_dir / "asset_usage_requests.jsonl",
-                _asset_usage_request_from_payload,
-            ).values()
-        )
-        if status:
-            requests = [item for item in requests if item.status == status]
-        return sorted(requests, key=lambda item: item.created_at or _MIN_DT)
 
     def save_member_profile(self, profile: MemberProfile) -> MemberProfile:
         stored = _touch(profile)
@@ -239,11 +207,6 @@ class PostgresOperationsRepository(FileOperationsRepository):
         self._insert_payload("assets", _asset_payload(stored))
         return stored
 
-    def save_asset_usage_request(self, request: AssetUsageRequest) -> AssetUsageRequest:
-        stored = _touch(request)
-        self._insert_payload("asset_usage_requests", _asset_usage_request_payload(stored))
-        return stored
-
     def save_member_profile(self, profile: MemberProfile) -> MemberProfile:
         stored = _touch(profile)
         self._insert_payload("member_profiles", _member_profile_payload(stored))
@@ -336,8 +299,6 @@ def _payload(item: Any) -> dict[str, object]:
         return _workflow_candidate_payload(item)
     if isinstance(item, Asset):
         return _asset_payload(item)
-    if isinstance(item, AssetUsageRequest):
-        return _asset_usage_request_payload(item)
     if isinstance(item, MemberProfile):
         return _member_profile_payload(item)
     if isinstance(item, ActionRun):
@@ -446,37 +407,6 @@ def _asset_from_payload(payload: dict[str, object]) -> Asset:
         access_scope=dict(_json(payload.get("access_scope") or {})),
         rights_status=str(payload.get("rights_status") or "unknown"),
         contains_people=bool(payload.get("contains_people", False)),
-        metadata=dict(_json(payload.get("metadata") or {})),
-        created_at=_dt_from(payload.get("created_at")),
-        updated_at=_dt_from(payload.get("updated_at")),
-    )
-
-
-def _asset_usage_request_payload(item: AssetUsageRequest) -> dict[str, object]:
-    return _base_payload(item) | {
-        "asset_id": item.asset_id,
-        "purpose": item.purpose,
-        "medium": item.medium,
-        "requested_by": item.requested_by,
-        "status": item.status,
-        "needs_owner_check": item.needs_owner_check,
-        "needs_people_check": item.needs_people_check,
-        "payload": item.payload,
-        "metadata": item.metadata,
-    }
-
-
-def _asset_usage_request_from_payload(payload: dict[str, object]) -> AssetUsageRequest:
-    return AssetUsageRequest(
-        id=str(payload["id"]),
-        asset_id=str(payload.get("asset_id") or ""),
-        purpose=str(payload.get("purpose") or ""),
-        medium=str(payload.get("medium") or ""),
-        requested_by=str(payload.get("requested_by") or ""),
-        status=str(payload.get("status") or "proposed"),
-        needs_owner_check=bool(payload.get("needs_owner_check", True)),
-        needs_people_check=bool(payload.get("needs_people_check", True)),
-        payload=dict(_json(payload.get("payload") or {})),
         metadata=dict(_json(payload.get("metadata") or {})),
         created_at=_dt_from(payload.get("created_at")),
         updated_at=_dt_from(payload.get("updated_at")),
