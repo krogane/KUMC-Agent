@@ -469,6 +469,8 @@ def create_bot(
         instruction="指示または本文",
         target="対象 ID / 検索クエリ / 追加本文",
         format="出力形式",
+        source_filter="画像検索などの source filter",
+        limit="画像検索などの最大件数",
     )
     @app_commands.choices(
         format=[
@@ -482,6 +484,8 @@ def create_bot(
         instruction: str = "",
         target: str = "",
         format: app_commands.Choice[str] | None = None,
+        source_filter: str = "",
+        limit: int | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         response = await asyncio.to_thread(
@@ -491,6 +495,8 @@ def create_bot(
                 instruction=instruction,
                 target=target,
                 output_format=(format.value if format else "markdown"),
+                source_filter=(source_filter,) if source_filter.strip() else tuple(),
+                limit=limit,
                 access=_access_context(interaction),
             ),
         )

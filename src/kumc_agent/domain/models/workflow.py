@@ -212,6 +212,9 @@ class WorkRequest:
     target: str = ""
     output_format: str = "markdown"
     access: AccessContext = field(default_factory=AccessContext)
+    source_filter: tuple[str, ...] = tuple()
+    limit: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

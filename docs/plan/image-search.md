@@ -22,6 +22,12 @@
 - CLIや外部連携payloadの診断情報が `metadata` 配下に入る。
 - 画像検索結果が再利用可否を断定しない。
 - `image_usage_request` 経路がCLI、Discord、HTTP、workflow、repository、テストに残らない。
+- JSONL/Postgres の両方で Asset を保存・再読込できる。
+- `source_filter` と `limit` を workflow、統合入力受付、CLI、HTTP、Discord から渡せる。
+- `features.image_search.enabled=false` で index 作成・検索 route が無効化される。
+- Google Drive は単体画像、Markdown/HTML画像参照、PPTX `ppt/media/*` をAsset化できる。
+- 画像特徴量モデルはローカル配置済み外部モデルを使用し、index作成中にダウンロードしない。
+- 外部特徴量モデルが利用できない場合は degraded fallback として明示する。
 - 主要動作を既存テスト方式で検証できる。
 
 ## 3. 実装ステップ
@@ -47,11 +53,13 @@
 3. `rights_status` と `contains_people` は互換のため残すが、検索結果の利用可否判定には使わない。
 4. `list_assets()` は暫定互換として残し、専用検索service導入後はfallbackにする。
 5. JSONL/Postgres payloadで既存Assetを読み込める後方互換を維持する。
+6. Postgres backend でも `save_asset()` 後に `get_asset()` / `list_assets()` で同一Assetを再読込できるようにする。
 
 検証:
 - 画像検索metadata付きAssetを保存・再読込できること。
 - 既存Assetを読み込めること。
 - 診断情報がトップレベルへ出ないこと。
+- Postgres構成で画像Asset検索indexが空にならないこと。
 
 ### Phase 3: 画像取得・Asset化
 1. サークル情報RAGのデータ取得pipelineから画像ファイルと周辺テキストを受け取るadapterを追加する。
@@ -62,11 +70,14 @@
 6. クラフターズコロニー投稿画像をAsset化する。
 7. sourceごとに `source_kind`、`source_item_id`、`title`、`uri`、`captured_at`、`access_scope` を正規化する。
 8. `content_hash` と `source_item_id` で重複排除する。
+9. Google Slides export / PowerPoint の `ppt/media/*` を `raw/images/google_drive` に展開し、sidecar metadataに周辺テキストを保存する。
+10. `source_fingerprint` に `access_scope`、出典URL、出典ラベル、source revision/modified timeを含め、ACL変更でもAssetを更新する。
 
 検証:
 - sourceごとにAssetが作成されること。
 - 同一source item内の複数画像を `image_index` で区別できること。
 - 削除済み・権限変更済み画像が検索対象から外れること。
+- PPTX内画像がDrive画像Assetとして検索対象になること。
 
 ### Phase 4: 画像説明文生成
 1. 画像説明文生成componentを追加する。
@@ -99,11 +110,15 @@
 4. 画像特徴量vectorをAsset IDと紐づけて保存する。
 5. `metadata.feature_vector_ref` にvector保存先参照を入れる。
 6. 自動インデックス更新の対象に画像caption、OCR、feature vectorを追加する。
+7. `features.image_search.feature_model`、`feature_dimensions`、`duplicate_group_limit` を設定から反映する。
+8. 外部画像特徴量モデルはローカルに存在する場合のみ読み込み、ダウンロードを行わない。
+9. vector作成失敗または外部モデル未配置時は `metadata.feature_status=fallback`、`metadata.feature_fallback`、`metadata.feature_error` を保存する。
 
 検証:
 - caption、OCR、周辺テキスト、source_kindがDense検索対象に含まれること。
 - feature vector作成失敗時にDense検索だけで継続できること。
 - vector本体が外部payloadに出ないこと。
+- 外部特徴量モデル未配置時にネットワークへ出ず、degraded metadataが付くこと。
 
 ### Phase 7: 権限確認
 1. 画像検索用AccessPolicyを追加する。
@@ -129,12 +144,15 @@
 7. Dense検索と画像特徴量検索をRRFで統合する。
 8. 重複Assetを統合または制限する。
 9. 回答前にAccessScopeとmetadataマスクを適用する。
+10. Dense検索の診断として `matched_fields` を `metadata.search_results` 配下に返す。
+11. `duplicate_group_id` 単位で既定1件に制限する。
 
 検証:
 - Dense検索だけで候補を返せること。
 - 画像特徴量検索が利用可能な場合に類似画像を補えること。
 - RRFで統合rankが安定すること。
 - degraded時に `metadata.degraded=true` が入ること。
+- OCR/caption/source labelのどのfieldがhitしたか診断できること。
 
 ### Phase 9: workflow・統合入力受付連携
 1. `features.workflow.service.image_search()` を専用 `ImageSearchService` 呼び出しへ置き換える。
@@ -143,11 +161,14 @@
 4. `detail_markdown` に候補説明と出典を含める。
 5. 統合入力受付で画像検索intentを `image_search` へルーティングする。
 6. route、degraded理由、検索スコア、trace idは `metadata` 配下に入れる。
+7. `source_filter` と `limit` を `ImageSearchRequest` に渡す。
+8. `features.image_search.enabled=false` の場合は設定不足/無効化として返し、fallbackでprotected assetを返さない。
 
 検証:
 - 既存workflow APIの `assets` が壊れないこと。
 - `image_search` が候補数と候補一覧を返すこと。
 - `image_usage_request` が復活しないこと。
+- 統合入力受付の `source_filters` が画像検索へ反映されること。
 
 ### Phase 10: CLI・HTTP・Discord出力
 1. CLIで `image_search` routeのpayloadを整える。
@@ -156,11 +177,13 @@
 4. 長い結果はthreadまたはattachmentに分離する。
 5. 検索スコア、内部rank、trace id、検索条件は `metadata` 配下に入れる。
 6. 大きなOCR全文、周辺テキスト、secretを含む可能性があるmetadataを出力前に除外・マスクする。
+7. `downloaded_image_path`、`original_image_ref`、`fallback_image_refs`、`download_attempt_errors`、`downloaded_image_ref` を外部payloadから除外する。
 
 検証:
 - payloadトップレベルが安定フィールドだけであること。
 - Discord応答で権限外sourceの存在有無が漏れないこと。
 - `asset_usage_requests` がpayloadに含まれないこと。
+- CLI/HTTP/Discordで `source_filter` と `limit` が反映されること。
 
 ### Phase 11: 運用・自動更新
 1. 自動インデックス更新に画像caption、OCR、feature vectorを追加する。
@@ -180,12 +203,15 @@
 2. 画像候補、OCR、類似画像、権限違反、出典表示を評価する。
 3. 再利用可否を断定しないことを安全性評価に含める。
 4. PRごとの小規模評価と定期full evalに組み込む。
+5. OCR-only query、caption semantic query、duplicate/similar image、protected source leakage、source attribution、再利用可否断定を最低評価項目にする。
+6. `docs/evals/image-search.jsonl` を画像検索 eval set の初期定義として維持する。
 
 検証:
 - OCR文字列だけで該当画像に到達できること。
 - caption由来の意味検索で該当画像に到達できること。
 - 類似画像検索が重複・関連画像を補えること。
 - 権限違反が0件であること。
+- source attribution coverageが閾値を満たすこと。
 
 ## 4. 推奨ファイル変更範囲
 想定される主な変更範囲は次の通り。
@@ -207,6 +233,13 @@
 | prompts | `assets/prompts/image_caption.md` 新規候補 |
 | migrations | `infrastructure/migrations/011_ingestion_indexing_assets.sql` |
 | tests | `tests/unit/test_image_search_*.py` |
+
+設定追加候補:
+
+- `features.image_search.feature_dimensions`
+- `features.image_search.duplicate_group_limit`
+
+これらは `.env` / `.env.example` ではなく `configs/` に置く。
 
 `.env` または `.env.example` に設定項目を追加する場合は、必ず他方にも反映する。画像検索のパラメータやプロンプトは `.env` / `.env.example` ではなく `configs/` と `assets/prompts/` に置く。
 
@@ -231,6 +264,8 @@ pytestは未導入前提のため、既存方式に合わせて `unittest` で�
 - `tests/unit/test_image_search_ranking.py`
 - `tests/unit/test_image_search_workflow.py`
 - `tests/unit/test_image_search_payload.py`
+- `tests/unit/test_google_drive_batching.py` のPPTX media抽出ケース
+- Postgres Asset保存・再読込ケース
 
 主なテスト観点:
 
@@ -242,6 +277,11 @@ pytestは未導入前提のため、既存方式に合わせて `unittest` で�
 - RRFランキング
 - source_kind別権限フィルタ
 - OCR/周辺テキストの外部出力マスク
+- source_filter / limit
+- feature_model未配置時のno-download fallback
+- duplicate_group_id制限
+- matched_fields
+- enabled=false
 - `image_usage_request`、`AssetUsageRequest`、`asset_usage_requests` が実装に残っていないこと
 
 ## 7. 実装順序

@@ -207,6 +207,34 @@ class PostgresOperationsRepository(FileOperationsRepository):
         self._insert_payload("assets", _asset_payload(stored))
         return stored
 
+    def list_assets(self, *, query: str = "") -> list[Asset]:
+        if self.postgres is None:
+            return super().list_assets(query=query)
+        columns = tuple(_asset_payload(Asset(id="")).keys())
+        sql = f"select {', '.join(columns)} from assets order by created_at asc"
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        assets = [_asset_from_payload(dict(zip(columns, row))) for row in rows]
+        needle = query.strip().lower()
+        if needle:
+            assets = [asset for asset in assets if needle in _asset_search_text(asset).lower()]
+        return sorted(assets, key=lambda item: item.created_at or _MIN_DT)
+
+    def get_asset(self, asset_id: str) -> Asset | None:
+        if self.postgres is None:
+            return super().get_asset(asset_id)
+        columns = tuple(_asset_payload(Asset(id="")).keys())
+        sql = f"select {', '.join(columns)} from assets where id = %s"
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (asset_id,))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return _asset_from_payload(dict(zip(columns, row)))
+
     def save_member_profile(self, profile: MemberProfile) -> MemberProfile:
         stored = _touch(profile)
         self._insert_payload("member_profiles", _member_profile_payload(stored))

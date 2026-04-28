@@ -47,7 +47,9 @@ class ImageSearchConfig:
     ocr_text_char_limit: int = 800
     caption_model: str = ""
     ocr_model: str = ""
-    feature_dimensions: int = 128
+    feature_model: str = "openai/clip-vit-base-patch32"
+    feature_dimensions: int = 512
+    duplicate_group_limit: int = 1
     max_download_bytes: int = 8 * 1024 * 1024
 
 
@@ -89,6 +91,7 @@ class _RankedAsset:
     rank: int
     score: float
     sources: tuple[str, ...]
+    matched_fields: tuple[str, ...] = tuple()
 
 
 class ImageAccessPolicy:
@@ -121,29 +124,45 @@ class ImageAccessPolicy:
         access: AccessContext | None,
     ) -> bool:
         normalized_source = _normalize_source_kind(source_kind)
-        if normalized_source in _PUBLIC_SOURCE_KINDS:
-            return True
         visibility = str(access_scope.get("visibility") or "").strip().lower()
+        if not visibility:
+            if normalized_source in _PUBLIC_SOURCE_KINDS:
+                visibility = "public"
+            elif normalized_source in _PROTECTED_SOURCE_KINDS:
+                visibility = "guild"
+            else:
+                visibility = "admin"
         if visibility == "public":
-            return True
-        if normalized_source not in _PROTECTED_SOURCE_KINDS and visibility not in {"guild", "admin", "private"}:
             return True
         if access is None:
             return False
 
         allowed_guilds = set(self._allowed_guild_ids)
         admin_users = set(self._admin_user_ids)
+        request_user_id = str(access.user_id or "").strip()
+        is_admin = bool(access.is_admin) and (not admin_users or request_user_id in admin_users)
+        if not is_admin and request_user_id and request_user_id in admin_users:
+            is_admin = True
+        if visibility == "admin":
+            return is_admin
+        if is_admin:
+            return True
+
         request_guild_id = str(access.guild_id or "").strip()
         asset_guild_id = str(access_scope.get("guild_id") or metadata.get("guild_id") or "").strip()
+        if visibility == "role":
+            allowed_roles = {str(value) for value in access_scope.get("role_ids") or []}
+            return bool(allowed_roles & set(access.role_ids))
+        if visibility == "private":
+            allowed_users = {str(value) for value in access_scope.get("user_ids") or []}
+            return bool(request_user_id and request_user_id in allowed_users)
+        if visibility != "guild":
+            return False
         if request_guild_id:
             if allowed_guilds and request_guild_id not in allowed_guilds:
                 return False
-            return not asset_guild_id or asset_guild_id == request_guild_id
-
-        request_user_id = str(access.user_id or "").strip()
-        if bool(access.is_admin) and (not admin_users or request_user_id in admin_users):
-            return True
-        return bool(request_user_id and request_user_id in admin_users)
+            return bool(asset_guild_id and asset_guild_id == request_guild_id)
+        return False
 
 
 class GeminiImageCaptioner:
@@ -228,6 +247,106 @@ class LocalImageOcrExtractor:
             return "", {"ocr_status": "failed", "ocr_error": type(exc).__name__}
 
 
+class ImageFeatureExtractor:
+    def __init__(self, *, model: str, dimensions: int) -> None:
+        self._model = str(model or "").strip()
+        self._dimensions = max(1, int(dimensions or 1))
+        self._processor: Any | None = None
+        self._model_obj: Any | None = None
+        self._model_load_error = ""
+
+    def vector_for_asset(self, asset: Asset) -> tuple[np.ndarray, dict[str, Any]]:
+        metadata = dict(asset.metadata or {})
+        image_path_raw = str(metadata.get("downloaded_image_path") or "").strip()
+        image_path = Path(image_path_raw) if image_path_raw else None
+        if image_path is not None and image_path.exists():
+            external = self._external_vector(image_path)
+            if external is not None:
+                vector, model_name = external
+                return vector, {
+                    "feature_status": "succeeded",
+                    "feature_model": model_name,
+                    "feature_dimensions": self._dimensions,
+                    "feature_vector_ref": str(metadata.get("feature_vector_ref") or f"image_search/features/{asset.id}"),
+                }
+            try:
+                vector = _local_image_feature_vector(image_path=image_path, dimensions=self._dimensions)
+                fallback_mode = self._model not in {"", "local_hash", "local_color"}
+                return vector, {
+                    "feature_status": "fallback" if fallback_mode else "succeeded",
+                    "feature_model": self._model or "local_color",
+                    "feature_fallback": "local_color" if fallback_mode else "",
+                    "feature_error": (self._model_load_error or "external_feature_model_unavailable") if fallback_mode else "",
+                    "feature_dimensions": self._dimensions,
+                    "feature_vector_ref": str(metadata.get("feature_vector_ref") or f"image_search/features/{asset.id}"),
+                }
+            except Exception as exc:
+                logger.debug("Local image feature extraction unavailable for %s: %s", image_path, exc)
+                return self._hash_vector(asset, error=type(exc).__name__)
+        return self._hash_vector(asset, error="image_path_unavailable")
+
+    def _external_vector(self, image_path: Path) -> tuple[np.ndarray, str] | None:
+        if not self._model or self._model in {"local_hash", "local_color"}:
+            return None
+        try:
+            processor, model_obj = self._load_external_model()
+            if processor is None or model_obj is None:
+                return None
+            from PIL import Image
+            import torch
+
+            with Image.open(image_path) as image:
+                rgb_image = image.convert("RGB")
+            try:
+                inputs = processor(images=rgb_image, return_tensors="pt")
+                with torch.no_grad():
+                    features = model_obj.get_image_features(**inputs)
+                vector = features.detach().cpu().numpy()[0].astype(np.float32)
+                return _resize_and_normalize_vector(vector, dimensions=self._dimensions), self._model
+            finally:
+                rgb_image.close()
+        except Exception as exc:
+            self._model_load_error = type(exc).__name__
+            logger.debug("External image feature model unavailable: %s", exc)
+            return None
+
+    def _load_external_model(self) -> tuple[Any | None, Any | None]:
+        if self._processor is not None and self._model_obj is not None:
+            return self._processor, self._model_obj
+        if self._model_load_error:
+            return None, None
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+
+            self._processor = CLIPProcessor.from_pretrained(self._model, local_files_only=True)
+            self._model_obj = CLIPModel.from_pretrained(self._model, local_files_only=True)
+            self._model_obj.eval()
+            return self._processor, self._model_obj
+        except Exception as exc:
+            self._model_load_error = type(exc).__name__
+            logger.info(
+                "Image feature model is not available locally; using fallback vectors: %s",
+                self._model,
+            )
+            return None, None
+
+    def _hash_vector(self, asset: Asset, *, error: str) -> tuple[np.ndarray, dict[str, Any]]:
+        metadata = dict(asset.metadata or {})
+        seed = "image-feature:" + ":".join(
+            str(metadata.get(key) or "")
+            for key in ("content_hash", "duplicate_group_id", "source_url", "source_label")
+        )
+        fallback_mode = self._model not in {"", "local_hash"}
+        return hashed_vector(seed or asset.id, dimensions=self._dimensions), {
+            "feature_status": "fallback" if fallback_mode else "succeeded",
+            "feature_model": self._model or "local_hash",
+            "feature_fallback": "metadata_hash" if fallback_mode else "",
+            "feature_error": error if fallback_mode else "",
+            "feature_dimensions": self._dimensions,
+            "feature_vector_ref": str(metadata.get("feature_vector_ref") or f"image_search/features/{asset.id}"),
+        }
+
+
 class ImageAssetBuildService:
     def __init__(
         self,
@@ -300,7 +419,15 @@ class ImageAssetBuildService:
             if _normalize_source_kind(asset.source_kind) in _all_image_source_kinds()
             and str(asset.metadata.get("index_status") or "active") not in _DENIED_INDEX_STATUSES
         ]
-        target_index.build(searchable_assets)
+        feature_metadata_by_asset = target_index.build(searchable_assets)
+        for asset in searchable_assets:
+            feature_metadata = feature_metadata_by_asset.get(asset.id)
+            if not feature_metadata:
+                continue
+            metadata = {**dict(asset.metadata or {}), **feature_metadata}
+            if metadata == dict(asset.metadata or {}):
+                continue
+            self._repository.save_asset(replace(asset, metadata=metadata))
         run = IndexingRun(
             id=stable_hash(f"image-search:{datetime.now(UTC).isoformat()}")[:32],
             source_kind="image_search",
@@ -342,6 +469,11 @@ class ImageAssetBuildService:
                     "surrounding_text": surrounding_text,
                     "caption": caption,
                     "ocr_text": ocr_text,
+                    "access_scope": candidate.access_scope,
+                    "source_url": candidate.source_url,
+                    "source_label": candidate.source_label,
+                    "source_created_at": candidate.captured_at.isoformat() if candidate.captured_at else "",
+                    "metadata": candidate.metadata,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -364,7 +496,10 @@ class ImageAssetBuildService:
             "source_created_at": candidate.captured_at.isoformat() if candidate.captured_at else "",
             "image_index": candidate.image_index,
             "content_hash": content_hash,
+            "duplicate_group_id": f"image-content:{content_hash}",
             "feature_vector_ref": f"image_search/features/{asset_id}",
+            "feature_model": self._config.feature_model,
+            "feature_status": "pending",
             "source_fingerprint": source_fingerprint,
             "index_version": "image-search-v1",
             "index_status": "active",
@@ -477,7 +612,11 @@ class ImageSearchService:
     def search(self, request: ImageSearchRequest) -> ImageSearchResult:
         query = request.query.strip()
         limit = max(1, int(request.limit or self._config.limit))
-        source_filter = {_normalize_source_kind(value) for value in request.source_filter if value}
+        source_filter = {
+            normalized
+            for value in request.source_filter
+            if (normalized := _normalize_source_kind(value)) not in {"", "all", "image"}
+        }
         all_assets = self._candidate_assets(
             access=request.access_context,
             source_filter=source_filter,
@@ -497,23 +636,23 @@ class ImageSearchService:
                 metadata=metadata,
             )
 
+        degraded_reasons: list[str] = []
         dense = self._index.search_dense(
             query=query,
             allowed_asset_ids={asset.id for asset in all_assets},
             top_k=max(limit, self._config.dense_top_k),
         )
-        degraded = False
         if not dense:
-            degraded = True
+            degraded_reasons.append("dense_index_unavailable")
             dense = _fallback_keyword_results(query=query, assets=all_assets)
         feature = self._index.search_similar_features(
             seed_asset_ids=tuple(asset_id for asset_id, _score in dense[: max(1, limit)]),
             allowed_asset_ids={asset.id for asset in all_assets},
             top_k=self._config.feature_top_k,
         )
-        if not feature:
+        if not self._index.has_feature_index():
             metadata["feature_search"] = "unavailable"
-            degraded = True
+            degraded_reasons.append("image_feature_unavailable")
         ranked_ids = _rrf_merge(
             ranked_lists=[
                 ("dense", [asset_id for asset_id, _ in dense]),
@@ -525,29 +664,42 @@ class ImageSearchService:
         dense_scores = dict(dense)
         feature_scores = dict(feature)
         ranked: list[_RankedAsset] = []
+        duplicate_counts: dict[str, int] = {}
         for rank, (asset_id, score, source_names) in enumerate(ranked_ids, start=1):
             asset = by_id.get(asset_id)
             if asset is None:
                 continue
             if not self._policy.allow_asset(asset, access=request.access_context):
                 continue
+            duplicate_group_id = _duplicate_group_id(asset)
+            if self._config.duplicate_group_limit > 0:
+                duplicate_count = duplicate_counts.get(duplicate_group_id, 0)
+                if duplicate_count >= self._config.duplicate_group_limit:
+                    continue
+                duplicate_counts[duplicate_group_id] = duplicate_count + 1
+            feature_status = str(asset.metadata.get("feature_status") or "").strip().lower()
+            if feature_status and feature_status != "succeeded":
+                degraded_reasons.append("image_feature_fallback")
             ranked.append(
                 _RankedAsset(
                     asset=asset,
                     rank=rank,
                     score=score,
                     sources=source_names,
+                    matched_fields=_matched_fields(query=query, asset=asset),
                 )
             )
             if len(ranked) >= limit:
                 break
 
+        degraded_reasons = list(dict.fromkeys(degraded_reasons))
         assets = tuple(
             _asset_for_output(
                 item.asset,
                 rank=item.rank,
                 score=item.score,
                 sources=item.sources,
+                matched_fields=item.matched_fields,
                 dense_score=dense_scores.get(item.asset.id),
                 feature_score=feature_scores.get(item.asset.id),
                 config=self._config,
@@ -557,14 +709,15 @@ class ImageSearchService:
         metadata.update(
             {
                 "candidate_count": len(assets),
-                "degraded": degraded,
-                "degraded_reason": "image_feature_or_dense_fallback" if degraded else "",
+                "degraded": bool(degraded_reasons),
+                "degraded_reason": ",".join(degraded_reasons),
                 "search_results": [
                     {
                         "asset_id": item.asset.id,
                         "rank": item.rank,
                         "score": item.score,
                         "sources": list(item.sources),
+                        "matched_fields": list(item.matched_fields),
                     }
                     for item in ranked
                 ],
@@ -600,24 +753,53 @@ class _ImageSearchIndex:
         self.index_dir = index_dir
         self._embedder = embedder
         self._config = config
+        self._feature_extractor = ImageFeatureExtractor(
+            model=config.feature_model,
+            dimensions=config.feature_dimensions,
+        )
         self._text_vectors_path = self.index_dir / "image_text_vectors.npy"
         self._feature_vectors_path = self.index_dir / "image_feature_vectors.npy"
         self._items_path = self.index_dir / "image_assets.jsonl"
         self.index_dir.mkdir(parents=True, exist_ok=True)
 
-    def build(self, assets: list[Asset]) -> None:
+    def build(self, assets: list[Asset]) -> dict[str, dict[str, Any]]:
         texts = [_asset_embedding_text(asset) for asset in assets]
         text_vectors = self._embedder.embed_documents(texts) if texts else np.empty((0, 1), dtype=np.float32)
-        feature_vectors = (
-            np.vstack([_feature_vector(asset, dimensions=self._config.feature_dimensions) for asset in assets])
-            if assets
-            else np.empty((0, self._config.feature_dimensions), dtype=np.float32)
-        )
+        feature_metadata_by_asset: dict[str, dict[str, Any]] = {}
+        feature_rows: list[np.ndarray] = []
+        for asset in assets:
+            vector, feature_metadata = self._feature_extractor.vector_for_asset(asset)
+            feature_rows.append(vector)
+            feature_metadata_by_asset[asset.id] = feature_metadata
+        feature_vectors = np.vstack(feature_rows) if feature_rows else np.empty((0, self._config.feature_dimensions), dtype=np.float32)
         np.save(self._text_vectors_path, text_vectors.astype(np.float32))
         np.save(self._feature_vectors_path, feature_vectors.astype(np.float32))
         with self._items_path.open("w", encoding="utf-8") as fw:
             for asset in assets:
-                fw.write(json.dumps({"asset_id": asset.id}, ensure_ascii=False) + "\n")
+                fw.write(
+                    json.dumps(
+                        {
+                            "asset_id": asset.id,
+                            "duplicate_group_id": _duplicate_group_id(asset),
+                            **feature_metadata_by_asset.get(asset.id, {}),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        return feature_metadata_by_asset
+
+    def has_feature_index(self) -> bool:
+        if not self._feature_vectors_path.exists() or not self._items_path.exists():
+            return False
+        asset_ids = self._load_asset_ids()
+        if not asset_ids:
+            return False
+        try:
+            matrix = np.load(self._feature_vectors_path)
+        except Exception:
+            return False
+        return matrix.size > 0 and matrix.shape[0] >= len(asset_ids)
 
     def search_dense(
         self,
@@ -768,8 +950,13 @@ def _scan_google_drive_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
                     source_url=str(metadata.get("drive_url") or ""),
                     source_label=str(metadata.get("drive_path") or "Google Drive"),
                     captured_at=_dt_from(metadata.get("drive_modified_time")),
-                    surrounding_text=str(metadata.get("drive_path") or metadata.get("drive_name") or ""),
-                    image_index=0,
+                    surrounding_text=str(
+                        metadata.get("surrounding_text")
+                        or metadata.get("drive_path")
+                        or metadata.get("drive_name")
+                        or ""
+                    ),
+                    image_index=int(metadata.get("image_index") or 0),
                     access_scope={"visibility": "guild", "guild_id": str(metadata.get("guild_id") or "")},
                     metadata={"source_type": "docs", "source_kind": "google_drive", **metadata},
                 )
@@ -946,6 +1133,7 @@ def _asset_for_output(
     rank: int,
     score: float,
     sources: tuple[str, ...],
+    matched_fields: tuple[str, ...],
     dense_score: float | None,
     feature_score: float | None,
     config: ImageSearchConfig,
@@ -957,12 +1145,19 @@ def _asset_for_output(
         metadata["ocr_text"] = _compact_text(ocr_text, config.ocr_text_char_limit)
     if surrounding_text:
         metadata["surrounding_text"] = _compact_text(surrounding_text, config.surrounding_text_char_limit)
-    for key in ("downloaded_image_path", "original_image_ref"):
+    for key in (
+        "downloaded_image_path",
+        "original_image_ref",
+        "fallback_image_refs",
+        "download_attempt_errors",
+        "downloaded_image_ref",
+    ):
         metadata.pop(key, None)
     metadata["search"] = {
         "rank": rank,
         "score": score,
         "sources": list(sources),
+        "matched_fields": list(matched_fields),
         "dense_score": dense_score,
         "feature_score": feature_score,
     }
@@ -1004,24 +1199,16 @@ def _asset_embedding_text(asset: Asset) -> str:
     )
 
 
-def _feature_vector(asset: Asset, *, dimensions: int) -> np.ndarray:
-    metadata = dict(asset.metadata or {})
-    image_path_raw = str(metadata.get("downloaded_image_path") or "").strip()
-    image_path = Path(image_path_raw) if image_path_raw else None
-    if image_path is not None and image_path.exists():
-        try:
-            return _local_image_feature_vector(image_path=image_path, dimensions=dimensions)
-        except Exception as exc:
-            logger.debug(
-                "Local image feature extraction unavailable for %s: %s",
-                image_path,
-                exc,
-            )
-    seed = "image-feature:" + ":".join(
-        str(metadata.get(key) or "")
-        for key in ("content_hash", "duplicate_group_id", "source_url", "source_label")
-    )
-    return hashed_vector(seed or asset.id, dimensions=max(1, dimensions))
+def _resize_and_normalize_vector(vector: np.ndarray, *, dimensions: int) -> np.ndarray:
+    out = np.asarray(vector, dtype=np.float32).reshape(-1)
+    if out.size < dimensions:
+        out = np.pad(out, (0, dimensions - out.size))
+    elif out.size > dimensions:
+        out = out[:dimensions]
+    norm = np.linalg.norm(out)
+    if norm > 0:
+        out = out / norm
+    return out.astype(np.float32)
 
 
 def _local_image_feature_vector(*, image_path: Path, dimensions: int) -> np.ndarray:
@@ -1045,6 +1232,36 @@ def _local_image_feature_vector(*, image_path: Path, dimensions: int) -> np.ndar
     if norm > 0:
         vector = vector / norm
     return vector.astype(np.float32)
+
+
+def _duplicate_group_id(asset: Asset) -> str:
+    metadata = dict(asset.metadata or {})
+    return str(metadata.get("duplicate_group_id") or metadata.get("content_hash") or asset.id)
+
+
+def _matched_fields(*, query: str, asset: Asset) -> tuple[str, ...]:
+    needle = query.strip().lower()
+    terms = [term for term in re.split(r"\s+", needle) if term]
+    metadata = dict(asset.metadata or {})
+    field_texts = {
+        "title": asset.title,
+        "caption": asset.description or str(metadata.get("caption") or ""),
+        "ocr_text": str(metadata.get("ocr_text") or ""),
+        "surrounding_text": str(metadata.get("surrounding_text") or ""),
+        "source_label": str(metadata.get("source_label") or ""),
+        "source_kind": _normalize_source_kind(asset.source_kind),
+    }
+    matched: list[str] = []
+    for field_name, text in field_texts.items():
+        lowered = str(text or "").lower()
+        if not lowered:
+            continue
+        if needle and needle in lowered:
+            matched.append(field_name)
+            continue
+        if terms and any(term in lowered for term in terms):
+            matched.append(field_name)
+    return tuple(matched)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

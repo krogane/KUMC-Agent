@@ -223,6 +223,26 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(workflow.requests[0].work_type, "image_search")
         self.assertNotIn("downloaded_image_path", response.metadata)
 
+    def test_usecase_passes_image_source_filters_to_workflow(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="image_search",
+                    intent="search",
+                    required_features=("image_search",),
+                    source_filters=("drive",),
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        usecase.execute(IntegratedInputRequest(text="Driveの画像", source="all"))
+
+        self.assertEqual(("drive",), workflow.requests[0].source_filter)
+
     def test_usecase_escalates_to_comprehensive_agent(self) -> None:
         agent = FakeAgent([])
         usecase = IntegratedInputUsecase(

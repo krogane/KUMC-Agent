@@ -234,6 +234,7 @@ class IntegratedInputUsecase:
             WorkRequest(
                 work_type=work_type,
                 instruction=request.text,
+                source_filter=self._workflow_source_filters(request, decision, work_type),
                 access=access,
             )
         )
@@ -257,6 +258,18 @@ class IntegratedInputUsecase:
         if decision.source_filters:
             return decision.source_filters[0]
         return request.source if request.source not in {"member", "image", "task", "event"} else "all"
+
+    def _workflow_source_filters(
+        self,
+        request: IntegratedInputRequest,
+        decision: IntegratedInputDecision,
+        work_type: str,
+    ) -> tuple[str, ...]:
+        if decision.source_filters:
+            return decision.source_filters
+        if work_type == "image_search" and request.source not in {"", "all", "image"}:
+            return (request.source,)
+        return tuple()
 
     def _from_ask_response(
         self,

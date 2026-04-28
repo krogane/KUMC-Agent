@@ -435,6 +435,7 @@ class ComprehensiveToolAdapters:
                 work_type=work_type,
                 instruction=str(call.input.get("instruction") or call.input.get("query") or request.query),
                 target=str(call.input.get("target") or ""),
+                source_filter=_tool_source_filters(call.input, request=request),
                 access=request.access,
             )
         )
@@ -604,6 +605,15 @@ def _work_type_for_tool(tool_name: str, *, instruction: str) -> str:
     if tool_name == "server_operation_candidate_create":
         return "mc_request"
     return "task_list"
+
+
+def _tool_source_filters(payload: dict[str, object], *, request: ComprehensiveAgentRequest) -> tuple[str, ...]:
+    raw = payload.get("source_filter") or payload.get("source_filters") or request.source_filter
+    if isinstance(raw, str):
+        return (raw,) if raw.strip() and raw != "all" else tuple()
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(item) for item in raw if str(item).strip() and str(item) != "all")
+    return tuple()
 
 
 def detect_required_features(query: str, source_filter: str = "all") -> tuple[str, ...]:

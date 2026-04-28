@@ -17,6 +17,9 @@ DROP_KEYS = {
     "container_state_after",
     "downloaded_image_path",
     "original_image_ref",
+    "fallback_image_refs",
+    "download_attempt_errors",
+    "downloaded_image_ref",
 }
 
 SECRET_KEYS = {

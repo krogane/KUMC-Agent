@@ -253,7 +253,9 @@ class ImageSearchFeatureSection:
     surrounding_text_char_limit: int = 1200
     caption_model: str = ""
     ocr_model: str = ""
-    feature_model: str = "local_hash"
+    feature_model: str = "openai/clip-vit-base-patch32"
+    feature_dimensions: int = 512
+    duplicate_group_limit: int = 1
 
 
 @dataclass(frozen=True)

@@ -126,6 +126,20 @@ flowchart TD
 
 検索前filterと回答前filterの両方で権限を確認する。権限がない画像は候補数、類似候補、OCR断片、出典ラベルを返さない。
 
+`access_scope.visibility` は `public`, `guild`, `role`, `private`, `admin` を扱う。`google_drive` と `discord` は原則 `guild` とし、`guild_id` が空の protected source は admin 以外へ返さない。admin DM は `maintenance_command_author_ids` に含まれる user id または `AccessContext.is_admin=true` の場合のみ許可する。`index_status` が `deleted`, `quarantined`, `permission_lost` の Asset と、redaction policy が回答不可の Asset は候補数にも含めない。
+
+### 5.4 Repository contract
+`OperationsRepository` の Asset API は JSONL と Postgres の両 backend で同じ意味を持つ。
+
+| API | 要件 |
+| --- | --- |
+| `save_asset()` | `Asset` の全安定フィールドと `metadata` を保存する |
+| `get_asset()` | 直前に保存した Asset を同一 backend から再読込できる |
+| `list_assets(query=...)` | query なしで全 Asset を返し、query ありでは title, description, source, uri, 画像検索 metadata を対象に検索する |
+| `save_indexing_run()` | 画像 index 作成 run の件数、失敗、差分 metadata を保存する |
+
+Postgres 構成では、Asset を Postgres に保存した後に JSONL fallback だけを読む実装は禁止する。
+
 ## 6. インデックス作成
 ### 6.1 データ取得
 画像を含む情報源から画像ファイルと周辺テキストを取得する。この取得はサークル情報RAGのデータ取得と共通である。
@@ -139,6 +153,25 @@ flowchart TD
 - クラフターズコロニー投稿画像
 
 Notion画像は `kumc-agent.md` の画像検索対象に明記されていないため、本設計ではサークル情報RAGの本文処理対象に留める。将来追加する場合は `source_kind=notion` の権限設定を先に定義する。
+
+source別の最低合格条件は次の通り。
+
+| source_kind | 入力artifact | 必須metadata | 画像対象 | 削除・権限変更検知 |
+| --- | --- | --- | --- | --- |
+| `discord` | `raw/messages/**/*.jsonl` | guild id, channel id/name, message id/time, attachment id/url/proxy url | 添付画像 | message/attachment 欠落、guild/channel ACL |
+| `google_drive` | `raw/images/google_drive/*`, `raw/docs/*.md` | file id/name/path/url, modified time, mime type | 単体画像、Markdown/HTML画像参照、PPTX `ppt/media/*` | Drive file 欠落、modified time、Drive ACL |
+| `x` | `raw/x/posts.jsonl` | post id/url, author handle, timestamp | 投稿画像 URL | post 欠落、media URL 欠落 |
+| `hatena` | `raw/hatenablog/*.md` | entry id/url/title, published/updated time | Markdown/HTML画像参照 | entry 欠落、画像 URL 欠落 |
+| `crafters_colony` | `raw/crafters_colony/*.md` | article url/title, published time | Markdown/HTML画像参照 | article 欠落、画像 URL 欠落 |
+
+### 6.1.1 Google Drive の対象範囲
+Google Drive は次を別カテゴリとして扱う。
+
+- Drive 上の単体画像ファイル
+- Markdown/HTML として取得された Docs 内画像参照
+- Google Slides export または PowerPoint ファイル内の `ppt/media/*`
+
+Google Docs export の内部 placeholder から元画像を復元する処理、PDFページを画像化して Asset 化する処理は本設計の完全実装条件には含めない。追加する場合は別途、抽出方法、周辺テキスト、OCR重複、保存容量上限を定義する。
 
 ### 6.2 周辺テキスト
 画像ごとに検索補助用の周辺テキストを保持する。
@@ -175,6 +208,8 @@ Asset保存時に、出典URL、投稿日時、投稿媒体、投稿内画像順
 
 同一画像は `content_hash` と `source_item_id` で重複排除する。同じ画像が複数媒体に存在する場合は、原則としてsourceごとに別Assetとして保存し、重複関係を `metadata.duplicate_group_id` に記録する。
 
+差分検出用 `source_fingerprint` には、画像参照、content hash、周辺テキスト、caption、OCR結果に加えて、`access_scope`、出典URL、出典ラベル、元sourceのrevision/modified time、削除・権限状態を含める。画像本体が同じでも ACL や出典metadataが変わった場合は Asset を更新する。
+
 ### 6.6 埋め込み作成
 画像説明文、OCR結果、周辺テキスト、投稿媒体を埋め込み、FaissLikeIndexに保存する。
 
@@ -194,7 +229,11 @@ secret、招待URL、個人情報、権限外の本文断片はindex投入前に
 ### 6.7 画像特徴量vector
 画像特徴量vectorを作成し、Asset IDと紐づけて保存する。
 
-保存先はFaissLikeIndexまたは専用vector storeとする。`Asset.metadata.feature_vector_ref` にはvectorそのものではなく保存先参照を入れる。vector作成に失敗した場合はDense検索のみで継続し、`metadata.feature_status=failed` を保存する。
+保存先はFaissLikeIndexまたは専用vector storeとする。`Asset.metadata.feature_vector_ref` にはvectorそのものではなく保存先参照を入れる。vector作成に失敗した場合はDense検索のみ、または明示的なfallback vectorで継続し、`metadata.feature_status` と `metadata.feature_error` を保存する。
+
+外部画像特徴量モデルを使う場合は、ローカルに配置済みの model path または cache だけを使用し、index作成中に外部ダウンロードを行わない。外部モデルが利用できない場合は `metadata.feature_status=fallback` とし、fallback方式を `metadata.feature_fallback` に保存する。fallback結果を使った検索は `metadata.degraded=true` とする。
+
+`feature_model`、`feature_dimensions`、vector保存先、`feature_vector_ref` の形式、fallback/degraded扱いは設定とrun metadataに残す。
 
 ## 7. 検索
 ### 7.1 入力
@@ -225,6 +264,8 @@ Dense検索結果には次を保持する。
 
 検索スコア、rank、matched_fieldsは外部payloadのトップレベルへ出さず、必要な場合は `metadata.search_results` 配下に入れる。
 
+`matched_fields` は `caption`, `ocr_text`, `surrounding_text`, `source_label`, `source_kind`, `title` から返す。単一の結合embeddingで厳密な寄与が取れない場合でも、query term の field hit による診断値を返す。
+
 ### 7.4 画像特徴量検索
 入力がテキストのみの場合、クエリから画像特徴量vectorを直接作れないため、実装初期はDense検索上位候補のfeature vectorを起点に類似画像を広げる。
 
@@ -236,6 +277,8 @@ Dense検索結果には次を保持する。
 Dense検索と画像特徴量検索の結果をRRFでランキングする。
 
 同一Assetは統合し、sourceの重複や同一画像の重複は必要に応じて `duplicate_group_id` 単位で制限する。RRF後に `limit` 件へ切り詰める。
+
+`duplicate_group_id` がある場合は、既定では同一groupから1件だけ返す。複数sourceを見せる必要があるUIでは、group内の代表Assetと追加source数を `metadata` に保持し、候補一覧の主結果は重複で埋めない。
 
 ### 7.6 権限フィルタリング
 RRF後、回答前に再度AccessScopeを確認する。
@@ -277,10 +320,13 @@ caption生成に失敗した場合は、OCR結果と周辺テキストだけでA
 OCR失敗時は画像説明文と周辺テキストだけで検索可能にする。
 
 ### 9.4 Dense index未構築
-Dense index未構築時は、暫定的にRepositoryのキーワード検索へfallbackする。fallback時は `metadata.degraded=true` を付与する。
+Dense index未構築時は、専用 `ImageSearchService` 内で権限filter後の候補だけをRepositoryキーワード検索へfallbackする。fallback時は `metadata.degraded=true` と `metadata.degraded_reason=dense_index_unavailable` を付与する。
 
 ### 9.5 画像特徴量index未構築
 画像特徴量検索をスキップし、Dense検索のみで結果を返す。
+
+### 9.6 ImageSearchService未設定
+workflowから専用serviceを呼べない場合、protected sourceを無条件に返すfallbackは禁止する。service未設定時は設定不足として返すか、権限filter済みのpublic候補だけに制限する。
 
 ## 10. 設定
 設定値は `configs/` 配下に置く。.env / .env.exampleにはトークンやAPIキー以外のパラメータを追加しない。
@@ -299,6 +345,23 @@ Dense index未構築時は、暫定的にRepositoryのキーワード検索へfa
 | `features.image_search.caption_model` | 画像説明文生成モデル |
 | `features.image_search.ocr_model` | OCRモデル |
 | `features.image_search.feature_model` | 画像特徴量モデル |
+| `features.image_search.feature_dimensions` | 画像特徴量vector次元 |
+| `features.image_search.duplicate_group_limit` | 同一duplicate groupから返す最大件数 |
+
+`feature_model` に外部モデル名またはローカルpathを指定しても、実装はローカルに存在するファイルだけを使う。必要なモデルの取得は運用手順として事前に行い、画像index作成処理ではダウンロードしない。
+
+## 10.1 出力channel別payload contract
+CLI、HTTP `/work`、HTTP `/ask`、Discord `/work`、統合入力受付はいずれも、主結果として `text`, `detail_markdown`, `assets`, `metadata` を保持する。Discordでは長い `detail_markdown` はattachmentに分離してよい。
+
+外部payloadで除外または短縮するmetadata:
+
+- `downloaded_image_path`
+- `original_image_ref`
+- `fallback_image_refs`
+- `download_attempt_errors`
+- 長大な `ocr_text`
+- 長大な `surrounding_text`
+- secret/token/API keyらしき文字列
 
 ## 11. 評価
 画像検索では、次を評価する。
@@ -310,6 +373,17 @@ Dense index未構築時は、暫定的にRepositoryのキーワード検索へfa
 - 権限外sourceの候補や存在有無が漏れないこと
 - 出典URL、投稿日時、投稿媒体が返ること
 - 検索結果が再利用可否を断定しないこと
+
+最低合格基準:
+
+| 評価 | 基準 |
+| --- | --- |
+| OCR-only query | top-k hit rate が 0.8 以上 |
+| caption semantic query | top-k hit rate が 0.8 以上 |
+| duplicate/similar image | 関連画像 recall が 0.7 以上 |
+| protected source leakage | 0 件 |
+| source attribution | 返却候補の 0.95 以上に出典labelまたはURLがある |
+| 再利用可否断定 | 0 件 |
 
 ## 12. 今後の変更可能性
 将来的に画像入力による類似画像検索、Notion画像対応、画像重複クラスタ表示を追加できるようにする。

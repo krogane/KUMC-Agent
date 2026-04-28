@@ -529,6 +529,46 @@ def _extract_pptx_text(pptx_bytes: bytes) -> str:
         return "\n\n".join(sections).strip() + "\n" if sections else ""
 
 
+def _extract_pptx_images(
+    pptx_bytes: bytes,
+    *,
+    drive_file: DriveFile,
+    images_dir: Path,
+    surrounding_text: str,
+) -> int:
+    ensure_dir(images_dir)
+    count = 0
+    safe_path = sanitize_filename(drive_file.path.replace("/", "__"))
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as archive:
+        media_paths = sorted(
+            path
+            for path in archive.namelist()
+            if path.startswith("ppt/media/")
+            and Path(path).suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+        )
+        for index, media_path in enumerate(media_paths):
+            data = archive.read(media_path)
+            suffix = Path(media_path).suffix.lower() or ".img"
+            out_path = images_dir / f"{drive_file.file_id}{FILE_ID_SEPARATOR}{safe_path}__ppt_media_{index}{suffix}"
+            if not out_path.exists() or out_path.read_bytes() != data:
+                out_path.write_bytes(data)
+            metadata = _drive_metadata_payload(drive_file)
+            metadata.update(
+                {
+                    "drive_embedded_source": "pptx_media",
+                    "pptx_media_path": media_path,
+                    "image_index": index,
+                    "surrounding_text": surrounding_text,
+                }
+            )
+            out_path.with_suffix(out_path.suffix + ".meta.json").write_text(
+                json.dumps(metadata, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            count += 1
+    return count
+
+
 def _format_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
@@ -1209,8 +1249,8 @@ def _cleanup_missing_drive_image_files(
             )
 
 
-def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
-    metadata = {
+def _drive_metadata_payload(drive_file: DriveFile) -> dict[str, str]:
+    return {
         "drive_file_id": drive_file.file_id,
         "drive_file_name": drive_file.name,
         "drive_name": drive_file.name,
@@ -1219,6 +1259,10 @@ def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
         "drive_modified_time": drive_file.modified_time,
         "drive_url": f"https://drive.google.com/file/d/{drive_file.file_id}/view",
     }
+
+
+def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
+    metadata = _drive_metadata_payload(drive_file)
     meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
     meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
 
@@ -1281,6 +1325,8 @@ def download_drive_markdown(
             drive_file.file_id
             for drive_file in drive_files
             if _is_drive_image_mime(drive_file.mime_type)
+            or drive_file.mime_type == DRIVE_SLIDE_MIME
+            or drive_file.mime_type in DRIVE_POWERPOINT_MIMES
         }
         _cleanup_missing_drive_files(
             out_dir=docs_dir,
@@ -1356,6 +1402,12 @@ def download_drive_markdown(
                                 **download_retry_options,
                             )
                             text = _extract_pptx_text(content)
+                            _extract_pptx_images(
+                                content,
+                                drive_file=drive_file,
+                                images_dir=images_dir,
+                                surrounding_text=text,
+                            )
                         except Exception as exc:
                             if not _is_export_size_limit_exceeded(exc):
                                 raise
@@ -1400,6 +1452,12 @@ def download_drive_markdown(
                             **download_retry_options,
                         )
                         text = _extract_pptx_text(content)
+                        _extract_pptx_images(
+                            content,
+                            drive_file=drive_file,
+                            images_dir=images_dir,
+                            surrounding_text=text,
+                        )
                     elif drive_file.mime_type == DRIVE_PDF_MIME:
                         content = _download_file_bytes(
                             drive_service,

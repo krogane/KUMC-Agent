@@ -15,6 +15,15 @@ from kumc_agent.features.foundation.payload_sanitizer import (
 )
 
 
+def _source_filter(payload: dict[str, object]) -> tuple[str, ...]:
+    value = payload.get("source_filter") or payload.get("source_filters") or payload.get("source") or ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else tuple()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item).strip())
+    return tuple()
+
+
 def _access(payload: dict[str, object] | None = None) -> AccessContext:
     payload = payload or {}
     role_ids = payload.get("role_ids") or payload.get("roles") or []
@@ -184,6 +193,8 @@ def create_app(context: object):
                 instruction=str(payload.get("instruction") or ""),
                 target=str(payload.get("target") or ""),
                 output_format=str(payload.get("format") or payload.get("output_format") or "markdown"),
+                source_filter=_source_filter(payload),
+                limit=int(payload["limit"]) if payload.get("limit") not in (None, "") else None,
                 access=_access(payload),
             )
         )

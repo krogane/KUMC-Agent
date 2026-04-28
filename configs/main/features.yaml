@@ -54,6 +54,8 @@ features:
     surrounding_text_char_limit: 1200
     caption_model: "gemini-3.1-flash-lite-preview"
     ocr_model: ""
-    feature_model: "local_hash"
+    feature_model: "openai/clip-vit-base-patch32"
+    feature_dimensions: 512
+    duplicate_group_limit: 1
   member_search:
     exclude_role_names: []

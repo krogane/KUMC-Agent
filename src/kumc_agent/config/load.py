@@ -421,7 +421,9 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     image_search.setdefault("surrounding_text_char_limit", 1200)
     image_search.setdefault("caption_model", "")
     image_search.setdefault("ocr_model", "")
-    image_search.setdefault("feature_model", "local_hash")
+    image_search.setdefault("feature_model", "openai/clip-vit-base-patch32")
+    image_search.setdefault("feature_dimensions", 512)
+    image_search.setdefault("duplicate_group_limit", 1)
     member_search = features.get("member_search")
     if not isinstance(member_search, dict):
         member_search = {}
@@ -1054,7 +1056,9 @@ def _to_runtime_config(
                 ),
                 caption_model=str(image_search_raw.get("caption_model", "")),
                 ocr_model=str(image_search_raw.get("ocr_model", "")),
-                feature_model=str(image_search_raw.get("feature_model", "local_hash")),
+                feature_model=str(image_search_raw.get("feature_model", "openai/clip-vit-base-patch32")),
+                feature_dimensions=int(image_search_raw.get("feature_dimensions", 512)),
+                duplicate_group_limit=int(image_search_raw.get("duplicate_group_limit", 1)),
             ),
             member_search=MemberSearchFeatureSection(
                 exclude_role_names=[

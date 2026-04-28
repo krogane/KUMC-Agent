@@ -89,6 +89,7 @@ class WorkflowService:
         operations: OperationsRepository | None = None,
         member_search_service: Any | None = None,
         image_search_service: Any | None = None,
+        image_search_enabled: bool = True,
         task_extractor: TaskExtractionService | None = None,
         task_access_policy: TaskAccessPolicy | None = None,
         task_duplicate_detector: DuplicateTaskDetector | None = None,
@@ -110,6 +111,7 @@ class WorkflowService:
         self.operations = operations
         self.member_search_service = member_search_service
         self.image_search_service = image_search_service
+        self.image_search_enabled = image_search_enabled
         self.task_extractor = task_extractor or TaskExtractionService(
             llm=llm,
             prompts_dir=prompts_dir,
@@ -1178,6 +1180,12 @@ class WorkflowService:
 
     def image_search(self, request: WorkRequest) -> WorkResponse:
         query = (request.target or request.instruction).strip()
+        if not self.image_search_enabled:
+            return WorkResponse(
+                text="画像検索は無効です。",
+                detail_markdown="Image search is disabled by configuration.",
+                metadata={"route": "image_search", "configured": False, "disabled": True},
+            )
         if self.operations is None:
             return WorkResponse(
                 text="画像検索 repository は未設定です。",
@@ -1191,7 +1199,9 @@ class WorkflowService:
                 ImageSearchRequest(
                     query=query,
                     access_context=request.access,
-                    metadata={"workflow": "image_search"},
+                    limit=request.limit,
+                    source_filter=request.source_filter,
+                    metadata={"workflow": "image_search", **dict(request.metadata or {})},
                 )
             )
             return WorkResponse(
@@ -1200,7 +1210,22 @@ class WorkflowService:
                 assets=result.assets,
                 metadata=result.metadata,
             )
-        assets = tuple(self.operations.list_assets(query=query))
+        from kumc_agent.features.image_search.service import ImageAccessPolicy
+
+        source_filter = {
+            normalized
+            for value in request.source_filter
+            if (normalized := _normalize_work_source_filter(value))
+        }
+        policy = ImageAccessPolicy()
+        image_sources = {"discord", "google_drive", "x", "hatena", "crafters_colony"}
+        assets = tuple(
+            asset
+            for asset in self.operations.list_assets(query=query)
+            if _normalize_work_source_filter(asset.source_kind) in image_sources
+            and (not source_filter or _normalize_work_source_filter(asset.source_kind) in source_filter)
+            and policy.allow_asset(asset, access=request.access)
+        )[: max(1, int(request.limit or 1000))]
         detail = self._format_assets(list(assets))
         if not assets:
             detail = "\n".join(
@@ -3363,3 +3388,16 @@ def _fit_x(text: str) -> str:
     if len(text) <= 280:
         return text
     return text[:277].rstrip() + "..."
+
+
+def _normalize_work_source_filter(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "all", "image"}:
+        return ""
+    if normalized == "drive":
+        return "google_drive"
+    if normalized == "hatenablog":
+        return "hatena"
+    if normalized == "x_posts":
+        return "x"
+    return normalized

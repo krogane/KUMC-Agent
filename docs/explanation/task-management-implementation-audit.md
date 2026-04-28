@@ -99,18 +99,17 @@
 
 ## 仕様の改善点
 
-1. 完了条件をP0/P1/P2へ分ける。現仕様は「完全実装」に自動抽出、Discord UI、通知、変更削除、評価まで含むため、どこまでをリリース判定にするかが曖昧。
-2. 権限モデルを一本化する。上位仕様はadmin限定寄り、redesign文書はadminまたは担当者承認を示唆し、詳細設計は候補作成者・担当者・adminの操作分離を求めている。操作別matrixを正とする必要がある。
-3. `configs/main/task_management.yaml` のschemaを明文化する。`approval_batch_interval_days`、`due_soon_notice_days`、`notification_channel_id`、`admin_user_ids`、`admin_role_ids`、`prompt_name` をRuntimeConfigへ入れる前提まで仕様に書く。
-4. evidenceの必須条件を明確にする。`Citation` が必須なのか、LLMの短い `evidence_refs` でもよいのか、手動登録では何を根拠として保存するのかを定義する。
-5. `Task.status` に `deleted` を含めるか、削除はmetadataだけにするかを固定する。現実装は `status="deleted"` を使うが、詳細設計の基本状態には含まれていない。
-6. 承認transaction APIを仕様に追加する。`merge_task_candidate()` と `merge_task_change_candidate()` をrepository contractに含め、rowcount再確認、二重承認時の応答、File fallbackの不整合検出も定義する。
-7. Discord Component custom idの形式を具体化する。100文字制限を前提に、`target_id` を直接入れるのか、短いnonceからDB参照するのかを決める。
-8. 通知の「送信」と「通知済み記録」を分けて定義する。Discord送信成功、送信失敗、再送、完了確認、通知message id保存の状態遷移が必要。
-9. 自然言語抽出の責務を整理する。自動抽出、手動登録、変更・削除、一覧filterのどこにLLMを使い、どこをルールベースfallbackにするかを仕様化する。
-10. HTTP/CLI/Discord共通のエラーpayloadを定義する。権限なし、not found、承認不能状態、入力不足を500やtracebackにしない契約が必要。
-11. worker/automation payloadにもmetadata方針を適用する。`side_effects` や実行判断はtop-levelではなくmetadataへ寄せるか、安定結果フィールドとして扱うかを決める。
-12. 評価セットを受入条件に昇格する。`task_extraction` のpositive/negative、重複、secret、prompt injection、承認前正本化禁止、権限違反を最低限のCI対象にする。
+1. 権限モデルを一本化する。上位仕様はadmin限定寄り、redesign文書はadminまたは担当者承認を示唆し、詳細設計は候補作成者・担当者・adminの操作分離を求めている。操作別matrixを正とする必要がある。
+2. `configs/main/task_management.yaml` のschemaを明文化する。`approval_batch_interval_days`、`due_soon_notice_days`、`notification_channel_id`、`admin_user_ids`、`admin_role_ids`、`prompt_name` をRuntimeConfigへ入れる前提まで仕様に書く。
+3. evidenceの必須条件を明確にする。`Citation` が必須なのか、LLMの短い `evidence_refs` でもよいのか、手動登録では何を根拠として保存するのかを定義する。
+4. `Task.status` に `deleted` を含めるか、削除はmetadataだけにするかを固定する。現実装は `status="deleted"` を使うが、詳細設計の基本状態には含まれていない。
+5. 承認transaction APIを仕様に追加する。`merge_task_candidate()` と `merge_task_change_candidate()` をrepository contractに含め、rowcount再確認、二重承認時の応答、File fallbackの不整合検出も定義する。
+6. Discord Component custom idの形式を具体化する。100文字制限を前提に、`target_id` を直接入れるのか、短いnonceからDB参照するのかを決める。
+7. 通知の「送信」と「通知済み記録」を分けて定義する。Discord送信成功、送信失敗、再送、完了確認、通知message id保存の状態遷移が必要。
+8. 自然言語抽出の責務を整理する。自動抽出、手動登録、変更・削除、一覧filterのどこにLLMを使い、どこをルールベースfallbackにするかを仕様化する。
+9. HTTP/CLI/Discord共通のエラーpayloadを定義する。権限なし、not found、承認不能状態、入力不足を500やtracebackにしない契約が必要。
+10. worker/automation payloadにもmetadata方針を適用する。`side_effects` や実行判断はtop-levelではなくmetadataへ寄せるか、安定結果フィールドとして扱うかを決める。
+11. 評価セットを受入条件に昇格する。`task_extraction` のpositive/negative、重複、secret、prompt injection、承認前正本化禁止、権限違反を最低限のCI対象にする。
 
 ## 推奨修正順
 

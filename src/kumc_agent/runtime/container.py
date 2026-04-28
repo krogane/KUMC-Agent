@@ -411,22 +411,29 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         surrounding_text_char_limit=config.features.image_search.surrounding_text_char_limit,
         ocr_model=config.features.image_search.ocr_model or config.integrations.drive.pdf_ocr_model_path,
         caption_model=config.features.image_search.caption_model or config.providers.llm.gemini_model,
+        feature_model=config.features.image_search.feature_model,
+        feature_dimensions=config.features.image_search.feature_dimensions,
+        duplicate_group_limit=config.features.image_search.duplicate_group_limit,
     )
-    image_asset_builder = ImageAssetBuildService(
-        repository=operations_repository,
-        raw_dir=config.app.raw_dir,
-        image_dir=config.base_dir / "data" / "image_search" / "images",
-        index_dir=config.app.index_dir / "image_search",
-        embedder=embedder,
-        config=image_search_config,
-        captioner=GeminiImageCaptioner(
-            api_key=config.integrations.gemini_api_key,
-            model=image_search_config.caption_model,
-            prompt_path=config.base_dir / "assets" / "prompts" / "image_caption.md",
-        ),
-        ocr=LocalImageOcrExtractor(
-            model_path=image_search_config.ocr_model
-        ),
+    image_asset_builder = (
+        ImageAssetBuildService(
+            repository=operations_repository,
+            raw_dir=config.app.raw_dir,
+            image_dir=config.base_dir / "data" / "image_search" / "images",
+            index_dir=config.app.index_dir / "image_search",
+            embedder=embedder,
+            config=image_search_config,
+            captioner=GeminiImageCaptioner(
+                api_key=config.integrations.gemini_api_key,
+                model=image_search_config.caption_model,
+                prompt_path=config.base_dir / "assets" / "prompts" / "image_caption.md",
+            ),
+            ocr=LocalImageOcrExtractor(
+                model_path=image_search_config.ocr_model
+            ),
+        )
+        if config.features.image_search.enabled
+        else None
     )
 
     indexing_service = IndexingService(

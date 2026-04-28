@@ -21,10 +21,110 @@ from kumc_agent.features.image_search import (
     ImageSearchService,
 )
 from kumc_agent.infra.embeddings.local import LocalEmbedder
-from kumc_agent.infra.operations import FileOperationsRepository
+from kumc_agent.infra.operations import FileOperationsRepository, PostgresOperationsRepository
+
+
+class _FakePostgresCursor:
+    def __init__(self, connection: "_FakePostgresConnection") -> None:
+        self.connection = connection
+        self.result: list[tuple[object, ...]] = []
+
+    def __enter__(self) -> "_FakePostgresCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def execute(self, sql: str, values: tuple[object, ...] | None = None) -> None:
+        normalized = " ".join(sql.split()).lower()
+        if normalized.startswith("insert into assets") and values is not None:
+            columns = [column.strip() for column in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+            payload = dict(zip(columns, values))
+            self.connection.assets[str(payload["id"])] = payload
+            return
+        if normalized.startswith("select") and "from assets where id" in normalized and values is not None:
+            columns = _select_columns(sql)
+            payload = self.connection.assets.get(str(values[0]))
+            self.result = [tuple(payload.get(column) for column in columns)] if payload else []
+            return
+        if normalized.startswith("select") and "from assets" in normalized:
+            columns = _select_columns(sql)
+            self.result = [
+                tuple(payload.get(column) for column in columns)
+                for payload in self.connection.assets.values()
+            ]
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self.result)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.result[0] if self.result else None
+
+
+class _FakePostgresConnection:
+    def __init__(self) -> None:
+        self.assets: dict[str, dict[str, object]] = {}
+
+    def __enter__(self) -> "_FakePostgresConnection":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def cursor(self) -> _FakePostgresCursor:
+        return _FakePostgresCursor(self)
+
+    def commit(self) -> None:
+        return None
+
+
+class _FakePostgres:
+    def __init__(self) -> None:
+        self.connection = _FakePostgresConnection()
+
+    def connect(self) -> _FakePostgresConnection:
+        return self.connection
+
+
+def _select_columns(sql: str) -> list[str]:
+    return [column.strip() for column in sql.lower().split("select", 1)[1].split("from", 1)[0].split(",")]
 
 
 class ImageSearchTests(unittest.TestCase):
+    def test_image_search_eval_set_is_valid_jsonl(self) -> None:
+        path = ROOT / "docs" / "evals" / "image-search.jsonl"
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        self.assertGreaterEqual(len(records), 6)
+        self.assertTrue({record["category"] for record in records} >= {
+            "ocr_only",
+            "caption_semantic",
+            "similar_image",
+            "protected_source_leakage",
+            "source_attribution",
+            "reuse_disclaimer",
+        })
+
+    def test_postgres_assets_can_be_read_and_searched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = PostgresOperationsRepository(
+                root_dir=Path(tmp) / "operations",
+                postgres=_FakePostgres(),  # type: ignore[arg-type]
+            )
+            asset = Asset(
+                id="asset-1",
+                source_kind="hatena",
+                title="新歓画像",
+                description="公開イベント",
+                access_scope={"visibility": "public"},
+                metadata={"surrounding_text": "イベント告知"},
+            )
+
+            repo.save_asset(asset)
+
+            self.assertEqual(repo.get_asset("asset-1").id, "asset-1")  # type: ignore[union-attr]
+            self.assertEqual(repo.list_assets(query="イベント")[0].id, "asset-1")
+
     def test_builder_indexes_discord_attachment_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -59,7 +159,13 @@ class ImageSearchTests(unittest.TestCase):
             )
             repository = FileOperationsRepository(root_dir=root / "operations")
             embedder = LocalEmbedder(model_name="", dimensions=32)
-            config = ImageSearchConfig(limit=5, dense_top_k=5, feature_top_k=5)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                feature_model="local_hash",
+                feature_dimensions=32,
+            )
             builder = ImageAssetBuildService(
                 repository=repository,
                 raw_dir=root / "raw",
@@ -126,7 +232,13 @@ class ImageSearchTests(unittest.TestCase):
             )
             repository = FileOperationsRepository(root_dir=root / "operations")
             embedder = LocalEmbedder(model_name="", dimensions=32)
-            config = ImageSearchConfig(limit=5, dense_top_k=5, feature_top_k=5)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                feature_model="local_hash",
+                feature_dimensions=32,
+            )
             builder = ImageAssetBuildService(
                 repository=repository,
                 raw_dir=root / "raw",
@@ -183,7 +295,13 @@ class ImageSearchTests(unittest.TestCase):
                 )
             )
             embedder = LocalEmbedder(model_name="", dimensions=32)
-            config = ImageSearchConfig(limit=5, dense_top_k=5, feature_top_k=5)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                feature_model="local_hash",
+                feature_dimensions=32,
+            )
             builder = ImageAssetBuildService(
                 repository=repository,
                 raw_dir=root / "raw",
@@ -216,6 +334,75 @@ class ImageSearchTests(unittest.TestCase):
 
             self.assertEqual([asset.id for asset in denied.assets], ["hatena-asset"])
             self.assertEqual({asset.id for asset in allowed.assets}, {"discord-asset", "hatena-asset"})
+
+    def test_source_filter_limit_matched_fields_and_duplicate_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = FileOperationsRepository(root_dir=root / "operations")
+            for asset_id, source_kind in (("hatena-1", "hatena"), ("hatena-2", "hatena")):
+                repository.save_asset(
+                    Asset(
+                        id=asset_id,
+                        source_kind=source_kind,
+                        title="新歓ポスター",
+                        description="新歓イベントの告知画像",
+                        access_scope={"visibility": "public"},
+                        metadata={
+                            "ocr_text": "KUMC 新歓",
+                            "surrounding_text": "新歓イベント",
+                            "source_label": "公開記事",
+                            "duplicate_group_id": "dup-1",
+                            "index_status": "active",
+                        },
+                    )
+                )
+            repository.save_asset(
+                Asset(
+                    id="x-1",
+                    source_kind="x",
+                    title="新歓写真",
+                    description="別画像",
+                    access_scope={"visibility": "public"},
+                    metadata={"surrounding_text": "新歓イベント", "index_status": "active"},
+                )
+            )
+            embedder = LocalEmbedder(model_name="", dimensions=32)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                feature_model="local_hash",
+                feature_dimensions=32,
+                duplicate_group_limit=1,
+            )
+            builder = ImageAssetBuildService(
+                repository=repository,
+                raw_dir=root / "raw",
+                image_dir=root / "image_search" / "images",
+                index_dir=root / "image_search",
+                embedder=embedder,
+                config=config,
+            )
+            builder.build_from_raw_sources()
+            service = ImageSearchService(
+                repository=repository,
+                embedder=embedder,
+                index_dir=root / "image_search",
+                config=config,
+            )
+
+            result = service.search(
+                ImageSearchRequest(
+                    query="新歓",
+                    source_filter=("hatena",),
+                    limit=5,
+                )
+            )
+
+            self.assertEqual(1, len(result.assets))
+            self.assertEqual("hatena", result.assets[0].source_kind)
+            self.assertIn("matched_fields", result.metadata["search_results"][0])
+            self.assertIn("search", result.assets[0].metadata)
 
 
 def _tiny_png() -> bytes:

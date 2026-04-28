@@ -330,6 +330,8 @@ def _build_parser() -> argparse.ArgumentParser:
     work_parser.add_argument("--instruction", default="")
     work_parser.add_argument("--target", default="")
     work_parser.add_argument("--format", default="markdown", choices=("compact", "markdown"))
+    work_parser.add_argument("--source-filter", "--source", action="append", default=None)
+    work_parser.add_argument("--limit", type=int, default=None)
     work_parser.add_argument("--user-id", default="")
     work_parser.add_argument("--guild-id", default="")
     work_parser.add_argument("--role-id", action="append", default=None)
@@ -595,6 +597,8 @@ def main() -> None:
                 instruction=args.instruction,
                 target=args.target,
                 output_format=args.format,
+                source_filter=tuple(args.source_filter or ()),
+                limit=args.limit,
                 access=AccessContext(
                     user_id=args.user_id,
                     guild_id=args.guild_id,

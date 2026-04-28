@@ -141,12 +141,15 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
                 foundation.config.features.image_search.caption_model
                 or foundation.config.providers.llm.gemini_model
             ),
+            feature_model=foundation.config.features.image_search.feature_model,
+            feature_dimensions=foundation.config.features.image_search.feature_dimensions,
+            duplicate_group_limit=foundation.config.features.image_search.duplicate_group_limit,
         ),
         embedder=embedder,
         index_dir=foundation.config.app.index_dir / "image_search",
         allowed_guild_ids=tuple(str(value) for value in foundation.config.security.discord_guild_allow_list),
         admin_user_ids=tuple(str(value) for value in foundation.config.security.maintenance_command_author_ids),
-    )
+    ) if foundation.config.features.image_search.enabled else None
     member_profile_builder = MemberProfileBuildService(
         repository=operations_repository,
         directory=DiscordMemberDirectoryConnector(
@@ -198,6 +201,7 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             operations=operations_repository,
             member_search_service=member_search,
             image_search_service=image_search,
+            image_search_enabled=foundation.config.features.image_search.enabled,
             llm=llm,
             prompts_dir=prompts_dir,
             llm_model_name=foundation.config.providers.llm.gemini_model,

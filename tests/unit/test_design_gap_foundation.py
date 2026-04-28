@@ -51,7 +51,14 @@ class DesignGapFoundationTests(unittest.TestCase):
             root = Path(tmp)
             operations = FileOperationsRepository(root_dir=root / "operations")
             operations.save_asset(
-                Asset(id="asset-1", title="広報写真", contains_people=True, rights_status="unknown")
+                Asset(
+                    id="asset-1",
+                    source_kind="discord",
+                    title="広報写真",
+                    access_scope={"visibility": "guild", "guild_id": "guild-1"},
+                    contains_people=True,
+                    rights_status="unknown",
+                )
             )
             service = WorkflowService(
                 repository=FileWorkflowRepository(root_dir=root / "workflow"),
@@ -69,7 +76,7 @@ class DesignGapFoundationTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(len(image.assets), 1)
+            self.assertEqual(len(image.assets), 0)
             self.assertIn("権限", denied_member.text)
 
     def test_generic_approval_records_no_side_effects(self) -> None:
