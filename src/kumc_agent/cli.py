@@ -564,10 +564,12 @@ def main() -> None:
             return
 
     if args.command == "ask":
-        from kumc_agent.apps.integrated_input import build_integrated_input_app_context
-
-        integrated = build_integrated_input_app_context()
-        response = integrated.integrated_input.execute(
+        context = build_runtime_context()
+        configure_logging(
+            context.config.app.log_level,
+            file_path=default_execution_log_path(base_dir=context.config.base_dir),
+        )
+        response = context.integrated_input.execute(
             IntegratedInputRequest(
                 text=args.question,
                 source=args.source,

@@ -12,11 +12,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from kumc_agent.domain.models.agentic import AgentRun, ComprehensiveAgentResponse
+from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.integrated_input import (
     IntegratedInputDecision,
     IntegratedInputRequest,
 )
 from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation, RetrievalQuery
+from kumc_agent.domain.models.source import Source
 from kumc_agent.domain.models.workflow import WorkRequest, WorkResponse
 from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload
 from kumc_agent.features.rag.components.integrated_input_routing import (
@@ -44,6 +46,20 @@ class FakeAskService:
             ),
             confidence="medium",
             metadata={"contexts": "hidden", "trace": "ok"},
+        )
+
+
+@dataclass
+class FakeChatAnswerService:
+    requests: list[object]
+
+    def execute(self, request) -> Answer:
+        self.requests.append(request)
+        return Answer(
+            text=f"rag:{request.query}",
+            route="rag",
+            sources=[Source(id="s1", label="source-label", uri="https://example.com/s1")],
+            metadata={"contexts": ["hidden"], "routing_decision": {"target_model": "rag"}},
         )
 
 
@@ -134,6 +150,32 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(response.metadata["route"], "minecraft_wiki_rag")
         self.assertEqual(ask.queries[0].source_filter, "minecraft_wiki")
         self.assertEqual(ask.queries[0].access, access)
+
+    def test_usecase_routes_circle_rag_to_chat_answer_service(self) -> None:
+        ask = FakeAskService([])
+        chat = FakeChatAnswerService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=ask,
+            chat_answer_service=chat,
+            workflow_service=FakeWorkflowService([]),
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(route="circle_rag", required_features=("circle_rag",))
+            ),  # type: ignore[arg-type]
+        )
+        access = AccessContext(user_id="u1", guild_id="g1", role_ids=("r1",))
+
+        response = usecase.execute(
+            IntegratedInputRequest(text="例会はいつ", source="all", access=access)
+        )
+
+        self.assertEqual(response.text, "rag:例会はいつ")
+        self.assertEqual(response.metadata["route"], "circle_rag")
+        self.assertEqual(response.metadata["handler"], "circle_rag")
+        self.assertEqual(chat.requests[0].access_context, access)
+        self.assertEqual(ask.queries, [])
+        self.assertNotIn("contexts", response.metadata)
+        self.assertEqual(response.citations[0]["url"], "https://example.com/s1")
 
     def test_usecase_routes_workflow_and_sanitizes_metadata(self) -> None:
         workflow = FakeWorkflowService([])

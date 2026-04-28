@@ -26,7 +26,7 @@ KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
 KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
 _MATERIAL_NAME_INDEX_EXCLUDED_SOURCE_TYPES = frozenset(
-    {"messages", "discord_message", "x_posts"}
+    {"messages", "discord_message", "discord", "x_posts", "x"}
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,15 @@ class IndexBuildResult:
     chunks: int
     index_dir: Path
     stage_results: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class _RepositoryIndexArtifacts:
+    first_chunks: list[Chunk]
+    second_chunks: list[Chunk]
+    sparse_chunks: list[Chunk]
+    summary_chunks: list[Chunk]
+    index_chunks: list[Chunk]
 
 
 class IndexingService:
@@ -178,11 +187,18 @@ class IndexingService:
             if prefer_ingestion_repository and self._ingestion_repository is not None
             else []
         )
-        index_chunks = (
-            repository_chunks
-            if repository_chunks
-            else self._load_index_chunks_from_legacy_dirs(legacy_cfg=legacy_cfg)
-        )
+        repository_artifacts: _RepositoryIndexArtifacts | None = None
+        if repository_chunks:
+            repository_artifacts = self._build_repository_index_artifacts(
+                repository_chunks=repository_chunks,
+                legacy_cfg=legacy_cfg,
+                selected=selected,
+            )
+            index_chunks = repository_artifacts.index_chunks
+        else:
+            index_chunks = self._load_index_chunks_from_legacy_dirs(
+                legacy_cfg=legacy_cfg
+            )
         self._storage.save_chunks(index_chunks)
 
         dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
@@ -190,8 +206,17 @@ class IndexingService:
         self._faiss_index.build(chunks=index_chunks, embeddings=embeddings)
         self._bm25_index.build(index_chunks)
 
-        self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
-        self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
+        if repository_artifacts is not None:
+            self._build_material_catalog_from_repository_chunks(
+                chunks=repository_artifacts.first_chunks or repository_artifacts.second_chunks
+            )
+            self._build_keyword_inverted_indexes_from_repository_artifacts(
+                artifacts=repository_artifacts,
+                legacy_cfg=legacy_cfg,
+            )
+        else:
+            self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
+            self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
         self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
         stage_results: dict[str, object] = {
             "source_of_chunks": "ingestion_repository" if repository_chunks else "raw_chunk_pipeline"
@@ -1002,6 +1027,19 @@ class IndexingService:
 
         chunks: list[Chunk] = []
         chunks.extend(self._load_legacy_chunks_from_dirs(base_dirs))
+        chunks.extend(
+            self._load_legacy_chunks_from_dirs(
+                [
+                    self._summary_docs_dir,
+                    self._summary_sheets_dir,
+                    self._summary_messages_dir,
+                    self._summary_x_dir,
+                    self._summary_hatenablog_dir,
+                    self._summary_crafters_colony_dir,
+                    self._summary_notion_dir,
+                ]
+            )
+        )
         if self._second_rec_vc_dir.exists():
             chunks.extend(self._load_legacy_chunks_from_dirs([self._second_rec_vc_dir]))
         if self._summary_minecraft_wiki_dir.exists():
@@ -1126,6 +1164,356 @@ class IndexingService:
         except Exception:
             logger.exception("Failed to build legacy embedding text. Falling back to chunk text.")
             return chunk.text
+
+    def _build_repository_index_artifacts(
+        self,
+        *,
+        repository_chunks: list[Chunk],
+        legacy_cfg,
+        selected: set[str],
+    ) -> _RepositoryIndexArtifacts:
+        first_chunks: list[Chunk] = []
+        second_chunks: list[Chunk] = []
+        sparse_chunks: list[Chunk] = []
+        summary_chunks: list[Chunk] = []
+
+        for idx, chunk in enumerate(repository_chunks):
+            normalized = self._normalize_repository_chunk(chunk, fallback_index=idx)
+            first_metadata = dict(normalized.metadata)
+            first_metadata["chunk_stage"] = "first_recursive"
+            first_metadata["chunk_id"] = normalized.index
+            first_chunk = Chunk(
+                id=stable_hash(f"{normalized.id}:first:{normalized.text[:256]}"),
+                document_id=normalized.document_id,
+                text=normalized.text,
+                index=normalized.index,
+                metadata=first_metadata,
+            )
+            first_chunks.append(first_chunk)
+
+            second_metadata = dict(normalized.metadata)
+            second_metadata["chunk_stage"] = "second_recursive"
+            second_metadata["parent_chunk_id"] = first_chunk.metadata.get("chunk_id", first_chunk.index)
+            second_metadata["chunk_id"] = normalized.index
+            second_metadata["skip_parent_context"] = True
+            second_chunk = replace(
+                normalized,
+                metadata=second_metadata,
+            )
+            second_chunks.append(second_chunk)
+
+            sparse_text = self._repository_sparse_text(
+                second_chunk.text,
+                legacy_cfg=legacy_cfg,
+            )
+            if sparse_text:
+                sparse_metadata = dict(second_metadata)
+                sparse_metadata["chunk_stage"] = "second_recursive_sparse"
+                sparse_chunks.append(
+                    Chunk(
+                        id=stable_hash(f"{second_chunk.id}:sparse:{sparse_text[:256]}"),
+                        document_id=second_chunk.document_id,
+                        text=sparse_text,
+                        index=second_chunk.index,
+                        metadata=sparse_metadata,
+                    )
+                )
+
+        stages = self._runtime.indexing.stages
+        chunking = self._runtime.indexing.chunking
+        if stages.summary_enabled and (
+            not selected or "summary" in selected
+        ):
+            limit = max(32, int(chunking.summary_characters))
+            for idx, chunk in enumerate(first_chunks):
+                summary_text = self._build_summary_text(
+                    text=chunk.text,
+                    target_characters=limit,
+                )
+                if not summary_text:
+                    continue
+                metadata = dict(chunk.metadata)
+                metadata["chunk_stage"] = "summary"
+                metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
+                metadata["chunk_id"] = idx
+                summary_chunks.append(
+                    Chunk(
+                        id=stable_hash(f"{chunk.id}:summary:{summary_text[:256]}"),
+                        document_id=chunk.document_id,
+                        text=summary_text,
+                        index=idx,
+                        metadata=metadata,
+                    )
+                )
+
+        self._clear_dir_contents(self._first_rec_dir)
+        self._clear_dir_contents(self._second_rec_dir)
+        self._clear_dir_contents(self._sparse_second_rec_dir)
+        self._clear_dir_contents(self._summary_dir)
+        self._write_stage_chunks(self._first_rec_dir, first_chunks)
+        self._write_stage_chunks(self._second_rec_dir, second_chunks)
+        self._write_stage_chunks(self._sparse_second_rec_dir, sparse_chunks)
+        if summary_chunks:
+            self._write_stage_chunks(self._summary_dir, summary_chunks)
+
+        return _RepositoryIndexArtifacts(
+            first_chunks=first_chunks,
+            second_chunks=second_chunks,
+            sparse_chunks=sparse_chunks,
+            summary_chunks=summary_chunks,
+            index_chunks=[*second_chunks, *summary_chunks],
+        )
+
+    def _normalize_repository_chunk(self, chunk: Chunk, *, fallback_index: int) -> Chunk:
+        metadata = dict(chunk.metadata or {})
+        source_type = str(
+            metadata.get("source_type") or metadata.get("source_kind") or ""
+        ).strip().lower()
+        if not source_type:
+            source_type = "misc"
+        source_key = str(
+            metadata.get("drive_file_id")
+            or metadata.get("source_file_name")
+            or metadata.get("external_id")
+            or metadata.get("source_item_id")
+            or chunk.document_id
+            or ""
+        ).strip()
+        if not source_key:
+            source_key = f"{source_type}:{fallback_index}"
+        metadata["source_type"] = source_type
+        metadata.setdefault("source_kind", source_type)
+        metadata.setdefault("source_file_name", source_key)
+        metadata.setdefault("external_id", source_key)
+        source_title = str(metadata.get("source_title") or "").strip()
+        if source_title:
+            metadata.setdefault("drive_file_name", source_title)
+        if "path" not in metadata:
+            metadata["path"] = source_key
+        metadata.setdefault("chunk_uid", chunk.id)
+        metadata.setdefault("index_status", "active")
+        index = self._to_int(metadata.get("chunk_id"), fallback=chunk.index)
+        if index < 0:
+            index = fallback_index
+        return replace(chunk, index=index, metadata=metadata)
+
+    @staticmethod
+    def _repository_sparse_text(text: str, *, legacy_cfg) -> str:
+        source_text = str(text or "").strip()
+        if not source_text:
+            return ""
+        try:
+            from kumc_agent.infra.indexing.sparse_normalizer import (
+                SparseNormalizer,
+                SparseNormalizerConfig,
+            )
+
+            normalizer = SparseNormalizer(
+                config=SparseNormalizerConfig(
+                    sudachi_mode=legacy_cfg.sudachi_mode,
+                    use_normalized_form=legacy_cfg.sparse_use_normalized_form,
+                    remove_symbols=legacy_cfg.sparse_remove_symbols,
+                    remove_stopwords=False,
+                )
+            )
+            tokens = normalizer.normalize_tokens(source_text)
+        except Exception:
+            tokens = [token for token in source_text.lower().split() if token]
+        return " ".join(token for token in tokens if token)
+
+    def _build_material_catalog_from_repository_chunks(
+        self,
+        *,
+        chunks: list[Chunk],
+    ) -> None:
+        try:
+            from kumc_agent.infra.indexing.material_catalog import (
+                MaterialCatalogEntry,
+                save_material_catalog,
+            )
+        except Exception:
+            logger.exception("Material catalog dependencies are unavailable.")
+            return
+
+        grouped: dict[tuple[str, str], dict[str, object]] = {}
+        for chunk in chunks:
+            metadata = dict(chunk.metadata or {})
+            source_type = str(metadata.get("source_type") or "").strip().lower()
+            source_key = str(
+                metadata.get("drive_file_id")
+                or metadata.get("source_file_name")
+                or metadata.get("external_id")
+                or metadata.get("source_item_id")
+                or chunk.document_id
+                or ""
+            ).strip()
+            if not source_type or not source_key:
+                continue
+            key = (source_type, source_key)
+            row = grouped.setdefault(
+                key,
+                {
+                    "chunks": [],
+                    "aliases": [],
+                    "metadata": metadata,
+                },
+            )
+            row_chunks = row["chunks"]
+            if isinstance(row_chunks, list):
+                row_chunks.append(chunk.text)
+            aliases = row["aliases"]
+            if isinstance(aliases, list):
+                aliases.extend(self._material_aliases_from_metadata(metadata, source_key))
+
+        entries: list[MaterialCatalogEntry] = []
+        raw_dir = self._runtime.app.data_dir / "material_raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        for (source_type, source_key), row in grouped.items():
+            metadata = row.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            canonical = self._material_canonical_name(metadata, source_key=source_key)
+            aliases = self._dedupe_texts(
+                [canonical, source_key, *list(row.get("aliases") or [])]
+            )
+            material_id = f"{source_type}:{source_key}"
+            raw_path = raw_dir / f"{stable_hash(material_id)[:24]}.txt"
+            chunk_texts = [
+                str(value).strip()
+                for value in row.get("chunks") or []
+                if str(value).strip()
+            ]
+            raw_path.write_text("\n\n".join(chunk_texts), encoding="utf-8")
+            entries.append(
+                MaterialCatalogEntry(
+                    material_id=material_id,
+                    source_type=source_type,
+                    source_key=source_key,
+                    canonical_name=canonical,
+                    aliases=tuple(aliases),
+                    raw_path=str(raw_path),
+                )
+            )
+        save_material_catalog(index_dir=self._runtime.app.index_dir, entries=entries)
+
+    @staticmethod
+    def _material_aliases_from_metadata(
+        metadata: dict[str, object],
+        source_key: str,
+    ) -> list[str]:
+        values = [
+            source_key,
+            metadata.get("source_title"),
+            metadata.get("drive_file_name"),
+            metadata.get("drive_file_path"),
+            metadata.get("path"),
+            metadata.get("canonical_url"),
+            metadata.get("notion_title"),
+            metadata.get("notion_url"),
+            metadata.get("hatenablog_title"),
+            metadata.get("hatenablog_url"),
+            metadata.get("crafters_colony_title"),
+            metadata.get("crafters_colony_article_url"),
+        ]
+        return [str(value).strip() for value in values if str(value or "").strip()]
+
+    @staticmethod
+    def _material_canonical_name(
+        metadata: dict[str, object],
+        *,
+        source_key: str,
+    ) -> str:
+        for key in (
+            "source_title",
+            "drive_file_name",
+            "notion_title",
+            "hatenablog_title",
+            "crafters_colony_title",
+            "path",
+        ):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return Path(value).stem or value
+        return Path(source_key).stem or source_key
+
+    @staticmethod
+    def _dedupe_texts(values: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(text)
+        return deduped
+
+    def _build_keyword_inverted_indexes_from_repository_artifacts(
+        self,
+        *,
+        artifacts: _RepositoryIndexArtifacts,
+        legacy_cfg,
+    ) -> None:
+        try:
+            from langchain_core.documents import Document as LangDocument
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                KEYWORD_CORPUS_SECOND_REC_SPARSE,
+                KEYWORD_CORPUS_SPARSE,
+                KEYWORD_CORPUS_SPARSE_SECOND_REC,
+                build_and_save_keyword_index,
+                tokenize_sparse_doc,
+            )
+            from kumc_agent.infra.indexing.sparse_normalizer import (
+                SparseNormalizer,
+                SparseNormalizerConfig,
+            )
+        except Exception:
+            logger.exception(
+                "Keyword inverted index dependencies are unavailable. "
+                "Falling back to lightweight keyword payload."
+            )
+            self._build_keyword_indexes_payload(
+                sparse_chunks=artifacts.sparse_chunks,
+                second_chunks=artifacts.second_chunks,
+            )
+            return
+
+        normalizer = SparseNormalizer(
+            config=SparseNormalizerConfig(
+                sudachi_mode=legacy_cfg.sudachi_mode,
+                use_normalized_form=legacy_cfg.sparse_use_normalized_form,
+                remove_symbols=legacy_cfg.sparse_remove_symbols,
+                remove_stopwords=False,
+            )
+        )
+
+        def _doc(chunk: Chunk) -> LangDocument:
+            metadata = dict(chunk.metadata or {})
+            metadata.setdefault("chunk_uid", chunk.id)
+            return LangDocument(page_content=chunk.text, metadata=metadata)
+
+        def _tokenize(doc: LangDocument) -> list[str]:
+            return tokenize_sparse_doc(
+                doc,
+                sparse_stage="second_recursive_sparse",
+                sudachi_tokenize=normalizer.normalize_tokens,
+            )
+
+        sparse_docs = [_doc(chunk) for chunk in artifacts.sparse_chunks if chunk.text.strip()]
+        second_docs = [_doc(chunk) for chunk in artifacts.second_chunks if chunk.text.strip()]
+        for corpus_name, docs in (
+            (KEYWORD_CORPUS_SPARSE, sparse_docs),
+            (KEYWORD_CORPUS_SPARSE_SECOND_REC, sparse_docs),
+            (KEYWORD_CORPUS_SECOND_REC_SPARSE, second_docs),
+        ):
+            build_and_save_keyword_index(
+                index_dir=legacy_cfg.index_dir,
+                corpus_name=corpus_name,
+                docs=docs,
+                tokenize_doc=_tokenize,
+                k1=legacy_cfg.sparse_bm25_k1,
+                b=legacy_cfg.sparse_bm25_b,
+            )
 
     def _build_keyword_inverted_indexes(self, *, legacy_cfg) -> None:
         try:

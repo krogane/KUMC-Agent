@@ -80,6 +80,7 @@ class QueryRouterTests(unittest.TestCase):
             "use_additional_memory": True,
             "material_names": ["運営資料", "議事録"],
             "recency_mode": "hard",
+            "needs_additional_query": True,
             "additional_queries": ["追加クエリ"],
         }
 
@@ -100,6 +101,7 @@ class QueryRouterTests(unittest.TestCase):
         ]
         self.assertIn("material_names", called_tasks)
         self.assertIn("recency_mode", called_tasks)
+        self.assertIn("needs_additional_query", called_tasks)
         self.assertIn("additional_queries", called_tasks)
 
     def test_routing_disabled_returns_safe_default(self) -> None:

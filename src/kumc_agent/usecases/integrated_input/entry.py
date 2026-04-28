@@ -11,13 +11,15 @@ from kumc_agent.domain.models.integrated_input import (
     IntegratedInputRequest,
     IntegratedInputResponse,
 )
-from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, RetrievalQuery
+from kumc_agent.domain.models.answer import Answer
+from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation, RetrievalQuery
 from kumc_agent.domain.models.workflow import WorkRequest, WorkResponse
 from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload, sanitize_payload_metadata
 from kumc_agent.features.rag.components.integrated_input_routing import (
     IntegratedInputRouter,
     IntegratedRoutingPolicy,
 )
+from kumc_agent.usecases.chat.answer import ChatRequest
 
 
 class IntegratedInputUsecase:
@@ -28,9 +30,11 @@ class IntegratedInputUsecase:
         workflow_service: object | None,
         comprehensive_agent: object | None,
         router: IntegratedInputRouter,
+        chat_answer_service: object | None = None,
         routing_policy: IntegratedRoutingPolicy | None = None,
     ) -> None:
         self.ask_service = ask_service
+        self.chat_answer_service = chat_answer_service
         self.workflow_service = workflow_service
         self.comprehensive_agent = comprehensive_agent
         self.router = router
@@ -129,6 +133,20 @@ class IntegratedInputUsecase:
                 confidence="low",
                 warnings=("permission denied",),
                 metadata=self._decision_metadata(denied, handler="deny"),
+            )
+        if decision.route == "circle_rag" and self.chat_answer_service is not None:
+            return self._from_rag_answer(
+                self.chat_answer_service.execute(
+                    ChatRequest(
+                        query=request.text,
+                        question_author=access.user_id or None,
+                        history_scope=request.history_scope or self._history_scope(request, access),
+                        force_fast_mode=request.mode == "fast",
+                        access_context=access,
+                    )
+                ),
+                decision,
+                handler="circle_rag",
             )
         if decision.route in {"circle_rag", "minecraft_wiki_rag"}:
             source_filter = "minecraft_wiki" if decision.route == "minecraft_wiki_rag" else self._rag_source(request, decision)
@@ -242,6 +260,41 @@ class IntegratedInputUsecase:
                 **self._decision_metadata(decision, handler=handler),
             },
         )
+
+    def _from_rag_answer(
+        self,
+        answer: Answer,
+        decision: IntegratedInputDecision,
+        *,
+        handler: str,
+    ) -> IntegratedInputResponse:
+        citations = tuple(
+            Citation(
+                source_item_id=source.id,
+                chunk_id=source.id,
+                label=source.label,
+                url=source.uri,
+            )
+            for source in answer.sources
+        )
+        return IntegratedInputResponse(
+            text=answer.text,
+            detail_markdown="",
+            citations=citations,
+            confidence="medium" if answer.sources else "low",
+            metadata={
+                **sanitize_payload_metadata(answer.metadata),
+                **self._decision_metadata(decision, handler=handler),
+            },
+        )
+
+    @staticmethod
+    def _history_scope(request: IntegratedInputRequest, access: AccessContext) -> str:
+        if request.frontend == "discord" and access.guild_id:
+            return f"discord:{access.guild_id}"
+        if request.frontend and access.user_id:
+            return f"{request.frontend}:{access.user_id}"
+        return request.frontend or "integrated_input"
 
     def _from_work_response(
         self,

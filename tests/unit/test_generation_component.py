@@ -357,7 +357,7 @@ class GenerationComponentTests(unittest.TestCase):
         self.assertEqual(answer.text.count(phrase), 1)
         self.assertIn("主な情報源:", answer.text)
 
-    def test_force_all_sources_still_respects_source_max_count(self) -> None:
+    def test_force_all_sources_includes_every_selected_context(self) -> None:
         component, _ = self._component(
             {
                 "answer_rag": '{"answer":"...", "sources":[1]}',
@@ -397,12 +397,13 @@ class GenerationComponentTests(unittest.TestCase):
             max_output_tokens=128,
             force_all_sources=True,
         )
-        self.assertEqual(len(answer.sources), 2)
+        self.assertEqual(len(answer.sources), 3)
         self.assertEqual(
             [source.label for source in answer.sources],
             [
                 "https://docs.google.com/document/d/file-1/",
                 "https://docs.google.com/document/d/file-2/",
+                "https://docs.google.com/document/d/file-3/",
             ],
         )
 

@@ -612,7 +612,7 @@ class GenerationComponent:
         if not effective_selections:
             return []
 
-        limit = self._source_max_count
+        limit = None if force_all_sources else self._source_max_count
         selected: list[Source] = []
         seen: set[str] = set()
         for selection in effective_selections:

@@ -24,6 +24,7 @@ _ROUTING_TASK_NAMES = (
     "use_additional_memory",
     "include_capabilities_info",
     "fast_mode",
+    "needs_additional_query",
     "additional_queries",
     "material_names",
     "recency_mode",
@@ -33,6 +34,7 @@ _ROUTING_BOOL_TASKS = {
     "use_additional_memory",
     "include_capabilities_info",
     "fast_mode",
+    "needs_additional_query",
 }
 
 _RECENCY_VALUES = {"off", "soft", "hard"}
@@ -214,6 +216,7 @@ class QueryRouter:
             phase_one.get("include_capabilities_info", False)
         )
         fast_mode = bool(phase_one.get("fast_mode", False))
+        needs_additional_query = bool(phase_one.get("needs_additional_query", False))
         target_model = str(phase_one.get("target_model") or "rag").strip().lower()
         if target_model not in _TARGET_MODELS:
             target_model = "rag"
@@ -225,6 +228,8 @@ class QueryRouter:
             material_names = []
         additional_queries = phase_one.get("additional_queries")
         if not isinstance(additional_queries, list):
+            additional_queries = []
+        if not needs_additional_query:
             additional_queries = []
 
         return RoutingDecision(

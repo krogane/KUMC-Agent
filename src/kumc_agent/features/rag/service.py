@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 ChatHistoryEntry = tuple[str, str, Sequence[str]]
 _MATERIAL_SEARCH_EXCLUDED_SOURCE_TYPES = frozenset(
-    {"messages", "discord_message", "x_posts"}
+    {"messages", "discord_message", "discord", "x_posts", "x"}
 )
 _KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
 _MATERIAL_NAME_SEPARATORS_RE = re.compile(r"[\s/\\_.\-:：,，、]+")
@@ -135,6 +135,8 @@ class RagService:
                 fast_mode=True,
             )
         effective_fast_mode = bool(force_fast_mode or decision.fast_mode)
+        if effective_fast_mode and (decision.material_names or decision.additional_queries):
+            decision = replace(decision, material_names=[], additional_queries=[])
 
         if generation_history_override is not None:
             generation_history = list(generation_history_override)

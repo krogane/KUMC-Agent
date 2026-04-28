@@ -59,6 +59,19 @@ def _config() -> RagConfig:
 
 
 class AnswerFilterTests(unittest.TestCase):
+    def test_filter_parse_failure_refuses_by_default(self) -> None:
+        answer_filter = AnswerFilterComponent(
+            llm=_LLM(["not-json"]),
+            prompts=_Prompts(),
+            max_retries=0,
+        )
+
+        result = answer_filter.evaluate(answer_text="通常回答")
+
+        self.assertTrue(result.refused)
+        self.assertTrue(result.fallback)
+        self.assertEqual(result.reason_code, "filter_fallback_refuse")
+
     def test_refusal_llm_receives_only_query(self) -> None:
         llm = _LLM(
             [

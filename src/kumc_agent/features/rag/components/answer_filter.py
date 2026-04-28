@@ -120,8 +120,8 @@ class AnswerFilterComponent:
             if attempt < self._max_retries:
                 continue
         return AnswerFilterResult(
-            action="allow",
-            reason_code="filter_fallback_allow",
+            action="refuse",
+            reason_code="filter_fallback_refuse",
             raw=last_raw,
             fallback=True,
         )

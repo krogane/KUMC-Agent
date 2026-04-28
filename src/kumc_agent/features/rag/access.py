@@ -6,7 +6,17 @@ from typing import Sequence
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.retrieval import AccessContext
 
-_PROTECTED_SOURCE_TYPES = frozenset({"docs", "sheets", "messages", "discord_message"})
+_PROTECTED_SOURCE_TYPES = frozenset(
+    {
+        "docs",
+        "sheets",
+        "google_drive",
+        "drive",
+        "messages",
+        "discord_message",
+        "discord",
+    }
+)
 _PUBLIC_SOURCE_TYPES = frozenset(
     {"hatenablog", "crafters_colony", "x_posts", "notion", "vc_transcript"}
 )
@@ -36,6 +46,9 @@ class RagAccessFilter:
             return False
 
         source_type = str(metadata.get("source_type") or "").strip().lower()
+        access_scope = metadata.get("access_scope")
+        if isinstance(access_scope, dict):
+            return self._allow_access_scope(access_scope, access=access)
         if source_type in _PUBLIC_SOURCE_TYPES:
             return True
         if source_type not in _PROTECTED_SOURCE_TYPES:
@@ -86,3 +99,29 @@ class RagAccessFilter:
         if bool(access.is_admin) and (not admin_users or request_user_id in admin_users):
             return True
         return bool(request_user_id and request_user_id in admin_users)
+
+    @staticmethod
+    def _allow_access_scope(
+        scope: dict[str, object],
+        *,
+        access: AccessContext | None,
+    ) -> bool:
+        visibility = str(scope.get("visibility") or "admin").strip().lower()
+        if visibility == "public":
+            return True
+        if access is None:
+            return False
+        if access.is_admin:
+            return True
+        if visibility == "admin":
+            return False
+        if visibility == "guild":
+            scope_guild = str(scope.get("guild_id") or "").strip()
+            return bool(scope_guild and access.guild_id and scope_guild == access.guild_id)
+        if visibility == "role":
+            allowed_roles = {str(value) for value in scope.get("role_ids") or []}
+            return bool(allowed_roles & set(access.role_ids))
+        if visibility == "private":
+            allowed_users = {str(value) for value in scope.get("user_ids") or []}
+            return bool(access.user_id and access.user_id in allowed_users)
+        return False

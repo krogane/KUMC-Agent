@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +26,45 @@ def _chunk(chunk_id: str) -> Chunk:
 
 
 class RagRetrievalRrfTests(unittest.TestCase):
+    def test_retrieve_keeps_sparse_hits_when_dense_is_also_enabled(self) -> None:
+        sparse_chunk = _chunk("sparse-only")
+
+        class _Embedder:
+            def embed_query(self, query):  # noqa: ANN001, ARG002
+                return [1.0, 0.0]
+
+            def embed_documents(self, texts):  # noqa: ANN001, ARG002
+                return [[1.0, 0.0] for _ in texts]
+
+        class _DenseIndex:
+            def __init__(self, index_dir: Path) -> None:
+                self._index_dir = index_dir
+
+            def search(self, *, query_vector, top_k):  # noqa: ANN001, ARG002
+                return []
+
+        class _SparseIndex:
+            def search_with_scores(self, query, top_k):  # noqa: ANN001, ARG002
+                return [(sparse_chunk, 1.0)]
+
+            def _tokenize(self, query):  # noqa: ANN001
+                return str(query).split()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            component = RetrievalComponent(
+                embedder=_Embedder(),
+                dense_index=_DenseIndex(Path(tmp) / "index"),
+                sparse_index=_SparseIndex(),
+            )
+
+            results = component.retrieve(
+                "sparse",
+                dense_top_k=1,
+                sparse_top_k=1,
+            )
+
+        self.assertEqual([chunk.id for chunk in results], ["sparse-only"])
+
     def test_dense_and_sparse_overlap_beats_single_dense_top_hit(self) -> None:
         dense_top = _chunk("dense-top")
         overlap = _chunk("overlap")

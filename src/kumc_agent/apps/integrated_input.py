@@ -22,7 +22,11 @@ class IntegratedInputAppContext:
     agentic: object
 
 
-def build_integrated_input_app_context(*, base_dir: Path | None = None) -> IntegratedInputAppContext:
+def build_integrated_input_app_context(
+    *,
+    base_dir: Path | None = None,
+    chat_answer_service: object | None = None,
+) -> IntegratedInputAppContext:
     foundation = build_foundation_app_context(base_dir=base_dir)
     retrieval = build_retrieval_app_context(base_dir=base_dir)
     workflow = build_workflow_app_context(base_dir=base_dir)
@@ -48,6 +52,7 @@ def build_integrated_input_app_context(*, base_dir: Path | None = None) -> Integ
             workflow_service=workflow.workflow,
             comprehensive_agent=agentic.comprehensive_agent,
             router=router,
+            chat_answer_service=chat_answer_service,
             routing_policy=IntegratedRoutingPolicy(),
         ),
         retrieval=retrieval,

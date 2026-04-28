@@ -118,7 +118,7 @@ class RetrievalComponent:
                     sparse_hits = sparse_future.result()
                 except Exception:
                     logger.exception("Sparse retrieval failed.")
-                sparse_hits = []
+                    sparse_hits = []
         elif dense_limit > 0:
             dense_hits = self._retrieve_dense_hits(query=query, top_k=dense_limit)
         elif sparse_limit > 0:

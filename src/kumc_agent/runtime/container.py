@@ -541,7 +541,10 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
     from kumc_agent.apps.integrated_input import build_integrated_input_app_context
 
-    integrated_input = build_integrated_input_app_context(base_dir=config.base_dir).integrated_input
+    integrated_input = build_integrated_input_app_context(
+        base_dir=config.base_dir,
+        chat_answer_service=chat_answer_usecase,
+    ).integrated_input
     chat_route_usecase = ChatRouteUsecase(router=router)
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
 

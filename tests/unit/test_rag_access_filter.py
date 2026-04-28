@@ -73,6 +73,45 @@ class RagAccessFilterTests(unittest.TestCase):
             )
         )
 
+    def test_access_scope_overrides_ingestion_source_kind_visibility(self) -> None:
+        access_filter = RagAccessFilter(
+            allowed_guild_ids=("100",),
+            admin_user_ids=("42",),
+        )
+        drive = _chunk(
+            "google_drive",
+            access_scope={"visibility": "admin", "guild_id": None},
+        )
+        discord = _chunk(
+            "discord",
+            access_scope={"visibility": "guild", "guild_id": "100"},
+        )
+
+        self.assertFalse(
+            access_filter.allow_chunk(
+                drive,
+                access=AccessContext(user_id="7", guild_id="100"),
+            )
+        )
+        self.assertTrue(
+            access_filter.allow_chunk(
+                drive,
+                access=AccessContext(user_id="42", is_admin=True),
+            )
+        )
+        self.assertTrue(
+            access_filter.allow_chunk(
+                discord,
+                access=AccessContext(user_id="7", guild_id="100"),
+            )
+        )
+        self.assertFalse(
+            access_filter.allow_chunk(
+                discord,
+                access=AccessContext(user_id="7", guild_id="200"),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

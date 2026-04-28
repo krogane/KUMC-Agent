@@ -27,6 +27,15 @@ class _Router:
         )
 
 
+class _FastMaterialRouter:
+    def route(self, *_args, **_kwargs):
+        return RoutingDecision(
+            recency_mode="off",
+            fast_mode=True,
+            material_names=["運営資料"],
+        )
+
+
 class _Synthesizer:
     def synthesize(self, **_kwargs):
         return QuerySynthesisResult("合成された検索クエリ", used=True, fallback=False)
@@ -109,6 +118,24 @@ class QuerySynthesisTests(unittest.TestCase):
                 answer.metadata["query_synthesis"]["synthetic_query"],
                 "合成された検索クエリ",
             )
+
+    def test_fast_mode_skips_material_search_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            retrieval = _Retrieval(Path(tmp) / "data" / "index")
+            service = RagService(
+                config=_config(),
+                router=_FastMaterialRouter(),
+                retrieval=retrieval,
+                generation=_Generation(),
+                reranker=None,
+                query_synthesizer=_Synthesizer(),
+            )
+
+            answer = service.answer(query="運営資料を見て", disable_history=True)
+
+            self.assertEqual(answer.route, "rag")
+            self.assertEqual(answer.metadata["routing_decision"]["material_names"], [])
+            self.assertFalse(answer.metadata["query_synthesis"]["used"])
 
 
 if __name__ == "__main__":
