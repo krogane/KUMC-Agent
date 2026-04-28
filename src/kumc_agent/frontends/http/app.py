@@ -254,14 +254,25 @@ def create_app(context: object):
 
     @app.post("/approval")
     def approval(payload: dict[str, object]) -> dict[str, object]:
-        response = context.workflow.workflow.approval(
-            action=str(payload.get("action") or ""),
-            target_type=str(payload.get("type") or payload.get("target_type") or "task"),
-            target_id=str(payload.get("target_id") or ""),
-            comment=str(payload.get("comment") or ""),
-            access=_access(payload),
-        )
-        return _workflow_payload(response)
+        try:
+            response = context.workflow.workflow.approval(
+                action=str(payload.get("action") or ""),
+                target_type=str(payload.get("type") or payload.get("target_type") or "task"),
+                target_id=str(payload.get("target_id") or ""),
+                comment=str(payload.get("comment") or ""),
+                access=_access(payload),
+            )
+            return _workflow_payload(response)
+        except KeyError:
+            return {
+                "text": "対象が見つからないか、表示権限がありません。",
+                "metadata": {"error": "not_found"},
+            }
+        except ValueError as exc:
+            return {
+                "text": str(exc),
+                "metadata": {"error": "bad_request"},
+            }
 
     @app.post("/automation")
     def automation(payload: dict[str, object]) -> dict[str, object]:

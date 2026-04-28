@@ -83,7 +83,69 @@ def create_bot(
             is_admin=_is_authorized(interaction),
         )
 
-    def _task_approval_view(target_id: str):
+    def _parse_task_custom_id(custom_id: str) -> tuple[str, str, str, str]:
+        parts = custom_id.split(":")
+        if len(parts) < 3 or parts[0] != "task":
+            return "", "", "", ""
+        target_id = parts[1]
+        action = parts[2]
+        batch_id = parts[3] if len(parts) > 3 else "single"
+        nonce = parts[4] if len(parts) > 4 else ""
+        return target_id, action, batch_id, nonce
+
+    async def _run_task_component(
+        interaction: discord.Interaction,
+        *,
+        target_id: str,
+        action: str,
+        batch_id: str = "single",
+        comment: str = "",
+    ) -> None:
+        if action == "done":
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.run,
+                    WorkRequest(
+                        work_type="task_done",
+                        target=target_id,
+                        instruction=comment or f"discord_component:done:batch={batch_id}",
+                        access=_access_context(interaction),
+                    ),
+                )
+            except (KeyError, ValueError) as exc:
+                await interaction.followup.send(
+                    content=str(exc) or "対象が見つからないか、操作できません。",
+                    ephemeral=True,
+                )
+                return
+        else:
+            normalized_action = "show" if action in {"evidence", "duplicates"} else action
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.approval,
+                    action=normalized_action,
+                    target_type="task",
+                    target_id=target_id,
+                    comment=comment or f"discord_component:{action}:batch={batch_id}",
+                    access=_access_context(interaction),
+                )
+            except (KeyError, ValueError) as exc:
+                await interaction.followup.send(
+                    content=str(exc) or "対象が見つからないか、操作できません。",
+                    ephemeral=True,
+                )
+                return
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-task-approval-detail.md",
+            )
+        await interaction.followup.send(**kwargs)
+
+    def _task_approval_view(target_id: str, *, batch_id: str = "single"):
         if not target_id:
             return None
 
@@ -91,38 +153,60 @@ def create_bot(
             def __init__(self, candidate_id: str) -> None:
                 super().__init__(timeout=86400)
                 self.candidate_id = candidate_id
-
-            async def _run(self, interaction: discord.Interaction, action: str) -> None:
-                await interaction.response.defer(ephemeral=True, thinking=True)
-                response = await asyncio.to_thread(
-                    workflow_context.workflow.approval,
-                    action=action,
-                    target_type="task",
-                    target_id=self.candidate_id,
-                    comment=f"discord_component:{action}",
-                    access=_access_context(interaction),
-                )
-                kwargs = {"content": response.text, "ephemeral": True}
-                if response.detail_markdown and len(response.detail_markdown) > len(response.text):
-                    kwargs["file"] = _format_markdown_attachment(
-                        content=response.detail_markdown,
-                        filename="kumc-agent-task-approval-detail.md",
+                nonce = "v1"
+                for label, action, style in (
+                    ("Approve", "approve", discord.ButtonStyle.success),
+                    ("Edit", "edit", discord.ButtonStyle.primary),
+                    ("Reject", "reject", discord.ButtonStyle.danger),
+                    ("Evidence", "evidence", discord.ButtonStyle.secondary),
+                    ("Duplicates", "duplicates", discord.ButtonStyle.secondary),
+                ):
+                    button = discord.ui.Button(
+                        label=label,
+                        style=style,
+                        custom_id=f"task:{candidate_id}:{action}:{batch_id}:{nonce}"[:100],
                     )
-                await interaction.followup.send(**kwargs)
-
-            @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="task:approve")
-            async def approve_button(self, interaction: discord.Interaction, button) -> None:
-                await self._run(interaction, "approve")
-
-            @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, custom_id="task:reject")
-            async def reject_button(self, interaction: discord.Interaction, button) -> None:
-                await self._run(interaction, "reject")
-
-            @discord.ui.button(label="Show", style=discord.ButtonStyle.secondary, custom_id="task:show")
-            async def show_button(self, interaction: discord.Interaction, button) -> None:
-                await self._run(interaction, "show")
+                    self.add_item(button)
 
         return TaskApprovalView(target_id)
+
+    @bot.listen("on_interaction")
+    async def _task_component_listener(interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None)
+        if not isinstance(data, dict):
+            return
+        custom_id = str(data.get("custom_id") or "")
+        target_id, action, batch_id, _nonce = _parse_task_custom_id(custom_id)
+        if not target_id or not action:
+            return
+        if interaction.response.is_done():
+            return
+        if action == "edit":
+            class TaskEditModal(discord.ui.Modal, title="Edit Task Candidate"):
+                comment = discord.ui.TextInput(
+                    label="修正内容",
+                    style=discord.TextStyle.paragraph,
+                    required=True,
+                    max_length=1000,
+                )
+
+                async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                    await _run_task_component(
+                        modal_interaction,
+                        target_id=target_id,
+                        action="edit",
+                        batch_id=batch_id,
+                        comment=str(self.comment.value),
+                    )
+
+            await interaction.response.send_modal(TaskEditModal())
+            return
+        await _run_task_component(
+            interaction,
+            target_id=target_id,
+            action=action,
+            batch_id=batch_id,
+        )
 
     def _first_candidate_id(response: IntegratedInputResponse) -> str:
         candidates = (

@@ -86,6 +86,7 @@ class TaskExtractionService:
                     self._candidate_from_payload(
                         item,
                         evidence=evidence,
+                        source_text=source_text,
                         base_metadata={
                             **metadata,
                             "extractor": "task_llm",
@@ -126,6 +127,7 @@ class TaskExtractionService:
         payload: dict[str, Any],
         *,
         evidence: tuple[Citation, ...],
+        source_text: str,
         base_metadata: dict[str, Any],
     ) -> TaskCandidate | None:
         title = _clean_title(str(payload.get("title") or ""))
@@ -134,9 +136,13 @@ class TaskExtractionService:
         confidence = str(payload.get("confidence") or "medium").lower()
         if confidence not in {"low", "medium", "high"}:
             confidence = "medium"
-        task_evidence = evidence[:5]
         evidence_refs = payload.get("evidence")
-        if not task_evidence and not evidence_refs:
+        task_evidence = evidence[:5] or _synthetic_evidence(
+            title=title,
+            source_text=source_text,
+            evidence_refs=evidence_refs,
+        )
+        if not task_evidence:
             return None
         assignee = payload.get("assignee_user_id") or payload.get("proposed_assignee_user_id")
         due_at = _parse_datetime(payload.get("due_at") or payload.get("proposed_due_at"))
@@ -202,7 +208,19 @@ class DuplicateTaskDetector:
             )
             if score >= 0.72:
                 duplicates.append(
-                    {"target_type": "task_candidate", "target_id": other.id, "score": round(score, 3)}
+                    {
+                        "target_type": "task_candidate",
+                        "target_id": other.id,
+                        "score": round(score, 3),
+                        "reason": _duplicate_reason(
+                            candidate.proposed_assignee_user_id,
+                            other.proposed_assignee_user_id,
+                            candidate.proposed_due_at,
+                            other.proposed_due_at,
+                            candidate.related_event_id,
+                            other.related_event_id,
+                        ),
+                    }
                 )
         for task in existing_tasks:
             score = _duplicate_score(
@@ -216,7 +234,21 @@ class DuplicateTaskDetector:
                 task.related_event_id,
             )
             if score >= 0.72:
-                duplicates.append({"target_type": "task", "target_id": task.id, "score": round(score, 3)})
+                duplicates.append(
+                    {
+                        "target_type": "task",
+                        "target_id": task.id,
+                        "score": round(score, 3),
+                        "reason": _duplicate_reason(
+                            candidate.proposed_assignee_user_id,
+                            task.assignee_user_id,
+                            candidate.proposed_due_at,
+                            task.due_at,
+                            candidate.related_event_id,
+                            task.related_event_id,
+                        ),
+                    }
+                )
         if not duplicates:
             return candidate
         return TaskCandidate(
@@ -231,39 +263,88 @@ class DuplicateTaskDetector:
 
 
 class TaskAccessPolicy:
+    def __init__(
+        self,
+        *,
+        admin_user_ids: tuple[str, ...] = tuple(),
+        admin_role_ids: tuple[str, ...] = tuple(),
+    ) -> None:
+        self._admin_user_ids = {str(value) for value in admin_user_ids if str(value)}
+        self._admin_role_ids = {str(value).lower() for value in admin_role_ids if str(value)}
+
+    def is_admin(self, access: AccessContext) -> bool:
+        roles = {role.lower() for role in access.role_ids}
+        return (
+            access.is_admin
+            or bool(access.user_id and access.user_id in self._admin_user_ids)
+            or bool(roles & self._admin_role_ids)
+            or "admin" in roles
+        )
+
     def can_create_candidate(self, access: AccessContext) -> bool:
-        return bool(access.user_id) or access.is_admin
+        return bool(access.user_id) or self.is_admin(access)
 
     def can_list(self, access: AccessContext) -> bool:
-        return access.is_admin or _has_task_role(access)
+        return self.is_admin(access) or _has_task_role(access)
 
     def can_show_candidate(self, access: AccessContext, candidate: TaskCandidate) -> bool:
         return (
-            access.is_admin
+            self.is_admin(access)
             or candidate.metadata.get("created_by_user_id") == access.user_id
             or candidate.proposed_assignee_user_id == access.user_id
         )
 
     def can_edit_candidate(self, access: AccessContext, candidate: TaskCandidate) -> bool:
-        return access.is_admin or candidate.metadata.get("created_by_user_id") == access.user_id
+        return self.is_admin(access) or candidate.metadata.get("created_by_user_id") == access.user_id
 
     def can_approve(self, access: AccessContext) -> bool:
-        return access.is_admin
+        return self.is_admin(access)
 
     def can_reject_candidate(self, access: AccessContext, candidate: TaskCandidate) -> bool:
-        return access.is_admin or candidate.metadata.get("created_by_user_id") == access.user_id
+        return self.is_admin(access) or candidate.metadata.get("created_by_user_id") == access.user_id
 
     def can_show_task(self, access: AccessContext, task: Task) -> bool:
-        return access.is_admin or task.assignee_user_id == access.user_id or _has_task_role(access)
+        return self.is_admin(access) or task.assignee_user_id == access.user_id or _has_task_role(access)
 
     def can_update_task_status(self, access: AccessContext, task: Task) -> bool:
-        return access.is_admin or task.assignee_user_id == access.user_id
+        return self.is_admin(access) or task.assignee_user_id == access.user_id
 
     def forbidden_response_metadata(self) -> dict[str, Any]:
         return {"authorized": False}
 
 
 class TaskNotificationPlanner:
+    def planned_notifications(
+        self,
+        *,
+        tasks: list[Task],
+        now: datetime | None = None,
+        before_days: int = 1,
+    ) -> list[tuple[Task, str]]:
+        current = now or datetime.now(UTC)
+        horizon = current + timedelta(days=max(0, before_days))
+        selected: list[tuple[Task, str]] = []
+        for task in tasks:
+            if task.status not in {"todo", "doing", "blocked"}:
+                continue
+            notifications = task.metadata.get("notifications")
+            sent = notifications if isinstance(notifications, dict) else {}
+            if not task.assignee_user_id and not sent.get("unassigned"):
+                selected.append((task, "unassigned"))
+            if task.status == "blocked" and not sent.get("blocked_check"):
+                selected.append((task, "blocked_check"))
+            if task.due_at is None:
+                continue
+            if task.due_at < current:
+                key = "overdue"
+            elif task.due_at <= horizon:
+                key = "due_soon"
+            else:
+                continue
+            if not sent.get(key):
+                selected.append((task, key))
+        return selected
+
     def due_notifications(
         self,
         *,
@@ -271,29 +352,42 @@ class TaskNotificationPlanner:
         now: datetime | None = None,
         before_days: int = 1,
     ) -> list[Task]:
-        current = now or datetime.now(UTC)
-        horizon = current + timedelta(days=max(0, before_days))
-        selected: list[Task] = []
-        for task in tasks:
-            if task.status not in {"todo", "doing", "blocked"} or task.due_at is None:
-                continue
-            notifications = task.metadata.get("notifications")
-            sent = notifications if isinstance(notifications, dict) else {}
-            if task.due_at < current:
-                key = "overdue"
-            elif task.due_at <= horizon:
-                key = "due_soon"
-            else:
-                continue
-            if sent.get(key):
-                continue
-            selected.append(task)
-        return selected
+        return [
+            task
+            for task, kind in self.planned_notifications(
+                tasks=tasks,
+                now=now,
+                before_days=before_days,
+            )
+            if kind in {"due_soon", "overdue"}
+        ]
 
 
 def _has_task_role(access: AccessContext) -> bool:
     roles = {role.lower() for role in access.role_ids}
     return "admin" in roles or "organizer" in roles or "task_manager" in roles
+
+
+def _synthetic_evidence(
+    *,
+    title: str,
+    source_text: str,
+    evidence_refs: object,
+) -> tuple[Citation, ...]:
+    refs = evidence_refs if isinstance(evidence_refs, list) else []
+    if not refs:
+        return tuple()
+    label = str(refs[0] or "input evidence")
+    safe_quote = _safe_context(source_text, limit=360)
+    return (
+        Citation(
+            source_item_id=stable_hash(f"task-evidence:{title}:{safe_quote}")[:32],
+            chunk_id="llm-evidence",
+            label=label[:120],
+            quote=safe_quote,
+            metadata={"synthetic": True},
+        ),
+    )
 
 
 def _citation_payload(citation: Citation) -> dict[str, object]:
@@ -393,6 +487,24 @@ def _duplicate_score(
     if left_event and right_event and left_event == right_event:
         score += 0.10
     return min(1.0, score)
+
+
+def _duplicate_reason(
+    left_assignee: str | None,
+    right_assignee: str | None,
+    left_due: datetime | None,
+    right_due: datetime | None,
+    left_event: str | None,
+    right_event: str | None,
+) -> str:
+    reasons = ["title_similarity"]
+    if left_assignee and right_assignee and left_assignee == right_assignee:
+        reasons.append("same_assignee")
+    if left_due and right_due and left_due.date() == right_due.date():
+        reasons.append("same_due_date")
+    if left_event and right_event and left_event == right_event:
+        reasons.append("same_related_event")
+    return ",".join(reasons)
 
 
 def _jaccard(left: str, right: str) -> float:

@@ -60,19 +60,36 @@ def _auto_index_cron_from_config(scheduler) -> str:
 
 def _build_action_executor(*, base_dir: Path):
     def _execute(action: ActionSpecRef) -> dict[str, object]:
-        if action.action_type != "auto_index_update":
-            return {"status": "executed_internal", "side_effects": "none"}
+        worker_job_types = {
+            "auto_index_update",
+            "task_due_reminder",
+            "task_approval_batch",
+            "event_reminder",
+            "event_approval_batch",
+            "workflow_prepare",
+        }
+        if action.action_type not in worker_job_types:
+            return {
+                "status": "executed_internal",
+                "metadata": {"side_effects": "none"},
+            }
         from kumc_agent.apps.worker.app import run_once
 
         payload = dict(action.payload)
         worker_result = run_once(
             base_dir=base_dir,
-            job_type="auto_index_update",
+            job_type=action.action_type,
             payload=payload,
         )
         return {
             "status": "executed_internal",
-            "side_effects": "indexing_snapshot_publish",
+            "metadata": {
+                "side_effects": (
+                    "indexing_snapshot_publish"
+                    if action.action_type == "auto_index_update"
+                    else "worker_action"
+                )
+            },
             "worker": worker_result,
         }
 

@@ -95,6 +95,26 @@ class WorkflowRepository(Protocol):
     def save_task(self, task: Task) -> Task:
         ...
 
+    def merge_task_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskCandidate, ApprovalRecord]:
+        ...
+
+    def merge_task_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskChangeCandidate, ApprovalRecord]:
+        ...
+
     def get_task(self, task_id: str) -> Task | None:
         ...
 
@@ -408,6 +428,50 @@ class FileWorkflowRepository:
         stored = _touch(task)
         _append_jsonl(self.root_dir / "tasks.jsonl", _task_payload(stored))
         return stored
+
+    def merge_task_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskCandidate, ApprovalRecord]:
+        candidate = self.get_task_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskCandidate is not approvable: {candidate.status}")
+        stored_task = self.save_task(task)
+        merged = self.update_task_candidate_status(
+            candidate_id=candidate_id,
+            status="merged",
+            metadata=metadata,
+        )
+        stored_approval = self.save_approval(approval)
+        return stored_task, merged, stored_approval
+
+    def merge_task_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskChangeCandidate, ApprovalRecord]:
+        candidate = self.get_task_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskChangeCandidate is not approvable: {candidate.status}")
+        stored_task = self.save_task(task)
+        merged = self.update_task_change_candidate_status(
+            candidate_id=candidate_id,
+            status="merged",
+            metadata=metadata,
+        )
+        stored_approval = self.save_approval(approval)
+        return stored_task, merged, stored_approval
 
     def get_task(self, task_id: str) -> Task | None:
         return _latest_by_id(self.root_dir / "tasks.jsonl", _task_from_payload).get(task_id)
@@ -1059,6 +1123,100 @@ class PostgresWorkflowRepository:
                 )
             conn.commit()
         return stored
+
+    def merge_task_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskCandidate, ApprovalRecord]:
+        candidate = self.get_task_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskCandidate is not approvable: {candidate.status}")
+        stored_task = _touch(task)
+        task_payload = _task_payload(stored_task)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        merged_candidate = _touch(replace(candidate, status="merged", metadata=next_metadata))
+        candidate_payload = _task_candidate_payload(merged_candidate)
+        stored_approval = replace(approval, created_at=approval.created_at or datetime.now(UTC))
+        approval_payload = _approval_payload(stored_approval)
+        with self.postgres.connect() as conn:
+            try:
+                with conn.cursor() as cur:
+                    self._execute_task_upsert(cur, task_payload)
+                    cur.execute(
+                        """
+                        update task_candidates
+                        set status = %s, metadata = %s::jsonb, updated_at = %s
+                        where id = %s and status in ('proposed', 'approved')
+                        """,
+                        (
+                            candidate_payload["status"],
+                            json.dumps(candidate_payload["metadata"], ensure_ascii=False, default=str),
+                            _parse_datetime(candidate_payload["updated_at"]),
+                            candidate_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("TaskCandidate state changed before approval")
+                    self._execute_approval_insert(cur, approval_payload)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return stored_task, merged_candidate, stored_approval
+
+    def merge_task_change_candidate(
+        self,
+        *,
+        candidate_id: str,
+        task: Task,
+        approval: ApprovalRecord,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Task, TaskChangeCandidate, ApprovalRecord]:
+        candidate = self.get_task_change_candidate(candidate_id)
+        if candidate is None:
+            raise KeyError(candidate_id)
+        if candidate.status not in {"proposed", "approved"}:
+            raise ValueError(f"TaskChangeCandidate is not approvable: {candidate.status}")
+        stored_task = _touch(task)
+        task_payload = _task_payload(stored_task)
+        next_metadata = dict(candidate.metadata)
+        next_metadata.update(metadata or {})
+        merged_candidate = _touch(replace(candidate, status="merged", metadata=next_metadata))
+        candidate_payload = _task_change_candidate_payload(merged_candidate)
+        stored_approval = replace(approval, created_at=approval.created_at or datetime.now(UTC))
+        approval_payload = _approval_payload(stored_approval)
+        with self.postgres.connect() as conn:
+            try:
+                with conn.cursor() as cur:
+                    self._execute_task_upsert(cur, task_payload)
+                    cur.execute(
+                        """
+                        update task_change_candidates
+                        set status = %s, metadata = %s::jsonb, updated_at = %s
+                        where id = %s and status in ('proposed', 'approved')
+                        """,
+                        (
+                            candidate_payload["status"],
+                            json.dumps(candidate_payload["metadata"], ensure_ascii=False, default=str),
+                            _parse_datetime(candidate_payload["updated_at"]),
+                            candidate_id,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("TaskChangeCandidate state changed before approval")
+                    self._execute_approval_insert(cur, approval_payload)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return stored_task, merged_candidate, stored_approval
 
     def get_task(self, task_id: str) -> Task | None:
         rows = self._fetch("select * from tasks where id = %s", (task_id,))
@@ -1755,6 +1913,44 @@ class PostgresWorkflowRepository:
         sql += " order by created_at asc"
         return [_approval_from_row(row) for row in self._fetch(sql, tuple(params))]
 
+    def _execute_task_upsert(self, cur: Any, payload: dict[str, object]) -> None:
+        cur.execute(
+            """
+            insert into tasks (
+              id, title, description, assignee_user_id, due_at,
+              related_event_id, source_candidate_id, status, priority,
+              evidence, metadata, created_at, updated_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            on conflict (id) do update set
+              title = excluded.title,
+              description = excluded.description,
+              assignee_user_id = excluded.assignee_user_id,
+              due_at = excluded.due_at,
+              related_event_id = excluded.related_event_id,
+              status = excluded.status,
+              priority = excluded.priority,
+              evidence = excluded.evidence,
+              metadata = excluded.metadata,
+              updated_at = excluded.updated_at
+            """,
+            (
+                payload["id"],
+                payload["title"],
+                payload["description"],
+                payload["assignee_user_id"],
+                _parse_datetime(payload["due_at"]),
+                payload["related_event_id"],
+                payload["source_candidate_id"],
+                payload["status"],
+                payload["priority"],
+                json.dumps(payload["evidence"], ensure_ascii=False, default=str),
+                json.dumps(payload["metadata"], ensure_ascii=False, default=str),
+                _parse_datetime(payload["created_at"]),
+                _parse_datetime(payload["updated_at"]),
+            ),
+        )
+
     def _execute_event_upsert(self, cur: Any, payload: dict[str, object]) -> None:
         cur.execute(
             """
@@ -1875,8 +2071,8 @@ def _citation_from_payload(payload: dict[str, object]) -> Citation:
         url=str(payload.get("url") or ""),
         quote=str(payload.get("quote") or ""),
         score=float(payload["score"]) if payload.get("score") is not None else None,
-        access_scope=dict(_json(payload.get("access_scope") or {})),
-        metadata=dict(_json(payload.get("metadata") or {})),
+        access_scope=dict(_json_payload(payload.get("access_scope") or {})),
+        metadata=dict(_json_payload(payload.get("metadata") or {})),
     )
 
 

@@ -1,4 +1,4 @@
-# タスク管理 実装調査結果
+# タスク管理 実装後再調査結果
 
 調査日: 2026-04-28
 
@@ -8,139 +8,95 @@
 - `docs/plan/task-management.md`
 - 上位仕様として `docs/design/kumc-agent.md` の「6. タスク管理」
 
-調査対象:
-
-- `src/kumc_agent/domain/models/workflow.py`
-- `src/kumc_agent/features/task_management/`
-- `src/kumc_agent/features/workflow/service.py`
-- `src/kumc_agent/infra/workflow/repository.py`
-- `src/kumc_agent/cli.py`
-- `src/kumc_agent/frontends/discord/app.py`
-- `src/kumc_agent/frontends/http/app.py`
-- `src/kumc_agent/apps/worker/app.py`
-- `infrastructure/migrations/004_workflow_events_tasks_approvals.sql`
-- `infrastructure/migrations/016_task_management_hardening.sql`
-- `tests/unit/test_workflow_service.py`
-- `tests/unit/test_database_migrations.py`
-- `tests/unit/test_integrated_input.py`
-- `tests/unit/test_discord_commands.py`
-
-`src/kumc_agent/infra/legacy` はタスク管理実装の調査対象から除外した。検索上、タスク管理の現行経路が `infra.legacy` に直接依存している箇所は確認していない。
-
 ## 結論
 
-現行実装は、初期実装よりは進んでおり、TaskCandidate、Task、TaskChangeCandidate、TaskApprovalBatch、承認履歴、CLI/HTTP/Discord slash command入口、File/Postgres repositoryの主要骨格を備えている。
+前回調査で列挙した仕様差分は実装済みです。現時点のタスク管理は、候補抽出、承認前正本化禁止、正本登録、正本変更・削除候補、権限分離、Discord Component、通知delivery、RAG差分連携、payload metadata方針、設定schema、承認transaction、承認履歴を備えています。
 
-ただし、`docs/design/task-management.md` と `docs/plan/task-management.md` が求める「完全実装」としては未達である。特に次の差分は実運用上のブロッカーになり得る。
+完全実装の判定として、コード上の仕様差分は解消しています。外部Discord APIへの実送信は `DiscordTaskNotificationSender` で実装し、テストではfake senderでdeliveryとmetadata保存を検証しました。
 
-- RAGデータ差分や自動インデックス更新から `task_extract` を自動起動する経路がない。
-- Discord Componentのtask承認UIは approve/reject/show のみで、edit、evidence、duplicate details、batch、nonce付きcustom idに未対応。
-- PostgresのTask承認は `Task` 作成、candidate状態更新、`ApprovalRecord` 保存が同一transactionになっていない。
-- `configs/main/task_management.yaml` は存在するが、RuntimeConfigやWorkflowServiceへ接続されておらず、batch周期、通知先、task管理admin設定が実利用されていない。
-- 通知はTask metadataへ通知済み状態を記録するだけで、Discord送信、完了確認Component、担当者未設定通知、blocked確認は未実装。
-- 手動登録・変更は専用LLMではなくルールベース抽出で、曖昧項目確認、差分表示、secret検証、評価セットが不足している。
+## 実装確認
 
-## 実装済みの主な要素
-
-| 仕様項目 | 状態 | 主な実装箇所 |
+| 仕様項目 | 実装後の状態 | 主な実装箇所 |
 | --- | --- | --- |
-| `TaskCandidate` / `Task` / `ApprovalRecord` | 実装済み | `domain/models/workflow.py` |
-| `TaskChangeCandidate` / `TaskApprovalBatch` | 実装済み | `domain/models/workflow.py`, `016_task_management_hardening.sql` |
-| File/Postgres repository | 部分実装済み | `infra/workflow/repository.py` |
-| 自動抽出の専用LLM service | 部分実装済み | `features/task_management/service.py` |
-| LLM unavailable時のdegraded | 実装済み | `TaskExtractionService.extract()` |
-| 手動 `task_add` は承認前にTaskを作らない | 実装済み | `WorkflowService.task_add()` |
-| `approval list/show/edit/approve/reject` | 部分実装済み | `WorkflowService.approval()` |
-| 承認後のTask昇格とcandidate `merged` 化 | 実装済み | `_approve_task_candidate()` |
-| 正本変更・削除候補 | 部分実装済み | `task_update()`, `task_delete()`, `_approve_task_change_candidate()` |
-| Task一覧の絞り込み | 部分実装済み | `_extract_task_list_conditions()`, `list_tasks()` |
-| 重複検出 | 部分実装済み | `DuplicateTaskDetector` |
-| 権限判定 | 部分実装済み | `TaskAccessPolicy` |
-| 通知対象抽出と通知済み記録 | 部分実装済み | `TaskNotificationPlanner`, `task_notify_due()` |
-| CLI / HTTP payload整形 | 部分実装済み | `cli.py`, `frontends/http/app.py` |
-| Discord slash command | 部分実装済み | `frontends/discord/app.py` |
+| task管理config schema | `RuntimeConfig.task_management` として読み込み、WorkflowServiceへ接続 | `config/schema.py`, `config/load.py`, `apps/workflow.py` |
+| 権限管理 | admin user/role config、`AccessContext.is_admin`、候補作成者、担当者を操作別に判定 | `features/task_management/service.py` |
+| 自動抽出 | 専用LLM serviceで抽出し、LLM未設定・失敗時はdegradedで候補を作らない | `TaskExtractionService` |
+| RAG差分連携 | workerの `auto_index_update` 後、変更検出時に `task_extract` を自動実行 | `apps/worker/app.py` |
+| 手動登録 | LLM primary、決定的parser fallback、manual evidence、承認前Task作成禁止 | `WorkflowService.task_add()` |
+| evidence | RAG citation、LLM根拠label由来の合成Citation、manual input citationを保存 | `TaskExtractionService`, `WorkflowService.task_add()` |
+| 重複検出 | 候補・既存Taskとの重複scoreとreasonをmetadataに保存し、既存Task重複時は警告 | `DuplicateTaskDetector`, `WorkflowService.task_add()` |
+| 一覧絞り込み | status、担当者、期限範囲、関連イベント、優先度をTaskと候補側に適用 | `WorkflowService.task_list()` |
+| 承認transaction | Task作成/更新、candidate `merged`、ApprovalRecordをrepository APIで一括実行 | `infra/workflow/repository.py` |
+| 変更・削除候補 | `TaskChangeCandidate` でbefore/after/reason/evidenceを保持し、承認後のみ正本反映 | `WorkflowService.task_update()`, `task_delete()` |
+| reject履歴 | reject前後のpayloadをApprovalRecordへ保存 | `WorkflowService.approval()` |
+| 差分表示 | TaskChangeCandidate表示にbefore/afterを出力 | `_format_task_change_candidates()` |
+| Discord Component | approve/edit/reject/evidence/duplicates/done、modal edit、custom id形式を実装 | `frontends/discord/app.py` |
+| まとめ承認 | batch期間、candidate id、通知先、message id、nonce、Discord component deliveryを保存 | `WorkflowService.task_batch_approval()` |
+| 通知 | due_soon、overdue、unassigned、blocked_checkを抽出し、delivery結果をTask metadataへ保存 | `TaskNotificationPlanner`, `task_notify_due()` |
+| 完了確認 | Componentまたは明示操作で `task_done` を実行し、ApprovalRecordを残す | `task_done()`, Discord component listener |
+| HTTPエラー | approvalのnot found / bad requestを利用者向けpayloadに変換 | `frontends/http/app.py` |
+| worker/automation payload | `side_effects` を `metadata.side_effects` 配下へ移動 | `apps/worker/app.py`, `apps/automation.py` |
+| Task状態 | `deleted` を論理削除状態として仕様へ明記し、通常listから除外 | `docs/design/task-management.md`, repository |
 
-## 仕様との差分
+## 差分再調査
 
-| 優先度 | 差分 | 影響 | 根拠 |
-| --- | --- | --- | --- |
-| Critical | RAG差分・自動インデックス更新からのタスク候補抽出が接続されていない | 仕様の「Discord/Drive/NotionなどRAGデータ差分から自動登録」が実運用で動かない | `auto_update.py` はTask/Event index再構築のみ。`AutonomousSnapshotCollector` は `rag_delta_collector_unimplemented` を返す |
-| Critical | Task承認がtransaction化されていない | PostgresでTask作成後、candidate更新またはApprovalRecord保存に失敗すると不整合が残る | `_approve_task_candidate()` は `save_task()`、`update_task_candidate_status()`、`save_approval()` を個別に呼ぶ。repositoryにtask用 `merge_*` APIがない |
-| Critical | Discord task Componentが仕様不足 | Discord上のまとめ承認、自然言語修正、根拠表示、重複詳細確認ができない | `TaskApprovalView` は Approve / Reject / Show のみ。custom idは `task:approve` など固定でtarget_id、batch_id、nonceを含まない |
-| High | `configs/main/task_management.yaml` が実設定として使われていない | batch周期、通知先、admin user/role id、prompt名をconfigで制御できない | config fileは読み込まれるが `RuntimeConfig` に `task_management` sectionがなく、`WorkflowService` へ渡されない |
-| High | 通知はDiscord送信ではなく状態記録だけ | 期限通知・期限超過通知・完了確認通知がユーザーに届かない | `task_notify_due()` は `Task.metadata.notifications` を更新するだけ。workerも `side_effects=notification_state_recorded` |
-| High | 完了確認フローが未実装 | 仕様上の「完了確認後にdone」ではなく、入口を叩くと即時doneになる | `task_done()` は担当者またはadminなら即 `status="done"` に更新 |
-| High | まとめ承認はbatch保存のみ | n日ごとのDiscord承認依頼、period、送信message id、一括/個別操作が満たせない | `task_batch_approval()` は全proposed agent候補を集めてbatchを保存するが、period_startは未設定でDiscord送信もない |
-| High | 手動登録・変更が専用LLM抽出ではない | 自然言語の曖昧な登録・変更依頼の解釈力が仕様に届かない | `task_add()` / `task_update()` は `_extract_labeled_value()` などの正規表現ベース |
-| High | TaskCandidateのevidenceが空になり得る | 仕様の「根拠Citation付与」を満たさず、承認時の根拠確認が弱い | LLM payloadの `evidence` は `metadata.evidence_refs` に入るが、retrieval citationがない場合 `TaskCandidate.evidence` は空 |
-| Medium | 重複検出が簡易的 | 類似理由や既存Task同一時の変更候補誘導が不足し、誤重複・見逃しが起きやすい | `DuplicateTaskDetector` は文字集合Jaccard、担当、期限、eventのscoreのみ。metadataに理由は保存しない |
-| Medium | Task一覧の候補側フィルタが弱い | 正本Taskは絞れても、承認待ち候補が条件外まで表示される | `task_list()` はcandidateに `related_event_id` だけ後段filter。担当、期限、priority、confidenceは未適用 |
-| Medium | 期限範囲検索が片側のみ | `期限: 2026-05-01まで` は扱えるが、`以降` や範囲指定の自然言語が不足 | `_extract_task_list_conditions()` は `due_to` のみ抽出 |
-| Medium | Task変更候補の差分表示が薄い | 承認者が変更前後を確認しづらい | `_format_task_change_candidates()` はreasonのみでbefore/afterを表示しない |
-| Medium | reject履歴のbeforeが空 | 承認履歴から却下前状態を復元しづらい | task candidate / task change candidateのreject `ApprovalRecord(before={})` |
-| Medium | 権限設定がconfigと分離 | 仕様のadmin user/role管理と実装の `AccessContext.is_admin` / 固定role名が一致しない | `TaskAccessPolicy` は `"organizer"` / `"task_manager"` などrole文字列を見る。task_management configのadmin設定は未使用 |
-| Medium | HTTP/Discordのエラー変換が不足 | `KeyError` や `ValueError` が利用者向け文言にならず、HTTPでは500になり得る | `WorkflowService.approval()` は対象なしで `KeyError` を投げ、HTTP `/approval` は捕捉しない |
-| Low | 評価セットが仕様より少ない | LLM抽出、negative case、secret、prompt injection、権限違反の回帰検知が弱い | unit testは主要happy path中心。`task_extraction` 評価ケースは未確認 |
+| 前回差分 | 再調査結果 |
+| --- | --- |
+| RAG差分・自動インデックス更新からの抽出未接続 | 解消。`auto_index_update` workerが変更検出後に `task_extract` を呼ぶ |
+| Task承認がtransaction化されていない | 解消。`merge_task_candidate()` / `merge_task_change_candidate()` を追加 |
+| Discord task Componentが仕様不足 | 解消。edit modal、evidence、duplicates、done、batch custom idに対応 |
+| `task_management.yaml` が使われていない | 解消。RuntimeConfig化し、権限、通知、batch、promptへ接続 |
+| 通知は状態記録のみ | 解消。Discord REST senderを追加し、delivery結果をmetadataへ保存 |
+| 完了確認フロー未実装 | 解消。通知Componentの `done` actionとApprovalRecord履歴を追加 |
+| batch保存のみ | 解消。period、channel、message id、component nonce、deliveryを保存 |
+| 手動登録・変更がルールベースのみ | 解消。手動登録はLLM primary、fallback付き。変更・削除はevidence付き候補として承認必須 |
+| evidenceが空になり得る | 解消。RAG citationがない場合も合成Citationまたはmanual input citationを保存 |
+| 重複検出が簡易metadataのみ | 解消。scoreに加えてreasonを保存し、既存Task重複は警告 |
+| 候補側filter不足 | 解消。担当者、期限範囲、priority、related_eventを候補にも適用 |
+| 期限範囲検索が片側のみ | 解消。from/to/以降/までと2日付範囲を扱う |
+| Task変更候補の差分表示が薄い | 解消。before/afterを表示 |
+| reject履歴のbeforeが空 | 解消。reject前payloadを保存 |
+| 権限設定がconfigと分離 | 解消。task管理admin user/roleをpolicyへ接続 |
+| HTTP/Discordエラー変換不足 | 解消。HTTP approvalとDiscord task componentで利用者向け応答へ変換 |
+| 評価セット不足 | 改善。既存unittestに通知delivery、batch delivery、config schemaを追加 |
 
-## 仕様項目別の判定
+## 仕様改善点の反映
 
-| 仕様項目 | 判定 | コメント |
-| --- | --- | --- |
-| タスク候補の自動抽出 | 部分実装 | LLM serviceはあるが、RAG差分連携と定期抽出が未接続 |
-| タスク候補の手動登録 | 部分実装 | 候補止まりは実装済み。専用LLM、曖昧担当者確認、secret検証が不足 |
-| タスク候補の承認、修正、却下 | 部分実装 | CLI/HTTP/Discord slash経路はある。Discord Componentの修正・根拠・重複詳細が不足 |
-| 承認後のTask正本登録 | 部分実装 | 基本動作は実装済み。transaction化とidempotencyが不足 |
-| Task表示・絞り込み | 部分実装 | status、assignee、related_event、priority、due_toは対応。候補側filter、due range、pagingが不足 |
-| Task正本の変更・削除承認 | 部分実装 | 変更・削除候補と承認適用はある。差分表示、権限粒度、transactionが不足 |
-| 期限通知と完了確認 | 未達 | 通知状態記録のみ。Discord通知と完了確認UIがない |
-| Discord Componentまとめ承認 | 未達 | task batchは保存のみ。Componentは単体candidateの簡易approve/reject/showのみ |
-| CLI/Discord/HTTP payload整形 | 部分実装 | WorkResponse payloadは概ねmetadata方針。workerの `side_effects` top-levelなど未整理が残る |
-| 監査ログ、承認履歴、workflow run | 部分実装 | auditとApprovalRecordはある。approval単体操作のWorkflowRun記録、reject before、詳細auditが不足 |
+前回提示した仕様改善点は、設計書または実装へ反映済みです。
 
-## 仕様の改善点
-
-1. 権限モデルを一本化する。上位仕様はadmin限定寄り、redesign文書はadminまたは担当者承認を示唆し、詳細設計は候補作成者・担当者・adminの操作分離を求めている。操作別matrixを正とする必要がある。
-2. `configs/main/task_management.yaml` のschemaを明文化する。`approval_batch_interval_days`、`due_soon_notice_days`、`notification_channel_id`、`admin_user_ids`、`admin_role_ids`、`prompt_name` をRuntimeConfigへ入れる前提まで仕様に書く。
-3. evidenceの必須条件を明確にする。`Citation` が必須なのか、LLMの短い `evidence_refs` でもよいのか、手動登録では何を根拠として保存するのかを定義する。
-4. `Task.status` に `deleted` を含めるか、削除はmetadataだけにするかを固定する。現実装は `status="deleted"` を使うが、詳細設計の基本状態には含まれていない。
-5. 承認transaction APIを仕様に追加する。`merge_task_candidate()` と `merge_task_change_candidate()` をrepository contractに含め、rowcount再確認、二重承認時の応答、File fallbackの不整合検出も定義する。
-6. Discord Component custom idの形式を具体化する。100文字制限を前提に、`target_id` を直接入れるのか、短いnonceからDB参照するのかを決める。
-7. 通知の「送信」と「通知済み記録」を分けて定義する。Discord送信成功、送信失敗、再送、完了確認、通知message id保存の状態遷移が必要。
-8. 自然言語抽出の責務を整理する。自動抽出、手動登録、変更・削除、一覧filterのどこにLLMを使い、どこをルールベースfallbackにするかを仕様化する。
-9. HTTP/CLI/Discord共通のエラーpayloadを定義する。権限なし、not found、承認不能状態、入力不足を500やtracebackにしない契約が必要。
-10. worker/automation payloadにもmetadata方針を適用する。`side_effects` や実行判断はtop-levelではなくmetadataへ寄せるか、安定結果フィールドとして扱うかを決める。
-11. 評価セットを受入条件に昇格する。`task_extraction` のpositive/negative、重複、secret、prompt injection、承認前正本化禁止、権限違反を最低限のCI対象にする。
-
-## 推奨修正順
-
-1. Task承認をrepository-level transactionに移し、Postgresで `Task` upsert、candidate状態更新、`ApprovalRecord` 保存を同一transactionにする。
-2. `RuntimeConfig` に `task_management` sectionを追加し、WorkflowService、worker、Discord通知先、TaskAccessPolicyへ接続する。
-3. Discord Task ComponentをEvent Component相当に拡張し、edit modal、evidence、duplicate details、batch_id、nonceを実装する。
-4. 自動インデックス更新またはingestion差分から `task_extract` を呼ぶadapterを追加し、`rag_delta_collector_unimplemented` を解消する。
-5. 通知delivery layerを追加し、期限前・期限超過・完了確認ComponentをDiscordへ送信する。`task_done` は完了確認経路と直接更新経路を分ける。
-6. 手動登録・変更・一覧filterのLLM抽出方針を決め、曖昧項目確認と差分表示を強化する。
-7. `TaskChangeCandidate` 表示にbefore/after差分を出し、reject履歴にもbeforeを保存する。
-8. `task_extraction` 評価セットとDiscord Component/HTTP error/CLI payloadのテストを追加する。
+| 改善点 | 反映先 |
+| --- | --- |
+| 完了条件をP0/P1/P2へ分ける | `docs/design/task-management.md` 18.1 |
+| 権限モデルを一本化 | `docs/design/task-management.md` 18.2、`TaskAccessPolicy` |
+| config schema明文化 | `docs/design/task-management.md` 18.3、`RuntimeConfig.task_management` |
+| evidence条件明確化 | `docs/design/task-management.md` 18.4、実装 |
+| `deleted` 状態の扱い固定 | `docs/design/task-management.md` 18.5、repository |
+| 承認transaction API | `docs/design/task-management.md` 18.6、repository |
+| Component custom id具体化 | `docs/design/task-management.md` 18.7、Discord実装 |
+| 通知送信と記録の分離 | `docs/design/task-management.md` 18.8、通知sender |
+| 自然言語抽出責務整理 | `docs/design/task-management.md` 18.9、手動登録実装 |
+| 共通エラーpayload | `docs/design/task-management.md` 18.10、HTTP/Discord実装 |
+| worker/automation metadata方針 | `docs/design/task-management.md` 18.11、worker/automation実装 |
+| 評価セット受入条件 | `docs/design/task-management.md` 18.12、unit test追加 |
 
 ## 検証
 
 実行した検証:
 
 ```bash
-PYTHONPATH=src app/.venv/bin/python -m unittest tests.unit.test_workflow_service tests.unit.test_database_migrations tests.unit.test_integrated_input
-PYTHONPATH=src app/.venv/bin/python -m unittest tests.unit.test_discord_commands
+PYTHONPATH=src app/.venv/bin/python -m py_compile src/kumc_agent/config/schema.py src/kumc_agent/config/load.py src/kumc_agent/features/task_management/service.py src/kumc_agent/features/task_management/notifications.py src/kumc_agent/features/workflow/service.py src/kumc_agent/infra/workflow/repository.py src/kumc_agent/apps/workflow.py src/kumc_agent/apps/worker/app.py src/kumc_agent/apps/automation.py src/kumc_agent/frontends/discord/app.py src/kumc_agent/frontends/http/app.py src/kumc_agent/features/autonomous_agent/snapshot.py
+PYTHONPATH=src app/.venv/bin/python -m unittest tests.unit.test_workflow_service tests.unit.test_database_migrations tests.unit.test_integrated_input tests.unit.test_config_loading tests.unit.test_discord_commands tests.unit.test_automation_hardening
+PYTHONPATH=src app/.venv/bin/python -m unittest discover tests/unit
 ```
 
 結果:
 
-- workflow/database/integrated_input: 37 tests / OK
-- discord_commands: 1 test / OK
+- py_compile: OK
+- targeted unit: 55 tests / OK
+- full unit: 250 tests / OK
 
-検証で確認できたこと:
+追加確認:
 
-- `task_extract` と `task_add` は承認前にTask正本を作成しない。
-- `approval approve` 後にTaskが作成され、TaskCandidateは `merged` になる。
-- LLM未設定時の `task_extract` はdegraded metadataを返し、候補を作成しない。
-- `task_update` / `task_delete` は承認前に正本を変更しない。
-- `task_notify_due` は通知対象Taskへ通知済みmetadataを付け、同条件で再通知対象にしない。
-- Discord botのslash command登録は確認されているが、task Componentの仕様充足まではテストされていない。
+- `task_notify_due` のfake delivery、通知metadata保存、`task_done` ApprovalRecord保存を追加テストで確認。
+- `task_batch_approval` のperiod、notification message id、component payloadを追加テストで確認。
+- `task_management` config defaultの読み込みを追加テストで確認。

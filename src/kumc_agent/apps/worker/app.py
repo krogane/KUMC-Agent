@@ -56,11 +56,13 @@ def _dispatch_job(
         automation = build_automation_app_context(base_dir=base_dir)
         readiness = automation.readiness.report()
         rules = automation.automation.seed_defaults()
-        return {
-            "readiness_status": readiness.status,
-            "automation_rules": len(rules),
-            "side_effects": "none",
-        }
+        return _with_side_effects(
+            {
+                "readiness_status": readiness.status,
+                "automation_rules": len(rules),
+            },
+            "none",
+        )
     if job_type == "ingest_backfill":
         ingestion = build_ingestion_app_context(base_dir=base_dir)
         source = str(payload.get("source") or "").strip()
@@ -73,7 +75,10 @@ def _dispatch_job(
                 ),
             )
         )
-        return {"results": [result.__dict__ for result in results], "side_effects": "indexing_only"}
+        return _with_side_effects(
+            {"results": [result.__dict__ for result in results]},
+            "indexing_only",
+        )
     if job_type == "auto_index_update":
         runtime = build_runtime_context(base_dir=base_dir)
         source_filter_raw = payload.get("source_filter") or payload.get("source") or ()
@@ -96,6 +101,16 @@ def _dispatch_job(
         out = result.as_payload()
         metadata = dict(out.get("metadata") or {})
         metadata["side_effects"] = "indexing_snapshot_publish"
+        if (
+            runtime.config.task_management.auto_extract_after_index_update
+            and result.status == "succeeded"
+            and (result.changed or result.deleted or bool(payload.get("extract_tasks")))
+        ):
+            metadata["task_delta_extraction"] = _run_task_delta_extract(
+                base_dir=base_dir,
+                index_result=out,
+                source_filter=source_filter,
+            )
         out["metadata"] = metadata
         return out
     if job_type == "autonomous_agent_run":
@@ -131,8 +146,7 @@ def _dispatch_job(
             )
         )
         out = response.to_payload()
-        out["side_effects"] = "none"
-        return out
+        return _with_side_effects(out, "none")
     if job_type == "member_profiles_rebuild":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -151,11 +165,13 @@ def _dispatch_job(
             for value in guild_ids
             if workflow.member_profile_builder is not None
         ]
-        return {
-            "results": results,
-            "guild_ids": guild_ids,
-            "side_effects": "member_profile_indexing",
-        }
+        return _with_side_effects(
+            {
+                "results": results,
+                "guild_ids": guild_ids,
+            },
+            "member_profile_indexing",
+        )
     if job_type == "weekly_summary_draft":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -167,7 +183,10 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {"text": response.text, "metadata": response.metadata, "side_effects": "draft_only"}
+        return _with_side_effects(
+            {"text": response.text, "metadata": response.metadata},
+            "draft_only",
+        )
     if job_type == "task_due_reminder":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -179,11 +198,13 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {
-            "notified_tasks": len(response.tasks),
-            "metadata": response.metadata,
-            "side_effects": "notification_state_recorded",
-        }
+        return _with_side_effects(
+            {
+                "notified_tasks": len(response.tasks),
+                "metadata": response.metadata,
+            },
+            "notification_state_recorded",
+        )
     if job_type == "task_approval_batch":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -195,13 +216,15 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {
-            "candidate_count": len(response.task_candidates),
-            "change_candidate_count": len(response.task_change_candidates),
-            "batch_count": len(response.task_approval_batches),
-            "metadata": response.metadata,
-            "side_effects": "approval_batch_recorded",
-        }
+        return _with_side_effects(
+            {
+                "candidate_count": len(response.task_candidates),
+                "change_candidate_count": len(response.task_change_candidates),
+                "batch_count": len(response.task_approval_batches),
+                "metadata": response.metadata,
+            },
+            "approval_batch_recorded",
+        )
     if job_type == "event_reminder":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -214,11 +237,13 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {
-            "notified_events": len(response.events),
-            "metadata": response.metadata,
-            "side_effects": "notification_state_recorded",
-        }
+        return _with_side_effects(
+            {
+                "notified_events": len(response.events),
+                "metadata": response.metadata,
+            },
+            "notification_state_recorded",
+        )
     if job_type == "event_approval_batch":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -230,13 +255,15 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {
-            "candidate_count": len(response.event_candidates),
-            "change_candidate_count": len(response.event_change_candidates),
-            "batch_count": len(response.event_approval_batches),
-            "metadata": response.metadata,
-            "side_effects": "approval_batch_recorded",
-        }
+        return _with_side_effects(
+            {
+                "candidate_count": len(response.event_candidates),
+                "change_candidate_count": len(response.event_change_candidates),
+                "batch_count": len(response.event_approval_batches),
+                "metadata": response.metadata,
+            },
+            "approval_batch_recorded",
+        )
     if job_type == "workflow_prepare":
         from kumc_agent.apps.workflow import build_workflow_app_context
 
@@ -249,8 +276,14 @@ def _dispatch_job(
                 access=AccessContext(user_id="worker", is_admin=True),
             )
         )
-        return {"text": response.text, "metadata": response.metadata, "side_effects": "draft_or_candidate_only"}
-    return {"status": "skipped", "reason": f"unsupported job_type: {job_type}", "side_effects": "none"}
+        return _with_side_effects(
+            {"text": response.text, "metadata": response.metadata},
+            "draft_or_candidate_only",
+        )
+    return _with_side_effects(
+        {"status": "skipped", "reason": f"unsupported job_type: {job_type}"},
+        "none",
+    )
 
 
 def _parse_datetime(value: object) -> datetime | None:
@@ -263,6 +296,48 @@ def _parse_datetime(value: object) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _with_side_effects(payload: dict[str, object], side_effects: str) -> dict[str, object]:
+    metadata = dict(payload.get("metadata") or {})
+    metadata["side_effects"] = side_effects
+    return {**payload, "metadata": metadata}
+
+
+def _run_task_delta_extract(
+    *,
+    base_dir: Path | None,
+    index_result: dict[str, object],
+    source_filter: tuple[str, ...],
+) -> dict[str, object]:
+    from kumc_agent.apps.workflow import build_workflow_app_context
+
+    workflow = build_workflow_app_context(base_dir=base_dir)
+    metadata = dict(index_result.get("metadata") or {})
+    source_results = metadata.get("source_results") or []
+    instruction = (
+        "自動インデックス更新で検出されたRAG差分から、実行すべき具体的なタスク候補だけを抽出してください。"
+    )
+    target = "\n".join(
+        [
+            f"source_filter: {', '.join(source_filter) if source_filter else 'all'}",
+            f"index_run_id: {index_result.get('run_id') or ''}",
+            f"source_results: {source_results}",
+        ]
+    )
+    response = workflow.workflow.run(
+        WorkRequest(
+            work_type="task_extract",
+            instruction=instruction,
+            target=target,
+            access=AccessContext(user_id="worker", is_admin=True),
+        )
+    )
+    return {
+        "candidate_count": len(response.task_candidates),
+        "metadata": response.metadata,
+        "candidate_ids": [candidate.id for candidate in response.task_candidates],
+    }
 
 
 def main(*, base_dir: Path | None = None) -> None:

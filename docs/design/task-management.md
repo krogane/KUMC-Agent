@@ -430,3 +430,89 @@ Component custom idには、`target_type`、`target_id`、`action`、`batch_id`�
 - `auto_run`
 
 `auto_run` でも、重複疑い、権限不明、期限不明、担当者不明、根拠不足、削除操作は承認必須へフォールバックする。
+
+## 18. 確定仕様と受入基準
+### 18.1 リリース優先度
+タスク管理の完了条件は次の優先度で扱う。
+
+| 優先度 | 必須範囲 |
+| --- | --- |
+| P0 | 候補作成、承認前正本化禁止、admin承認、Task昇格、変更・削除候補、承認履歴、監査、payload metadata方針 |
+| P1 | RAG差分連携、Discord Component、期限通知、完了確認、config接続、HTTP/CLI/Discord共通エラー |
+| P2 | 抽出品質評価拡充、通知UX改善、将来のauto_run mode |
+
+「完全実装」はP0/P1が満たされ、P2の評価セットがCIで最低限実行できる状態を指す。
+
+### 18.2 権限モデル
+承認による正本反映、変更反映、削除反映、まとめ承認、通知設定はadminのみが実行できる。adminは `AccessContext.is_admin`、`configs/main/task_management.yaml` の `admin_user_ids` / `admin_role_ids`、または保守管理者設定で判定する。
+
+候補作成者は自分の候補の表示、修正、取り下げを行える。担当者は自分が担当候補または担当者である候補・Taskの表示、完了確認、状態更新申請を行える。正本反映はadmin承認を必須とする。
+
+### 18.3 設定schema
+タスク管理の運用パラメータは `.env` ではなく `configs/main/task_management.yaml` に置く。
+
+```yaml
+task_management:
+  approval_batch_interval_days: 7
+  due_soon_notice_days: 1
+  notification_channel_id: ""
+  admin_user_ids: []
+  admin_role_ids: []
+  prompt_name: task_extraction.md
+  auto_extract_after_index_update: true
+```
+
+`.env` / `.env.example` に置くのはDiscord bot tokenやLLM API keyなどのsecretだけである。
+
+### 18.4 evidence方針
+自動抽出ではRAG citationを優先して `TaskCandidate.evidence` に保存する。RAG citationがないがLLMが短い根拠labelを返した場合は、入力断片をsecret maskした合成 `Citation` を作る。手動登録では、ユーザー入力をsecret maskした `manual input` citationを保存する。
+
+大きな本文断片やsecretの可能性がある値は、外部payloadに出す前にマスクまたは短縮する。
+
+### 18.5 Task状態と削除
+正本Taskの状態は `todo` / `doing` / `blocked` / `done` / `deleted` とする。`proposed` は正本前の `TaskCandidate.status` として扱う。
+
+削除は物理削除ではなく `status="deleted"` と `metadata.deleted_by` / `metadata.delete_reason` による論理削除を基本とする。通常の一覧は `deleted` を除外する。
+
+### 18.6 承認transaction
+production repositoryは、Task候補承認時に次を同一transactionで行う。
+
+1. Task upsert
+2. `TaskCandidate.status=merged` または `TaskChangeCandidate.status=merged`
+3. `ApprovalRecord` insert
+
+transaction内では対象candidateが `proposed` / `approved` のままであることを再確認し、二重承認を拒否する。File repositoryはappend-onlyのまま、同じ状態確認を行う。
+
+### 18.7 Discord Component custom id
+Task Componentのcustom idは次の形式にする。
+
+```text
+task:{target_id}:{action}:{batch_id}:{nonce}
+```
+
+`action` は `approve` / `edit` / `reject` / `show` / `evidence` / `duplicates` / `done` を使う。custom idには本文、secret、根拠本文を含めない。batch通知ではbatch metadataにnonceを保存する。
+
+### 18.8 通知状態
+通知は「送信」と「通知済み記録」を分ける。Discord送信結果は `Task.metadata.notifications.<kind>.delivery` に保存する。
+
+通知種別は `due_soon`、`overdue`、`unassigned`、`blocked_check` とし、完了確認Componentは `task_done` を実行する。送信失敗時もdelivery errorを保存し、同じkindの二重送信を防ぐ。
+
+### 18.9 自然言語抽出の責務
+自動抽出は専用LLMを必須経路とし、LLM利用不可・schema不正・根拠不足ではcandidateを作らず `metadata.degraded=true` を返す。
+
+手動登録、変更・削除、一覧filterはLLM primary、決定的parser fallbackで扱ってよい。ただし、fallback利用時も承認前正本化禁止、secret mask、承認履歴保存を満たす。
+
+### 18.10 エラーpayload
+CLI、HTTP、Discordでは、権限なし、not found、入力不足、承認不能状態を利用者向け文言と `metadata.error` で返す。権限なしとnot foundでは、候補数やTask存在有無を漏らさない。
+
+### 18.11 worker/automation payload
+workerやautomationの実行判断、side effect種別、routing判断、診断情報は `metadata` 配下に置く。トップレベルには主結果として利用される安定フィールドだけを置く。
+
+### 18.12 評価受入条件
+最低限のCI評価は次を含める。
+
+- positive: 担当、期限、優先度、関連イベントの抽出
+- negative: 未決事項、質問、イベント告知、雑談を候補化しない
+- duplicate: 既存候補・既存Taskとの重複metadata
+- safety: secret mask、prompt injection、権限外操作
+- lifecycle: 承認前にTask正本へ入らず、承認後にのみ `merged` / Task作成される

@@ -495,6 +495,24 @@ def _default_rules(
             approved_by_user_id="system",
         ),
         AutomationRule(
+            id="task_approval_batch",
+            name="Task まとめ承認",
+            enabled=True,
+            trigger=TriggerSpec("schedule_cron", {"cron": "0 9 */7 * *"}),
+            actions=(
+                ActionSpecRef(
+                    "task_approval_batch",
+                    target="discord",
+                    payload={},
+                    risk_level="low",
+                ),
+            ),
+            mode="auto_run",
+            risk_level="low",
+            created_by_user_id="system",
+            approved_by_user_id="system",
+        ),
+        AutomationRule(
             id="meeting_prep",
             name="Meeting prep 候補作成",
             enabled=True,

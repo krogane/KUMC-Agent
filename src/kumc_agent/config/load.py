@@ -68,6 +68,7 @@ from kumc_agent.config.schema import (
     RedisSection,
     RiskFeatureFlagsSection,
     SummarizationSection,
+    TaskManagementSection,
     VCSection,
 )
 
@@ -387,6 +388,18 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     budget.setdefault("max_cost_usd", 0.50)
     budget.setdefault("max_latency_seconds", 120.0)
 
+    task_management = updated.get("task_management")
+    if not isinstance(task_management, dict):
+        task_management = {}
+        updated["task_management"] = task_management
+    task_management.setdefault("approval_batch_interval_days", 7)
+    task_management.setdefault("due_soon_notice_days", 1)
+    task_management.setdefault("notification_channel_id", "")
+    task_management.setdefault("admin_user_ids", [])
+    task_management.setdefault("admin_role_ids", [])
+    task_management.setdefault("prompt_name", "task_extraction.md")
+    task_management.setdefault("auto_extract_after_index_update", True)
+
     features = updated.get("features")
     if not isinstance(features, dict):
         features = {}
@@ -598,6 +611,7 @@ def _to_runtime_config(
     security = merged["security"]
     scheduler = merged["scheduler"]
     autonomous_agent = merged.get("autonomous_agent", {})
+    task_management = merged.get("task_management", {})
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
     image_search_raw = features.get("image_search", {})
@@ -891,6 +905,25 @@ def _to_runtime_config(
                 max_latency_seconds=float(
                     (autonomous_agent.get("budget") or {}).get("max_latency_seconds", 120.0)
                 ),
+            ),
+        ),
+        task_management=TaskManagementSection(
+            approval_batch_interval_days=int(
+                task_management.get("approval_batch_interval_days", 7)
+            ),
+            due_soon_notice_days=int(task_management.get("due_soon_notice_days", 1)),
+            notification_channel_id=str(
+                task_management.get("notification_channel_id", "")
+            ),
+            admin_user_ids=[
+                str(value) for value in task_management.get("admin_user_ids", [])
+            ],
+            admin_role_ids=[
+                str(value) for value in task_management.get("admin_role_ids", [])
+            ],
+            prompt_name=str(task_management.get("prompt_name", "task_extraction.md")),
+            auto_extract_after_index_update=bool(
+                task_management.get("auto_extract_after_index_update", True)
             ),
         ),
         infrastructure=InfrastructureSection(

@@ -22,6 +22,14 @@
 - CLIや外部連携payloadの診断情報が `metadata` 配下に入る。
 - 主要動作を既存テスト方式で検証できる。
 
+追加の確定条件:
+
+- `configs/main/task_management.yaml` を正式schemaとして読み込み、WorkflowService、権限policy、通知、batch、prompt名へ接続する。
+- production repositoryではTask承認とTask変更承認をtransaction APIで実行する。
+- Discord Task Component custom idは `task:{target_id}:{action}:{batch_id}:{nonce}` とし、本文やsecretを含めない。
+- 通知delivery結果はTask metadataへ保存し、worker/automationの診断情報は `metadata` 配下に置く。
+- `Task.status` は `todo` / `doing` / `blocked` / `done` / `deleted` を正本状態とし、`proposed` はTaskCandidate側に閉じる。
+
 ## 3. 実装ステップ
 ### Phase 1: 仕様固定と現行テスト補強
 1. `TaskCandidate`、`Task`、`ApprovalRecord` の現行動作をテストで固定する。
@@ -45,6 +53,7 @@
 7. adminは候補作成、表示、修正、承認、却下、正本変更、削除、通知設定を行えるようにする。
 8. 権限外では候補数やTask存在有無を返さない。
 9. 必要なadmin user idやrole idは `configs` 配下に置く。トークンやAPIキーを追加する場合のみ `.env` / `.env.example` の両方を更新する。
+10. `task_management.admin_user_ids` / `task_management.admin_role_ids` を `TaskAccessPolicy` に接続する。
 
 検証:
 - adminは操作できること。
@@ -132,11 +141,12 @@
 - 削除は既定のlistから除外され、履歴は残ること。
 
 ### Phase 8: 承認処理のtransaction化
-1. Postgres repositoryで `Task` 作成、`TaskCandidate.status` 更新、`ApprovalRecord` 保存を同一transactionにまとめるAPIを追加する。
-2. JSONL repositoryでは既存append-only方式を維持しつつ、失敗時の不整合を検出できるようにする。
-3. 二重承認を防ぐため、承認対象statusの再確認をtransaction内で行う。
-4. `merged` や `rejected` の再承認を拒否する。
-5. 失敗時は候補状態を壊さず、利用者向けに再試行可能な文言を返す。
+1. Postgres repositoryで `Task` 作成、`TaskCandidate.status` 更新、`ApprovalRecord` 保存を同一transactionにまとめる `merge_task_candidate()` を追加する。
+2. Postgres repositoryで `Task` 更新、`TaskChangeCandidate.status` 更新、`ApprovalRecord` 保存を同一transactionにまとめる `merge_task_change_candidate()` を追加する。
+3. JSONL repositoryでは既存append-only方式を維持しつつ、失敗時の不整合を検出できるようにする。
+4. 二重承認を防ぐため、承認対象statusの再確認をtransaction内で行う。
+5. `merged` や `rejected` の再承認を拒否する。
+6. 失敗時は候補状態を壊さず、利用者向けに再試行可能な文言を返す。
 
 検証:
 - 同じ候補を2回approveしてもTaskが重複作成されないこと。
@@ -151,6 +161,7 @@
 5. custom idに長文、secret、根拠本文を含めない。
 6. Component操作時もAccessPolicyを再確認する。
 7. 操作後に最新状態を再取得して表示する。
+8. 期限通知Componentの `done` actionを処理し、完了履歴をApprovalRecordへ残す。
 
 検証:
 - approve buttonでTask正本が作成されること。
@@ -178,6 +189,7 @@
 4. 完了確認Componentから `task_done` 相当の処理を実行する。
 5. `done_by`、`done_comment`、通知message idをmetadataへ保存する。
 6. audit logと操作履歴を残す。
+7. Discord送信結果は `Task.metadata.notifications.<kind>.delivery` に保存し、失敗時も再送制御できるようにする。
 
 検証:
 - 期限前Taskだけ通知されること。
@@ -191,6 +203,7 @@
 3. 大きな本文断片やsecretを含むcontextは候補payloadへ保存しない。
 4. 自律エージェントは正本更新ではなく候補作成と通知までに限定する。
 5. workflow runに抽出件数、候補件数、重複件数、通知batch idを保存する。
+6. workerの `auto_index_update` 後に変更があった場合、`task_management.auto_extract_after_index_update` に従って `task_extract` を呼び出す。
 
 検証:
 - RAG差分から候補が作られること。
@@ -205,6 +218,7 @@
 4. `routing_decision`、`selected_handler`、`trace_id`、抽出条件、重複スコアは `metadata` 配下に入れる。
 5. 大きな検索contextやsecretをmetadataから除外・マスクする。
 6. `docs/explanation/cli.md` にtask系コマンド例を追記する。
+7. worker / automation action executorの `side_effects` は `metadata.side_effects` に置く。
 
 検証:
 - トップレベルには `task_candidates`、`tasks`、`approvals` など安定結果だけが出ること。

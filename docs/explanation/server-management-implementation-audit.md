@@ -30,7 +30,7 @@
 
 現行実装は、初期dry-run実装だけではなく、ActionSpec、admin制御、複数操作planner、JSONL/Postgres repository更新、server_operation専用承認、read-only/compose/whitelist/file_search executor、CLI/Discord/HTTP接続、payload sanitizationまで実装されている。
 
-ただし、`docs/design/server-management.md` と `docs/plan/server-management.md` の完了条件に照らすと、現時点では「仕様通りの完全実装」とは判断できない。主な未達は、監査ログの情報量、executor失敗時のstatus遷移、schema validationの実行前徹底、unsupported依頼の扱い、`compose_down` の意味の不一致、file_searchのapproval/allow path仕様、実executorのテスト不足である。
+ただし、`docs/design/server-management.md` と `docs/plan/server-management.md` の完了条件に照らすと、現時点では「仕様通りの完全実装」とは判断できない。主な未達は、専用LLM Planner未実装、監査ログの情報量、executor失敗時のstatus遷移、schema validationの実行前徹底、unsupported依頼の扱い、`compose_down` の意味の不一致、file_searchのapproval/allow path仕様、実executorのテスト不足である。
 
 安全面では、任意shell文字列をそのまま実行する経路は見当たらず、副作用executorも `shell=False` と固定argvで実行される。一方で、実行時例外やtimeoutが `failed` として保存されない場合があり、運用監査と復旧性の観点で完全仕様には届いていない。
 
@@ -42,7 +42,7 @@
 | domain model | `ActionSpec`, `MinecraftDryRun`, `ServerOperationPlan`, `ServerOperationExecutionResult`, `ServerOperation` を定義 | `domain/models/minecraft.py` |
 | admin限定受付 | 実装済み。`is_admin` または `maintenance_command_author_ids` 相当のuser idで判定 | `features/minecraft/access.py`, `apps/workflow.py` |
 | 非admin拒否 | 実装済み。候補作成・一覧表示せず、拒否文とmetadataのみ返す | `features/minecraft/service.py` |
-| deterministic planner | 実装済み。ラベル付き入力と一部自然文から1件以上のplanを抽出 | `features/minecraft/planner.py` |
+| Planner | 部分実装。現行はdeterministic parserであり、仕様前提の専用LLM Plannerではない | `features/minecraft/planner.py` |
 | shell断片拒否 | 部分実装済み。`rm -rf`, shell metacharacter, `sh -c`, `bash -c` を拒否 | `features/minecraft/service.py` |
 | dry-run保存 | 実装済み。impact、downtime、rollback、command preview、warningsを保存 | `features/minecraft/service.py` |
 | read-only docker_ps | 実装済み。adminであれば `docker ps -a --format {{json .}}` を事前承認なしで実行 | `infra/minecraft/executor.py` |
@@ -62,7 +62,7 @@
 | --- | --- | --- |
 | サーバー管理操作はadminだけが受付できる | OK | `MinecraftSupportService` の入口でadmin判定している |
 | 非admin拒否応答に内部情報を含めない | OK | 拒否文は固定で、operation/listは返さない |
-| 自然言語入力から1件以上の操作計画を抽出できる | 部分OK | 複数操作は一部対応。ただし未知の依頼が `docker_ps` にfallbackする |
+| 自然言語入力から1件以上の操作計画を抽出できる | NG | 現行はdeterministic parserのみ。仕様前提の専用LLM Planner、JSON schema validation、LLM出力のunsupported処理が未実装 |
 | 定義済みActionSpecに限定し、任意shellを実行しない | 部分OK | shell断片拒否とregistry照合はあるが、unsupported自然文の明示拒否が弱い |
 | required args不足時は候補を保存しない | OK | `ValueError` で保存前に止まる |
 | server/compose directory/service/path/playerをschema validationする | 部分NG | server allow list未設定時は任意server/serviceのdry-runが作れる。file_search pathもdry-run時は許可rootとの照合が不十分 |
@@ -84,6 +84,7 @@
 | --- | --- | --- | --- |
 | Critical | executor例外やtimeoutが `failed` として保存されない | `execute()` が `running` に更新した後、executorが例外を投げると `save_execution_result()` まで到達せず、operationが `running` のまま残る可能性がある | `MinecraftSupportService.execute()` はexecutor例外をcatchしない |
 | Critical | 監査ログが仕様の保存対象を満たさない | stdout/stderr、server state、container state、承認者、executor resultが `AuditEvent` に残らない。operation metadataには残るが、仕様は監査ログ保存を要求している | `WorkflowService._audit()` はaction/actor/outcome/target/riskのみ |
+| Critical | 専用LLM Plannerが未実装 | 仕様は自然言語依頼を専用LLMで抽出し、JSON schema validationを通す前提だが、現行はキーワード・ラベルベースのdeterministic parserのみ。複雑な依頼、条件付き依頼、曖昧な引数確認、unsupported分類の精度が仕様に届かない | `ServerOperationPlanner` はLLMPortやprompt/schemaを持たない |
 | Critical | unsupported自然文が明示拒否されず `docker_ps` にfallbackする | 「バックアップして」「nginx reload」など未対応依頼がunsupportedではなくread-only container確認として処理され得る。危険な副作用には直結しないが、仕様の「対応しない操作は拒否」と一致しない | `ServerOperationPlanner.plan()` のfallback |
 | High | schema validationがdry-run保存前に徹底されていない | allow list未設定時に任意server/serviceでwrite dry-runを作れる。file_searchもserverにallow pathが1つでもあれば任意相対pathをdry-run保存し、実行時までroot照合しない | `MinecraftSupportService._validated_args()` |
 | High | `compose_down` の仕様とexecutor動作が不一致 | dry-run previewは `docker compose down <service>` 相当だが、executorは `docker compose stop <service>` を実行する。停止範囲、volume/network影響、rollback説明がずれる | `infra/minecraft/executor.py` の `_compose_command()` |
@@ -100,7 +101,7 @@
 ## 仕様改善点
 
 1. 完全実装の範囲をActionSpecごとに固定する。特にbackup作成は「初期ActionSpecに含める」のか「将来拡張」なのかを明確にする。
-2. 上位仕様と詳細仕様の差を解消する。上位仕様は専用LLM plannerを前提にしているが、詳細仕様はdeterministic parserを許容している。どちらを合格条件にするかを明記する。
+2. Planner仕様を専用LLM前提として明文化する。deterministic parserはラベル付き入力やテスト用の補助経路に限定し、通常の自然言語依頼は専用LLM Planner、JSON schema validation、ActionSpec照合、unsupported分類を必須にする。
 3. 承認ポリシー表をoperation別に具体化する。`file_search` の `admin_dry_run` が「approve必須」なのか「adminがexecuteを明示すれば可」なのかを明確にする。
 4. `compose_down` の意味を再定義する。service単位停止ならoperation名を `compose_stop` に変えるか、criticalな `compose_down` はproject全体downとして別executorに分ける。
 5. server allow list未設定時の安全動作を明記する。現実装はdry-run作成を許すが実行時にserver未設定で失敗する。仕様上はwrite候補作成も拒否する方が運用上わかりやすい。
@@ -117,12 +118,13 @@
 
 1. `MinecraftSupportService.execute()` でexecutor例外とtimeoutをcatchし、operationを必ず `failed` に更新する。`running` のまま残らない回帰テストを追加する。
 2. `WorkflowService._audit()` またはserver_operation専用auditで、operation id、risk、executor、actor、approvers、stdout/stderr抜粋、state snapshotをマスク済みで保存する。
-3. Plannerのfallbackを変更し、未知・未対応自然文はunsupportedとして候補保存しない。backup要求も明示的にunsupportedまたは実装済みActionSpecへ振り分ける。
-4. dry-run前validationを強化する。write操作はconfigured server必須、service/pathはallow list照合必須にする。
-5. `compose_down` を仕様に合わせる。`stop` を使うならoperation名・risk・rollback説明も `compose_stop` に寄せる。
-6. DockerPs/Compose/Whitelist/FileSearch executorのunit testを追加し、argv、cwd、shell=False、allow list、timeout、masking、state snapshotを検証する。
-7. `mc_status` の表示を現行executor状態に更新する。
-8. file_searchのapproval policyを仕様として確定し、実装とテストを合わせる。
+3. 専用LLM Plannerを実装する。Planner promptは `assets/prompts` に置き、出力は1件以上の `ServerOperationPlan` JSONに限定し、JSON schema validation後にActionSpecへ正規化する。
+4. Plannerのfallbackを変更し、未知・未対応自然文はunsupportedとして候補保存しない。backup要求も明示的にunsupportedまたは実装済みActionSpecへ振り分ける。
+5. dry-run前validationを強化する。write操作はconfigured server必須、service/pathはallow list照合必須にする。
+6. `compose_down` を仕様に合わせる。`stop` を使うならoperation名・risk・rollback説明も `compose_stop` に寄せる。
+7. DockerPs/Compose/Whitelist/FileSearch executorのunit testを追加し、argv、cwd、shell=False、allow list、timeout、masking、state snapshotを検証する。
+8. `mc_status` の表示を現行executor状態に更新する。
+9. file_searchのapproval policyを仕様として確定し、実装とテストを合わせる。
 
 ## 検証
 

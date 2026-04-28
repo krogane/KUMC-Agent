@@ -105,8 +105,6 @@ class AutonomousSnapshotCollector:
                 warnings.append(f"events_collector_failed:{type(exc).__name__}")
 
         rag_delta: tuple[SnapshotItem, ...] = tuple()
-        if "rag_delta" in scope_set:
-            warnings.append("rag_delta_collector_unimplemented")
 
         if "server_ops" in scope_set:
             if self.server_operation_repository is None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +13,7 @@ if str(SRC) not in sys.path:
 
 from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.domain.models.workflow import Task, WorkRequest
+from kumc_agent.features.task_management import TaskNotificationDelivery
 from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.workflow import FileWorkflowRepository
 
@@ -71,11 +73,32 @@ class FakeEventLLM:
         """
 
 
+class FakeTaskNotificationSender:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def send(self, message):
+        self.messages.append(message)
+        return TaskNotificationDelivery(
+            status="sent",
+            channel="fake",
+            message_id=f"msg-{len(self.messages)}",
+        )
+
+
 class WorkflowServiceTests(unittest.TestCase):
-    def _service(self, root: Path, *, llm: object | None = None) -> WorkflowService:
+    def _service(
+        self,
+        root: Path,
+        *,
+        llm: object | None = None,
+        task_notification_sender: object | None = None,
+    ) -> WorkflowService:
         return WorkflowService(
             repository=FileWorkflowRepository(root_dir=root / "workflow"),
             llm=llm,
+            task_notification_sender=task_notification_sender,
+            task_notification_channel_id="tasks",
         )
 
     def test_task_extract_creates_candidate_not_task_until_approved(self) -> None:
@@ -292,6 +315,65 @@ class WorkflowServiceTests(unittest.TestCase):
             self.assertEqual(len(notified.tasks), 1)
             self.assertEqual(len(notified_again.tasks), 0)
             self.assertIn("notifications", service.repository.get_task(task.id).metadata)
+
+    def test_task_notify_due_sends_discord_delivery_and_done_records_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sender = FakeTaskNotificationSender()
+            service = self._service(Path(tmp), task_notification_sender=sender)
+            task = service.repository.save_task(
+                Task(
+                    id="task-1",
+                    title="期限確認",
+                    due_at=datetime(2026, 5, 1, tzinfo=UTC),
+                    status="todo",
+                )
+            )
+
+            notified = service.run(
+                WorkRequest(
+                    work_type="task_notify_due",
+                    instruction="days: 999",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+            done = service.run(
+                WorkRequest(
+                    work_type="task_done",
+                    target=task.id,
+                    instruction="discord_component:done",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertEqual(len(sender.messages), 2)  # unassigned + due_soon
+            self.assertEqual(notified.metadata["deliveries"][0]["delivery"]["status"], "sent")
+            self.assertEqual(done.tasks[0].status, "done")
+            self.assertEqual(done.approvals[0].action, "done")
+
+    def test_task_batch_approval_records_period_and_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sender = FakeTaskNotificationSender()
+            service = self._service(Path(tmp), llm=FakeTaskLLM(), task_notification_sender=sender)
+            extracted = service.run(
+                WorkRequest(
+                    work_type="task_extract",
+                    instruction="TODO: 新歓資料を作成 担当: @alice 期限: 2026-05-01",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            batch = service.run(
+                WorkRequest(
+                    work_type="task_batch_approval",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            ).task_approval_batches[0]
+
+            self.assertEqual(len(extracted.task_candidates), 1)
+            self.assertIsNotNone(batch.period_start)
+            self.assertIsNotNone(batch.period_end)
+            self.assertEqual(batch.notification_message_id, "msg-1")
+            self.assertEqual(sender.messages[0].metadata["components"][0]["type"], 1)
 
     def test_event_brief_includes_related_open_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
