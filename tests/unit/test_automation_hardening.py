@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 import sys
 import tempfile
 import unittest
@@ -161,6 +163,99 @@ class AutomationHardeningTests(unittest.TestCase):
         check_ids = {check.id for check in report.checks}
         self.assertIn("runbooks", check_ids)
         self.assertIn("backup_restore_harness", check_ids)
+
+    def test_cost_report_includes_agentic_monitoring_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agentic_dir = root / "data" / "agentic"
+            agentic_dir.mkdir(parents=True)
+            steps = [
+                {
+                    "id": "step-1",
+                    "run_id": "run-1",
+                    "state": "PLAN",
+                    "output": {},
+                    "status": "succeeded",
+                    "cost_usd": 0.01,
+                },
+                {
+                    "id": "step-2",
+                    "run_id": "run-1",
+                    "state": "TOOL",
+                    "output": {"tool_name": "circle_rag_search"},
+                    "status": "succeeded",
+                    "cost_usd": 0.02,
+                },
+                {
+                    "id": "step-3",
+                    "run_id": "run-2",
+                    "state": "PLAN",
+                    "output": {},
+                    "status": "succeeded",
+                    "cost_usd": 0.01,
+                },
+                {
+                    "id": "step-4",
+                    "run_id": "run-2",
+                    "state": "PLAN",
+                    "output": {},
+                    "status": "succeeded",
+                    "cost_usd": 0.01,
+                },
+                {
+                    "id": "step-5",
+                    "run_id": "run-3",
+                    "state": "TOOL",
+                    "output": {"tool_name": "event_candidate_create"},
+                    "status": "failed",
+                    "cost_usd": 0.03,
+                },
+            ]
+            runs = [
+                {
+                    "id": "run-1",
+                    "status": "succeeded",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:04+00:00",
+                },
+                {
+                    "id": "run-2",
+                    "status": "insufficient_evidence",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:08+00:00",
+                },
+                {
+                    "id": "run-3",
+                    "status": "needs_approval",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:02+00:00",
+                },
+            ]
+            (agentic_dir / "agent_steps.jsonl").write_text(
+                "\n".join(json.dumps(step) for step in steps),
+                encoding="utf-8",
+            )
+            (agentic_dir / "agent_runs.jsonl").write_text(
+                "\n".join(json.dumps(run) for run in runs),
+                encoding="utf-8",
+            )
+            config = replace(load_runtime_config(base_dir=ROOT), base_dir=root)
+
+            report = ProductionReadinessService(
+                config=config,
+                feature_flags=_flags(),
+                runbook_dir=ROOT / "docs" / "runbooks",
+            ).cost_report()
+
+            self.assertEqual(report["agent_run_count"], 3)
+            self.assertAlmostEqual(report["agent_success_rate"], 0.3333)
+            self.assertAlmostEqual(report["agent_insufficient_evidence_rate"], 0.3333)
+            self.assertAlmostEqual(report["agent_needs_approval_rate"], 0.3333)
+            self.assertAlmostEqual(report["agent_average_step_count"], 1.6667)
+            self.assertAlmostEqual(report["agent_average_latency_seconds"], 4.6667)
+            self.assertEqual(report["agent_replan_count"], 1)
+            self.assertEqual(report["agent_tool_success_rates"]["circle_rag_search"], 1.0)
+            self.assertEqual(report["agent_tool_failure_rates"]["event_candidate_create"], 1.0)
 
 if __name__ == "__main__":
     unittest.main()

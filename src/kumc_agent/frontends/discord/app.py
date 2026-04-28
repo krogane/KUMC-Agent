@@ -348,6 +348,33 @@ def create_bot(
             return str(first.get("id") or first.get("operation_id") or "")
         return str(getattr(first, "id", "") or getattr(first, "operation_id", ""))
 
+    def _first_item_id(items: object) -> str:
+        values = tuple(items or tuple())
+        if not values:
+            return ""
+        first = values[0]
+        if isinstance(first, dict):
+            return str(first.get("id") or first.get("operation_id") or "")
+        return str(getattr(first, "id", "") or getattr(first, "operation_id", ""))
+
+    def _approval_view_for_integrated_response(response: IntegratedInputResponse):
+        task_id = _first_candidate_id(response)
+        if task_id:
+            return _task_approval_view(task_id)
+        event_id = _first_item_id(
+            tuple(response.event_candidates or tuple())
+            + tuple(response.event_change_candidates or tuple())
+        )
+        if event_id:
+            return _event_approval_view(event_id)
+        schedule_id = _first_item_id(response.schedule_candidates)
+        if schedule_id:
+            return _generic_approval_view("schedule", schedule_id)
+        server_operation_id = _first_item_id(response.server_operations)
+        if server_operation_id:
+            return _generic_approval_view("server_operation", server_operation_id)
+        return None
+
     async def _send_integrated_response(
         interaction: discord.Interaction,
         response: IntegratedInputResponse,
@@ -360,9 +387,9 @@ def create_bot(
             kwargs["file"] = _format_detail_attachment(content=response.detail_markdown)
             if len(str(kwargs["content"])) > 1800:
                 kwargs["content"] = response.text[:1700].rstrip() + "..."
-        candidate_id = _first_candidate_id(response)
-        if candidate_id:
-            kwargs["view"] = _task_approval_view(candidate_id)
+        view = _approval_view_for_integrated_response(response)
+        if view is not None:
+            kwargs["view"] = view
         await interaction.followup.send(**kwargs)
 
     def _event_approval_view(target_id: str, *, batch_id: str = ""):
@@ -390,6 +417,70 @@ def create_bot(
                     self.add_item(button)
 
         return EventApprovalView(target_id)
+
+    def _generic_approval_view(target_type: str, target_id: str):
+        if not target_type or not target_id:
+            return None
+
+        class GenericApprovalView(discord.ui.View):
+            def __init__(self) -> None:
+                super().__init__(timeout=86400)
+                nonce = "v1"
+                for label, action, style in (
+                    ("Approve", "approve", discord.ButtonStyle.success),
+                    ("Reject", "reject", discord.ButtonStyle.danger),
+                    ("Show", "show", discord.ButtonStyle.secondary),
+                ):
+                    self.add_item(
+                        discord.ui.Button(
+                            label=label,
+                            style=style,
+                            custom_id=f"approval:{target_type}:{target_id}:{action}:{nonce}"[:100],
+                        )
+                    )
+
+        return GenericApprovalView()
+
+    def _parse_generic_approval_custom_id(custom_id: str) -> tuple[str, str, str, str]:
+        parts = custom_id.split(":")
+        if len(parts) < 5 or parts[0] != "approval":
+            return "", "", "", ""
+        return parts[1], parts[2], parts[3], parts[4]
+
+    @bot.listen("on_interaction")
+    async def _generic_approval_component_listener(interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None)
+        if not isinstance(data, dict):
+            return
+        custom_id = str(data.get("custom_id") or "")
+        target_type, target_id, action, _nonce = _parse_generic_approval_custom_id(custom_id)
+        if not target_type or not target_id or not action:
+            return
+        if interaction.response.is_done():
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            response = await asyncio.to_thread(
+                workflow_context.workflow.approval,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                comment=f"discord_component:{action}",
+                access=_access_context(interaction),
+            )
+        except (KeyError, ValueError) as exc:
+            await interaction.followup.send(
+                content=str(exc) or "対象が見つからないか、操作できません。",
+                ephemeral=True,
+            )
+            return
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-approval-detail.md",
+            )
+        await interaction.followup.send(**kwargs)
 
     @admin.command(name="action", description="Run an approved admin action")
     @app_commands.describe(action="Admin action to run")

@@ -12,7 +12,7 @@
 現行設計は「現在のコードと同じ外部挙動を再実装する」ことを主目的としている。一方、本設計では次の方針へ変更する。
 1. **互換再実装ではなく、本番向けの再設計を行う。**
 2. **LLM にコマンド自由実行させず、定義済み tool / command をサーバー側で検証して実行する。**
-3. **RAG・Agentic Search・資料作成・タスク管理・スケジュール管理・自動化などの機能を同じ基盤上に載せる。**
+3. **RAG・総合エージェント・資料作成・タスク管理・スケジュール管理・自動化などの機能を同じ基盤上に載せる。**
 4. **セキュリティ、監査ログ、評価、観測可能性を初期実装から入れる。**
 5. **kumc-agent-workflows の Agent 群を、検索・生成・承認・正本管理・自動化の usecase として統合する。**
 
@@ -23,7 +23,7 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 主な役割は次の通り。
 - Google Drive、Discord、Notion、X、はてなブログ、クラフターズコロニー、Minecraft Wiki などの情報を横断検索し、根拠付きで回答する。
 - Discord / Google Drive / X / はてなブログ / クラフターズコロニー上の画像を検索する。
-- 複数回の検索・検証を行う Agentic Search を提供する。
+- 総合エージェントで複数回の検索・検証・候補作成・承認申請を扱う。
 - 定義済みの安全なサーバー操作コマンドを、承認付きで実行する。
 - X 投稿案、告知文、議事録、活動資料、企画資料、依頼文、ブログ記事などを生成する。
 - メンバー情報を権限付きで検索し、担当候補を「候補」として提示する。
@@ -48,7 +48,7 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 - 画像検索 Agent: 画像説明文、OCR、画像特徴量、類似画像検索
 - メンバー検索 Agent: ロール、自己紹介、過去担当履歴、スキルに基づく担当候補提示
 - 秘密情報・個人情報・運用秘密の検出、引用抑制、回答抑制
-- Agentic Search と統合検索 Agent
+- 総合エージェントと統合検索
 - 例会準備Agent: 直近ログ、未完了タスク、前回議事録、イベント日程から議題案と確認事項を作る
 - 議事録作成 Agent: 決定事項、未決事項、ToDo、担当者、期限、次回確認事項を抽出する
 - タスク候補抽出: Discord / Drive / Notion から ToDo 候補を抽出し、承認後に Task 正本へ入れる
@@ -83,7 +83,7 @@ KUMC-Agent は、KUMC の Discord サーバー上で動作する AI エージェ
 | worker | frontend と強く結合 | bot / api / worker を分離 |
 | LLM | Gemini 中心 | LLM・embedding・rerank は外部 API 前提 |
 | RAG | hybrid(dense + sparse) + rerank + Doc Cap + MMR | hybrid(dense + sparse) + rerank + Doc Cap + MMR + ACL + eval + trace |
-| Agent | OpenClaw 外部依存 | 内部状態機械型 Agentic Search |
+| Agent | OpenClaw 外部依存 | 内部状態機械型 総合エージェント |
 | 業務 Workflow | 個別機能なし / 手作業 | Workflow registry + Candidate + Approval + 正本 DB |
 | 画像・素材検索 | 未整備 | OCR / caption / feature embedding / usage approval |
 | Minecraft Wiki | 未整備 | Wiki connector + edition/version aware RAG |
@@ -217,13 +217,13 @@ Discord slash command
   -> bot: follow-up response
 ```
 
-Agentic Search の流れ。
+総合エージェントの流れ。
 ```text
 Discord slash command
   -> bot: interaction defer
-  -> application: AgentSearchUsecase
+  -> application: IntegratedInputUsecase
   -> agents: PLAN
-  -> retrieval: SEARCH / READ
+  -> tools: TOOL
   -> agents: VERIFY
   -> generation: ANSWER
   -> audit / trace
@@ -281,7 +281,7 @@ Discord command
 - chunking
 - embedding
 - index update
-- long-running Agentic Search
+- long-running comprehensive agent
 - doc generation
 - automation execution
 - command execution executor への dispatch
@@ -354,7 +354,7 @@ class Answer:
     text: str
     route: Literal[
         "rag",
-        "agentic_search",
+        "comprehensive_agent",
         "no_answer",
         "action_proposal",
         "doc_generation",
@@ -928,7 +928,7 @@ summary chunk は検索 recall を上げるために使うが、回答の根拠�
 ```json
 {
   "intent": "fact|summary|compare|draft|decision_support|action|task|event|schedule|image|member|member_assignment|minecraft_spec|approval|unknown",
-  "requires_agentic_search": true,
+  "requires_comprehensive_agent": true,
   "requires_freshness": false,
   "source_filters": ["google_drive", "discord", "notion", "minecraft_wiki", "image", "member", "task", "event"],
   "minecraft": {"edition": "java|bedrock|unknown", "version": "optional"},
@@ -1044,55 +1044,60 @@ Discord の標準出力:
 ```
 
 
-## 12. Agentic Search 設計
+## 12. 総合エージェント設計
 ### 12.1 基本方針
-Agentic Search は、自由な無限ループではなく、状態機械として実装する。
+旧深掘り検索機能は総合エージェントへ統合する。総合エージェントは、単一RAGで解決できない依頼、複数機能を必要とする依頼、または単一RAGでも `depth=deep` が指定された依頼を、自由な無限ループではなく状態機械として処理する。
 ```text
-PLAN -> SEARCH -> READ -> VERIFY -> ANSWER
+PLAN -> TOOL -> VERIFY -> ANSWER
 ```
-必要に応じて `SEARCH -> READ` を数回繰り返す。
+根拠不足や矛盾がある場合は、予算内で `PLAN -> TOOL -> VERIFY` を再実行する。
 
 ### 12.2 状態定義
 | 状態 | 役割 | 出力 |
 |---|---|---|
-| PLAN | 質問を分解し、検索方針を決める | subqueries, filters, success criteria |
-| SEARCH | RAG検索を実行する | candidate chunks |
-| READ | 候補文書を読み、要点を抽出する | notes, evidence |
-| VERIFY | 根拠不足、矛盾、追加検索要否を判定する | verified evidence, missing info |
-| ANSWER | 最終回答を作る | answer, citations, confidence |
+| PLAN | 専用LLM Plannerが入力を分解し、必要機能、tool順序、tool入力、検索条件、成功条件、副作用境界を決める | tasks, required_tools, tool_sequence, success_criteria |
+| TOOL | PLANで選ばれたtoolを実行する。検索系は実行し、副作用系は候補作成または承認申請までに限定する | tool result, citations, candidates, approval targets |
+| VERIFY | 専用LLM Verifierと決定的チェックで、根拠不足、矛盾、権限外情報、secret混入、副作用境界違反を判定する | satisfied, missing, conflicts, warnings |
+| ANSWER | 最終回答を作る | answer, citations, confidence, candidates, approvals |
 
 ### 12.3 制約
 初期値:
 ```yaml
-agentic_search:
-  max_steps: 6
-  max_search_calls: 4
-  max_read_chunks: 20
-  max_cost_usd: 0.50
-  max_latency_seconds: 60
-  allow_write_tools: false
-  require_citations: true
+comprehensive_agent:
+  planner:
+    enabled: true
+    provider: gemini
+  verifier:
+    enabled: true
+    provider: gemini
+  budget:
+    max_steps: 10
+    max_search_calls: 6
+    max_read_chunks: 20
+    max_replans: 2
+    max_cost_usd: 0.75
+    max_latency_seconds: 120
+    require_citations: true
 ```
 
 ### 12.4 Tool 一覧
-Agentic Search で使える tool:
+総合エージェントで使える標準tool:
 ```text
-search_documents(query, filters)
-read_chunks(chunk_ids)
-search_discord(query, channel_filter, date_range)
-search_drive(query, folder_filter, date_range)
-search_minecraft_wiki(query, edition, version)
-search_images(query, filters)
-search_member_profiles(query, filters)
-search_tasks(query, filters)
-search_events(query, filters)
-list_recent_documents(source_kind, limit)
-compare_evidence(evidence_items)
+circle_rag_search
+minecraft_wiki_rag_search
+member_search
+image_search
+task_search
+task_candidate_create
+event_search
+event_candidate_create
+server_operation_candidate_create
+approval_candidate_create
 ```
-書き込み系 tool は Agentic Search では使わない。
+`task_candidate_create`、`event_candidate_create`、`server_operation_candidate_create` は正本変更や外部実行を行わず、候補作成に限定する。候補作成後は承認recordまたはapproval batchを自動作成する。非adminが候補作成を含む依頼を行った場合は拒否する。
 
 ### 12.5 失敗時の出力
-Agentic Search が十分な根拠を見つけられない場合、無理に回答しない。
+総合エージェントが十分な根拠を見つけられない場合、無理に回答しない。
 ```text
 十分な根拠を見つけられませんでした。
 
@@ -1142,7 +1147,7 @@ depth: enum[light, normal, deep]
 1. interaction を defer する。
 2. user context を解決する。
 3. query classification を行う。
-4. intent に応じて RAG / Agentic Search / Wiki / Image / Member / Workflow Search へ route する。
+4. intent と `depth` に応じて RAG / 総合エージェント / Wiki / Image / Member / Workflow Search へ route する。
 5. 回答を生成する。
 6. Discord には短い要約を返し、詳細は attachment / generated document / thread に分離する。
 
@@ -1792,7 +1797,7 @@ Indexing:
 - 状態: `proposed / todo / doing / blocked / done`
 
 処理:
-1. RAG / Agentic Search でタスクらしい発言や文書箇所を集める。
+1. RAG / 総合エージェントでタスクらしい発言や文書箇所を集める。
 2. LLM が `TaskCandidate` を生成する。
 3. server-side validation で schema、権限、重複、秘密情報を確認する。
 4. 担当者が曖昧な場合は `未定` として扱う。
@@ -2313,7 +2318,7 @@ KUMC-Agent は eval-driven に開発する。
 | `rag_drive_basic` | 20 | Drive 資料の基本質問 |
 | `rag_discord_basic` | 20 | Discord 会話履歴質問 |
 | `rag_mixed` | 20 | Drive + Discord 複合質問 |
-| `agentic_search` | 15 | 追加検索が必要な質問 |
+| `comprehensive_agent` | 15 | 追加検索・複数機能連携・候補作成境界の検証が必要な質問 |
 | `x_draft` | 10 | 投稿案生成 |
 | `security_prompt_injection` | 20 | prompt injection 耐性 |
 | `acl` | 15 | 権限違反防止 |
@@ -2555,11 +2560,11 @@ AI 機能追加時:
 - 承認された候補だけ Task 正本に入る。
 - Event brief が関連資料・未完了タスクを返せる。
 
-### Wave 5: Agentic Search / DocGen / Announcement
+### Wave 5: 総合エージェント / DocGen / Announcement
 作業:
 - Agent state machine
 - tool schema
-- search/read/verify loop
+- plan/tool/verify/answer loop
 - cost / step budget
 - DocumentPlan / SectionDraft
 - Markdown renderer
@@ -2569,7 +2574,7 @@ AI 機能追加時:
 - `/work type:doc_draft|x_draft|announcement_draft`
 
 完了条件:
-- Agentic Search eval が基準を満たす。
+- 総合エージェント eval が基準を満たす。
 - 週報 / 意思決定メモ / 告知下書きが出せる。
 - 外部公開不可情報の混入テストに通る。
 
@@ -2820,7 +2825,7 @@ data/index/material_catalog.json
 - 権限を解決できない source は fail closed になる。
 - unauthorized source が回答・citation・詳細 attachment に出ない。
 - PIN、内部 IP、ネットワークキー、解錠手順、会計詳細、個人情報を通常回答で引用しない。
-- Agentic Search が複数検索を行い、根拠不足時に止まれる。
+- 総合エージェントが複数検索を行い、根拠不足時に止まれる。
 - Minecraft Wiki を根拠に edition / version 差分を明示して回答できる。
 - 画像検索が画像候補、出典、投稿日時、類似画像、利用許可確認の要否を返せる。
 - 画像利用 request が承認待ち候補を作成でき、承認前に外部公開素材として確定しない。

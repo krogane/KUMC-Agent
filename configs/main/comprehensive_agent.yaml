@@ -1,0 +1,26 @@
+comprehensive_agent:
+  enabled: true
+  planner:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    prompt_name: "comprehensive_agent_planner"
+    temperature: 0.0
+    max_output_tokens: 1024
+    max_retries: 2
+  verifier:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    prompt_name: "comprehensive_agent_verifier"
+    temperature: 0.0
+    max_output_tokens: 1024
+    max_retries: 2
+  budget:
+    max_steps: 10
+    max_search_calls: 6
+    max_read_chunks: 20
+    max_replans: 2
+    max_cost_usd: 0.75
+    max_latency_seconds: 120
+    require_citations: true

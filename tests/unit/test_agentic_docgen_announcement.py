@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import sys
 import tempfile
 import unittest
@@ -11,11 +12,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.domain.models.agentic import ComprehensiveAgentRequest
+from kumc_agent.domain.models.agentic import AgentBudget, ComprehensiveAgentRequest
 from kumc_agent.domain.models.docgen import DocGenRequest
 from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation
 from kumc_agent.domain.models.workflow import WorkRequest
 from kumc_agent.features.agentic import ComprehensiveAgentService, ToolSchemaRegistry
+from kumc_agent.features.agentic.comprehensive import ComprehensiveLLMConfig
 from kumc_agent.features.announcement import AnnouncementDraftService
 from kumc_agent.features.docgen.service import DocGenService
 from kumc_agent.features.workflow import WorkflowService
@@ -50,12 +52,31 @@ class DummyAskService:
         )
 
 
+@dataclass
+class FakeLLM:
+    payloads: list[dict[str, object]]
+    calls: int = 0
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> str:
+        payload = self.payloads[min(self.calls, len(self.payloads) - 1)]
+        self.calls += 1
+        return json.dumps(payload, ensure_ascii=False)
+
+
 class AgenticDocgenAnnouncementTests(unittest.TestCase):
     def test_comprehensive_agent_runs_state_machine_with_citations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            repository = FileAgentTraceRepository(root_dir=Path(tmp) / "agentic")
             service = ComprehensiveAgentService(
                 ask_service=DummyAskService(),
-                repository=FileAgentTraceRepository(root_dir=Path(tmp) / "agentic"),
+                repository=repository,
             )
 
             response = service.run(
@@ -67,7 +88,10 @@ class AgenticDocgenAnnouncementTests(unittest.TestCase):
                 )
             )
 
-            states = [step.state for step in response.run.steps]
+            states = [
+                step.state
+                for step in repository.list_steps(str(response.metadata["agent_run_id"]))
+            ]
             self.assertIn("PLAN", states)
             self.assertIn("TOOL", states)
             self.assertIn("VERIFY", states)
@@ -88,6 +112,93 @@ class AgenticDocgenAnnouncementTests(unittest.TestCase):
 
             self.assertEqual(response.confidence, "low")
             self.assertIn("十分な根拠", response.text)
+
+    def test_comprehensive_agent_creates_approval_record_after_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = WorkflowService(
+                repository=FileWorkflowRepository(root_dir=root / "workflow"),
+                ask_service=DummyAskService(),
+            )
+            service = ComprehensiveAgentService(
+                ask_service=DummyAskService(),
+                repository=FileAgentTraceRepository(root_dir=root / "agentic"),
+                workflow_service=workflow,
+            )
+
+            response = service.run(
+                ComprehensiveAgentRequest(
+                    query="タスク: 会場予約 を作成",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                    required_features=("task_management",),
+                    metadata={"depth": "deep"},
+                    budget=AgentBudget(allow_write_tools=True),
+                )
+            )
+
+            self.assertEqual(response.confidence, "medium")
+            self.assertGreaterEqual(len(response.task_candidates), 1)
+            self.assertGreaterEqual(len(response.approvals), 1)
+
+    def test_comprehensive_agent_uses_dedicated_llm_planner_and_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = FakeLLM(
+                [
+                    {
+                        "tasks": [
+                            {
+                                "id": "task-1",
+                                "description": "根拠を検索する",
+                                "tool_name": "circle_rag_search",
+                                "input": {"query": "LLM計画 query"},
+                                "success_criteria": ["citation"],
+                            }
+                        ],
+                        "required_tools": ["circle_rag_search"],
+                        "tool_sequence": [
+                            {
+                                "tool_name": "circle_rag_search",
+                                "input": {"query": "LLM計画 query"},
+                                "reason": "専用LLM計画",
+                                "side_effect_boundary": "read_only",
+                            }
+                        ],
+                        "success_criteria": ["citation"],
+                        "side_effect_boundary": "read_only",
+                    }
+                ]
+            )
+            verifier = FakeLLM(
+                [
+                    {
+                        "status": "succeeded",
+                        "satisfied": ["citation"],
+                        "missing": [],
+                        "conflicts": [],
+                        "warnings": [],
+                        "metadata": {"checked_by": "llm"},
+                    }
+                ]
+            )
+            service = ComprehensiveAgentService(
+                ask_service=DummyAskService(),
+                repository=FileAgentTraceRepository(root_dir=Path(tmp) / "agentic"),
+                planner_llm=planner,
+                verifier_llm=verifier,
+                planner_config=ComprehensiveLLMConfig(enabled=True, max_retries=1),
+                verifier_config=ComprehensiveLLMConfig(enabled=True, max_retries=1),
+            )
+
+            response = service.run(
+                ComprehensiveAgentRequest(
+                    query="専用LLMで計画して",
+                    metadata={"depth": "deep"},
+                )
+            )
+
+            self.assertEqual(planner.calls, 1)
+            self.assertEqual(verifier.calls, 1)
+            self.assertIn("LLM計画 query", response.text)
 
     def test_docgen_renders_markdown_and_redacts_public_secrets(self) -> None:
         draft = DocGenService().run(

@@ -129,10 +129,14 @@ class ComprehensiveAgentResponse:
     detail_markdown: str
     citations: tuple[Citation, ...]
     confidence: str
-    run: AgentRun
+    candidates: tuple[dict[str, Any], ...] = tuple()
     task_candidates: tuple[dict[str, Any], ...] = tuple()
+    task_change_candidates: tuple[dict[str, Any], ...] = tuple()
     event_candidates: tuple[dict[str, Any], ...] = tuple()
+    event_change_candidates: tuple[dict[str, Any], ...] = tuple()
+    schedule_candidates: tuple[dict[str, Any], ...] = tuple()
     server_operations: tuple[dict[str, Any], ...] = tuple()
+    approvals: tuple[dict[str, Any], ...] = tuple()
     assets: tuple[dict[str, Any], ...] = tuple()
     member_profiles: tuple[dict[str, Any], ...] = tuple()
     warnings: tuple[str, ...] = tuple()

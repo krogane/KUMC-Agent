@@ -354,6 +354,11 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertTrue(config.event_management.auto_extract_after_index_update)
             self.assertEqual(config.event_management.prompt_name, "event_extraction.md")
             self.assertEqual(config.event_management.timezone, "Asia/Tokyo")
+            self.assertTrue(config.comprehensive_agent.enabled)
+            self.assertEqual(config.comprehensive_agent.planner.provider, "gemini")
+            self.assertEqual(config.comprehensive_agent.planner.gemini_model, "gemini-x")
+            self.assertEqual(config.comprehensive_agent.verifier.prompt_name, "comprehensive_agent_verifier")
+            self.assertEqual(config.comprehensive_agent.budget.max_replans, 2)
             self.assertEqual(config.features.retrieval.sudachi_mode, "A")
             self.assertEqual(config.features.retrieval.sparse_bm25_k1, 1.8)
             self.assertEqual(config.features.retrieval.sparse_bm25_b, 0.7)
@@ -450,6 +455,8 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_OPENAI_API_KEY": "",
+                    "OPENAI_API_KEY": "",
                 },
                 clear=False,
             ):
@@ -487,6 +494,8 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_DISCORD_BOT_TOKEN": "token",
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_OPENAI_API_KEY": "",
+                    "OPENAI_API_KEY": "",
                 },
                 clear=False,
             ):

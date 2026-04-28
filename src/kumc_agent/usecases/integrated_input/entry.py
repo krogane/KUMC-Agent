@@ -66,6 +66,7 @@ class IntegratedInputUsecase:
                 decision,
                 text=normalized.text,
                 source=normalized.source,
+                depth=normalized.depth,
                 access_is_admin=access.is_admin,
             )
             response = self._dispatch(normalized, decision, access)
@@ -180,6 +181,14 @@ class IntegratedInputUsecase:
                 handler=decision.route,
             )
         if decision.route == "comprehensive_agent":
+            if decision.risk in {"candidate_only", "approval_required"} and not access.is_admin:
+                denied = replace(decision, route="deny")
+                return IntegratedInputResponse(
+                    text="権限がないため、候補作成を含む操作は実行できません。",
+                    confidence="low",
+                    warnings=("permission denied",),
+                    metadata=self._decision_metadata(denied, handler="deny"),
+                )
             if self.comprehensive_agent is None:
                 return IntegratedInputResponse(
                     text="総合エージェントが未設定です。",
@@ -367,9 +376,14 @@ class IntegratedInputUsecase:
             detail_markdown=str(getattr(response, "detail_markdown", "")),
             citations=tuple(getattr(response, "citations", tuple())),
             confidence=str(getattr(response, "confidence", "low")),  # type: ignore[arg-type]
+            candidates=tuple(getattr(response, "candidates", tuple())),
             task_candidates=tuple(getattr(response, "task_candidates", tuple())),
+            task_change_candidates=tuple(getattr(response, "task_change_candidates", tuple())),
             event_candidates=tuple(getattr(response, "event_candidates", tuple())),
+            event_change_candidates=tuple(getattr(response, "event_change_candidates", tuple())),
+            schedule_candidates=tuple(getattr(response, "schedule_candidates", tuple())),
             server_operations=tuple(getattr(response, "server_operations", tuple())),
+            approvals=tuple(getattr(response, "approvals", tuple())),
             assets=tuple(getattr(response, "assets", tuple())),
             member_profiles=tuple(getattr(response, "member_profiles", tuple())),
             warnings=tuple(getattr(response, "warnings", tuple())),
@@ -423,7 +437,11 @@ class IntegratedInputUsecase:
             metadata.setdefault("mode", request.mode)
             metadata.setdefault("depth", request.depth)
         if decision is not None:
-            metadata.update(self._decision_metadata(decision, handler=str(metadata.get("handler") or "")))
+            for key, value in self._decision_metadata(
+                decision,
+                handler=str(metadata.get("handler") or ""),
+            ).items():
+                metadata.setdefault(key, value)
         payload = sanitize_payload(
             replace(response, metadata=metadata).to_payload()
         )
@@ -432,6 +450,7 @@ class IntegratedInputUsecase:
             detail_markdown=str(payload.get("detail_markdown", "")) if isinstance(payload, dict) else response.detail_markdown,
             citations=tuple(payload.get("citations", ())) if isinstance(payload, dict) else tuple(),
             confidence=str(payload.get("confidence", "low")) if isinstance(payload, dict) else response.confidence,  # type: ignore[arg-type]
+            candidates=tuple(payload.get("candidates", ())) if isinstance(payload, dict) else tuple(),
             task_candidates=tuple(payload.get("task_candidates", ())) if isinstance(payload, dict) else tuple(),
             task_change_candidates=tuple(payload.get("task_change_candidates", ())) if isinstance(payload, dict) else tuple(),
             task_approval_batches=tuple(payload.get("task_approval_batches", ())) if isinstance(payload, dict) else tuple(),

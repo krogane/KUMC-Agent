@@ -119,6 +119,36 @@ class AutonomousAgentSection:
 
 
 @dataclass(frozen=True)
+class ComprehensiveAgentLLMSection:
+    enabled: bool
+    provider: str
+    gemini_model: str
+    prompt_name: str
+    temperature: float
+    max_output_tokens: int
+    max_retries: int
+
+
+@dataclass(frozen=True)
+class ComprehensiveAgentBudgetSection:
+    max_steps: int
+    max_search_calls: int
+    max_read_chunks: int
+    max_replans: int
+    max_cost_usd: float
+    max_latency_seconds: float
+    require_citations: bool
+
+
+@dataclass(frozen=True)
+class ComprehensiveAgentSection:
+    enabled: bool
+    planner: ComprehensiveAgentLLMSection
+    verifier: ComprehensiveAgentLLMSection
+    budget: ComprehensiveAgentBudgetSection
+
+
+@dataclass(frozen=True)
 class TaskManagementSection:
     approval_batch_interval_days: int
     due_soon_notice_days: int
@@ -625,6 +655,7 @@ class RuntimeConfig:
     security: SecuritySection
     scheduler: SchedulerSection
     autonomous_agent: AutonomousAgentSection
+    comprehensive_agent: ComprehensiveAgentSection
     task_management: TaskManagementSection
     event_management: EventManagementSection
     infrastructure: InfrastructureSection

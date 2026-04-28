@@ -18,6 +18,9 @@ from kumc_agent.config.schema import (
     AutonomousAgentBudgetSection,
     AutonomousAgentLookaheadSection,
     AutonomousAgentSection,
+    ComprehensiveAgentBudgetSection,
+    ComprehensiveAgentLLMSection,
+    ComprehensiveAgentSection,
     DatabaseSection,
     EmbeddingSection,
     EventManagementSection,
@@ -81,6 +84,7 @@ MAIN_FILES = (
     "security.yaml",
     "scheduler.yaml",
     "autonomous_agent.yaml",
+    "comprehensive_agent.yaml",
     "features.yaml",
     "model.yaml",
     "rag.yaml",
@@ -390,6 +394,38 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     budget.setdefault("max_cost_usd", 0.50)
     budget.setdefault("max_latency_seconds", 120.0)
 
+    comprehensive_agent = updated.get("comprehensive_agent")
+    if not isinstance(comprehensive_agent, dict):
+        comprehensive_agent = {}
+        updated["comprehensive_agent"] = comprehensive_agent
+    comprehensive_agent.setdefault("enabled", True)
+    for key, prompt_name in (
+        ("planner", "comprehensive_agent_planner"),
+        ("verifier", "comprehensive_agent_verifier"),
+    ):
+        llm_section = comprehensive_agent.get(key)
+        if not isinstance(llm_section, dict):
+            llm_section = {}
+            comprehensive_agent[key] = llm_section
+        llm_section.setdefault("enabled", True)
+        llm_section.setdefault("provider", "gemini")
+        llm_section.setdefault("gemini_model", "")
+        llm_section.setdefault("prompt_name", prompt_name)
+        llm_section.setdefault("temperature", 0.0)
+        llm_section.setdefault("max_output_tokens", 1024)
+        llm_section.setdefault("max_retries", 2)
+    comprehensive_budget = comprehensive_agent.get("budget")
+    if not isinstance(comprehensive_budget, dict):
+        comprehensive_budget = {}
+        comprehensive_agent["budget"] = comprehensive_budget
+    comprehensive_budget.setdefault("max_steps", 10)
+    comprehensive_budget.setdefault("max_search_calls", 6)
+    comprehensive_budget.setdefault("max_read_chunks", 20)
+    comprehensive_budget.setdefault("max_replans", 2)
+    comprehensive_budget.setdefault("max_cost_usd", 0.75)
+    comprehensive_budget.setdefault("max_latency_seconds", 120.0)
+    comprehensive_budget.setdefault("require_citations", True)
+
     task_management = updated.get("task_management")
     if not isinstance(task_management, dict):
         task_management = {}
@@ -597,6 +633,7 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
             in {
                 "server_management.yaml",
                 "autonomous_agent.yaml",
+                "comprehensive_agent.yaml",
                 "event_management.yaml",
                 "task_management.yaml",
             }
@@ -632,6 +669,7 @@ def _to_runtime_config(
     security = merged["security"]
     scheduler = merged["scheduler"]
     autonomous_agent = merged.get("autonomous_agent", {})
+    comprehensive_agent = merged.get("comprehensive_agent", {})
     task_management = merged.get("task_management", {})
     event_management = merged.get("event_management", {})
     infrastructure = merged.get("infrastructure", {})
@@ -926,6 +964,64 @@ def _to_runtime_config(
                 ),
                 max_latency_seconds=float(
                     (autonomous_agent.get("budget") or {}).get("max_latency_seconds", 120.0)
+                ),
+            ),
+        ),
+        comprehensive_agent=ComprehensiveAgentSection(
+            enabled=bool(comprehensive_agent.get("enabled", True)),
+            planner=ComprehensiveAgentLLMSection(
+                enabled=bool((comprehensive_agent.get("planner") or {}).get("enabled", True)),
+                provider=str((comprehensive_agent.get("planner") or {}).get("provider", "gemini")),
+                gemini_model=str(
+                    (comprehensive_agent.get("planner") or {}).get("gemini_model")
+                    or providers["llm"]["gemini_model"]
+                ),
+                prompt_name=str(
+                    (comprehensive_agent.get("planner") or {}).get(
+                        "prompt_name", "comprehensive_agent_planner"
+                    )
+                ),
+                temperature=float((comprehensive_agent.get("planner") or {}).get("temperature", 0.0)),
+                max_output_tokens=int(
+                    (comprehensive_agent.get("planner") or {}).get("max_output_tokens", 1024)
+                ),
+                max_retries=int((comprehensive_agent.get("planner") or {}).get("max_retries", 2)),
+            ),
+            verifier=ComprehensiveAgentLLMSection(
+                enabled=bool((comprehensive_agent.get("verifier") or {}).get("enabled", True)),
+                provider=str((comprehensive_agent.get("verifier") or {}).get("provider", "gemini")),
+                gemini_model=str(
+                    (comprehensive_agent.get("verifier") or {}).get("gemini_model")
+                    or providers["llm"]["gemini_model"]
+                ),
+                prompt_name=str(
+                    (comprehensive_agent.get("verifier") or {}).get(
+                        "prompt_name", "comprehensive_agent_verifier"
+                    )
+                ),
+                temperature=float((comprehensive_agent.get("verifier") or {}).get("temperature", 0.0)),
+                max_output_tokens=int(
+                    (comprehensive_agent.get("verifier") or {}).get("max_output_tokens", 1024)
+                ),
+                max_retries=int((comprehensive_agent.get("verifier") or {}).get("max_retries", 2)),
+            ),
+            budget=ComprehensiveAgentBudgetSection(
+                max_steps=int((comprehensive_agent.get("budget") or {}).get("max_steps", 10)),
+                max_search_calls=int(
+                    (comprehensive_agent.get("budget") or {}).get("max_search_calls", 6)
+                ),
+                max_read_chunks=int(
+                    (comprehensive_agent.get("budget") or {}).get("max_read_chunks", 20)
+                ),
+                max_replans=int((comprehensive_agent.get("budget") or {}).get("max_replans", 2)),
+                max_cost_usd=float(
+                    (comprehensive_agent.get("budget") or {}).get("max_cost_usd", 0.75)
+                ),
+                max_latency_seconds=float(
+                    (comprehensive_agent.get("budget") or {}).get("max_latency_seconds", 120.0)
+                ),
+                require_citations=bool(
+                    (comprehensive_agent.get("budget") or {}).get("require_citations", True)
                 ),
             ),
         ),

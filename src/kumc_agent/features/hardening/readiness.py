@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+from typing import Iterable
 
 from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.domain.models.hardening import (
@@ -62,7 +63,11 @@ class ProductionReadinessService:
         total_cost = 0.0
         step_count = 0
         tool_counts: dict[str, int] = {}
+        tool_successes: dict[str, int] = {}
         tool_failures: dict[str, int] = {}
+        state_counts: dict[str, int] = {}
+        steps_by_run: dict[str, int] = {}
+        plan_steps_by_run: dict[str, int] = {}
         if agent_steps_path.exists():
             for line in agent_steps_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -70,11 +75,21 @@ class ProductionReadinessService:
                 payload = json.loads(line)
                 total_cost += float(payload.get("cost_usd") or 0.0)
                 step_count += 1
+                run_id = str(payload.get("run_id") or "")
+                if run_id:
+                    steps_by_run[run_id] = steps_by_run.get(run_id, 0) + 1
+                state = str(payload.get("state") or "unknown")
+                state_counts[state] = state_counts.get(state, 0) + 1
+                if run_id and state == "PLAN":
+                    plan_steps_by_run[run_id] = plan_steps_by_run.get(run_id, 0) + 1
                 output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
                 tool_name = str(output.get("tool_name") or "")
                 if tool_name:
                     tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
-                    if str(payload.get("status") or "") in {"failed", "insufficient_input"}:
+                    status = str(payload.get("status") or "")
+                    if status == "succeeded":
+                        tool_successes[tool_name] = tool_successes.get(tool_name, 0) + 1
+                    if status in {"failed", "insufficient_input"}:
                         tool_failures[tool_name] = tool_failures.get(tool_name, 0) + 1
         latest_runs: dict[str, dict[str, object]] = {}
         if agent_runs_path.exists():
@@ -85,9 +100,22 @@ class ProductionReadinessService:
                 if isinstance(payload, dict) and payload.get("id"):
                     latest_runs[str(payload["id"])] = payload
         status_counts: dict[str, int] = {}
+        latencies: list[float] = []
         for payload in latest_runs.values():
             status = str(payload.get("status") or "unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
+            latency = _latency_seconds(payload)
+            if latency is not None:
+                latencies.append(latency)
+        run_count = len(latest_runs)
+        step_counts = [
+            steps_by_run.get(run_id, 0)
+            for run_id in latest_runs
+        ]
+        replan_counts = [
+            max(0, plan_steps_by_run.get(run_id, 0) - 1)
+            for run_id in latest_runs
+        ]
         warnings = self.cost_cap.check(
             projected_daily_usd=total_cost,
             projected_run_usd=0.0,
@@ -95,10 +123,31 @@ class ProductionReadinessService:
         return {
             "total_agentic_cost_usd": round(total_cost, 4),
             "agent_step_count": step_count,
-            "agent_run_count": len(latest_runs),
+            "agent_run_count": run_count,
             "agent_run_status_counts": status_counts,
+            "agent_run_status_rates": _rate_dict(status_counts, run_count),
+            "agent_success_rate": _rate(status_counts.get("succeeded", 0), run_count),
+            "agent_insufficient_evidence_rate": _rate(
+                status_counts.get("insufficient_evidence", 0),
+                run_count,
+            ),
+            "agent_needs_approval_rate": _rate(status_counts.get("needs_approval", 0), run_count),
+            "agent_state_counts": state_counts,
+            "agent_average_step_count": _average(step_counts),
+            "agent_average_latency_seconds": _average(latencies),
+            "agent_replan_count": sum(replan_counts),
+            "agent_average_replan_count": _average(replan_counts),
             "agent_tool_counts": tool_counts,
+            "agent_tool_success_counts": tool_successes,
             "agent_tool_failure_counts": tool_failures,
+            "agent_tool_success_rates": {
+                tool_name: _rate(tool_successes.get(tool_name, 0), count)
+                for tool_name, count in sorted(tool_counts.items())
+            },
+            "agent_tool_failure_rates": {
+                tool_name: _rate(tool_failures.get(tool_name, 0), count)
+                for tool_name, count in sorted(tool_counts.items())
+            },
             "daily_cap_usd": self.cost_cap.daily_usd_cap,
             "per_run_cap_usd": self.cost_cap.per_run_usd_cap,
             "warnings": list(warnings),
@@ -218,3 +267,45 @@ def _summary(status: str, checks: tuple[ProductionReadinessCheck, ...]) -> str:
     for check in checks:
         counts[check.status] = counts.get(check.status, 0) + 1
     return f"{status}: " + ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
+
+
+def _rate_dict(counts: dict[str, int], denominator: int) -> dict[str, float]:
+    return {
+        key: _rate(value, denominator)
+        for key, value in sorted(counts.items())
+    }
+
+
+def _average(values: Iterable[float | int]) -> float:
+    normalized = [float(value) for value in values if value is not None]
+    if not normalized:
+        return 0.0
+    return round(sum(normalized) / len(normalized), 4)
+
+
+def _latency_seconds(payload: dict[str, object]) -> float | None:
+    created_at = _parse_datetime(payload.get("created_at"))
+    updated_at = _parse_datetime(payload.get("updated_at"))
+    if not created_at or not updated_at:
+        return None
+    return max(0.0, (updated_at - created_at).total_seconds())
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None

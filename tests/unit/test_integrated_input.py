@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.domain.models.agentic import AgentRun, ComprehensiveAgentResponse
+from kumc_agent.domain.models.agentic import ComprehensiveAgentResponse
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.integrated_input import (
     IntegratedInputDecision,
@@ -86,7 +86,6 @@ class FakeAgent:
             detail_markdown="agent detail",
             citations=tuple(),
             confidence="medium",
-            run=AgentRun(id="run-1", query=request.query, status="succeeded"),
             metadata={"agent_run_id": "run-1", "raw": "hidden"},
         )
 
@@ -129,6 +128,14 @@ class IntegratedInputTests(unittest.TestCase):
             source="all",
         )
         self.assertEqual(escalated.route, "comprehensive_agent")
+
+        deep_rag = policy.apply(
+            IntegratedInputDecision(route="circle_rag", required_features=("circle_rag",)),
+            text="KUMCの活動時間を詳しく調べて",
+            source="all",
+            depth="deep",
+        )
+        self.assertEqual(deep_rag.route, "comprehensive_agent")
 
     def test_usecase_routes_rag_with_same_access_context(self) -> None:
         ask = FakeAskService([])
@@ -258,11 +265,35 @@ class IntegratedInputTests(unittest.TestCase):
             ),  # type: ignore[arg-type]
         )
 
-        response = usecase.execute(IntegratedInputRequest(text="担当候補を探してタスク候補を作って"))
+        response = usecase.execute(
+            IntegratedInputRequest(text="担当候補を探してタスク候補を作って", is_admin=True)
+        )
 
         self.assertEqual(response.metadata["route"], "comprehensive_agent")
         self.assertEqual(agent.requests[0].required_features, ("task_management", "member_search"))
         self.assertEqual(response.metadata["agent_run_id"], "run-1")
+
+    def test_usecase_denies_non_admin_comprehensive_candidate_creation(self) -> None:
+        agent = FakeAgent([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=FakeWorkflowService([]),
+            comprehensive_agent=agent,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="comprehensive_agent",
+                    required_features=("task_management", "member_search"),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(
+            IntegratedInputRequest(text="担当候補を探してタスク候補を作って", is_admin=False)
+        )
+
+        self.assertEqual(response.metadata["route"], "deny")
+        self.assertEqual(agent.requests, [])
 
     def test_sanitizer_removes_secrets_context_and_image_paths(self) -> None:
         payload = sanitize_payload(

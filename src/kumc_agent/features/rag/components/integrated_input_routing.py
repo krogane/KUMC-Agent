@@ -258,6 +258,7 @@ class IntegratedRoutingPolicy:
         *,
         text: str,
         source: str,
+        depth: str = "normal",
         access_is_admin: bool = False,
     ) -> IntegratedInputDecision:
         route = decision.route
@@ -286,6 +287,8 @@ class IntegratedRoutingPolicy:
             route = "server_management"
             risk = "approval_required"
             required = _merge_required(required, "server_management")
+        if depth == "deep" and route in {"circle_rag", "minecraft_wiki_rag"} and len(required) == 1:
+            route = "comprehensive_agent"
         if len(required) >= 2:
             route = "comprehensive_agent"
         if risk == "admin_only" and not access_is_admin:

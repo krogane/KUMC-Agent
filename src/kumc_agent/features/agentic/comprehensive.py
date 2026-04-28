@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
+from datetime import UTC, datetime, timedelta
+import json
+from pathlib import Path
 import re
 from time import monotonic
 from typing import Any
@@ -19,9 +22,26 @@ from kumc_agent.domain.models.agentic import (
     VerificationResult,
 )
 from kumc_agent.domain.models.retrieval import Citation, RetrievalQuery
-from kumc_agent.domain.models.workflow import WorkRequest, WorkResponse
+from kumc_agent.domain.models.workflow import (
+    ApprovalRecord,
+    EventApprovalBatch,
+    TaskApprovalBatch,
+    WorkRequest,
+    WorkResponse,
+)
 from kumc_agent.features.agentic.tools import ToolSchemaRegistry
 from kumc_agent.infra.agentic.repository import AgentTraceRepository
+from kumc_agent.utils.hashing import stable_hash
+
+
+@dataclass(frozen=True)
+class ComprehensiveLLMConfig:
+    enabled: bool = False
+    prompt_name: str = ""
+    prompts_dir: Path | None = None
+    temperature: float = 0.0
+    max_output_tokens: int = 1024
+    max_retries: int = 1
 
 
 _READ_TOOLS = {
@@ -48,20 +68,36 @@ class ComprehensiveAgentService:
         repository: AgentTraceRepository,
         workflow_service: object | None = None,
         registry: ToolSchemaRegistry | None = None,
+        planner_llm: object | None = None,
+        verifier_llm: object | None = None,
+        planner_config: ComprehensiveLLMConfig | None = None,
+        verifier_config: ComprehensiveLLMConfig | None = None,
+        default_budget: AgentBudget | None = None,
     ) -> None:
         self.ask_service = ask_service
         self.repository = repository
         self.workflow_service = workflow_service
         self.registry = registry or ToolSchemaRegistry()
-        self.planner = ComprehensiveAgentPlanner(registry=self.registry)
+        self.default_budget = default_budget
+        self.planner = ComprehensiveAgentPlanner(
+            registry=self.registry,
+            llm=planner_llm,
+            config=planner_config or ComprehensiveLLMConfig(),
+        )
         self.adapters = ComprehensiveToolAdapters(
             ask_service=ask_service,
             workflow_service=workflow_service,
         )
-        self.verifier = ComprehensiveAgentVerifier(registry=self.registry)
+        self.verifier = ComprehensiveAgentVerifier(
+            registry=self.registry,
+            llm=verifier_llm,
+            config=verifier_config or ComprehensiveLLMConfig(),
+        )
         self.answer_builder = ComprehensiveAgentAnswerBuilder()
 
     def run(self, request: ComprehensiveAgentRequest) -> ComprehensiveAgentResponse:
+        if self.default_budget is not None:
+            request = replace(request, budget=_merge_budget(self.default_budget, request.budget))
         started = monotonic()
         run = self.repository.save_run(
             AgentRun(
@@ -109,6 +145,26 @@ class ComprehensiveAgentService:
         plan = self.planner.plan(request, previous_results=tuple(), previous_verification=None)
         add_step("PLAN", input_payload={"query": request.query}, output_payload=_plan_payload(plan))
 
+        if plan.direct_route:
+            answer = f"単一機能で処理できるため、`{plan.direct_route}` へ直接ルーティングしてください。"
+            run = self._finish_run(
+                run,
+                steps=steps,
+                status="direct_route",
+                answer=answer,
+                confidence="low",
+                citations=tuple(),
+                metadata={"direct_route": plan.direct_route},
+            )
+            return ComprehensiveAgentResponse(
+                text=answer,
+                detail_markdown=self.answer_builder.detail_markdown(run, plan, tuple(), None),
+                citations=tuple(),
+                confidence="low",
+                warnings=tuple(warnings),
+                metadata={"agent_run_id": run.id, "direct_route": plan.direct_route},
+            )
+
         if plan.needs_clarification:
             answer = plan.clarification_question or "追加情報を確認してください。"
             run = self._finish_run(
@@ -125,9 +181,29 @@ class ComprehensiveAgentService:
                 detail_markdown=self.answer_builder.detail_markdown(run, plan, tuple(), None),
                 citations=tuple(),
                 confidence="low",
-                run=run,
                 warnings=tuple(warnings),
                 metadata={"agent_run_id": run.id},
+            )
+
+        if any(not self.registry.get(tool).read_only for tool in plan.required_tools) and not request.access.is_admin:
+            answer = "権限がないため、候補作成を含む総合エージェント依頼は実行できません。"
+            warnings.append("permission denied")
+            run = self._finish_run(
+                run,
+                steps=steps,
+                status="failed",
+                answer=answer,
+                confidence="low",
+                citations=tuple(),
+                metadata={"permission_denied": True},
+            )
+            return ComprehensiveAgentResponse(
+                text=answer,
+                detail_markdown=self.answer_builder.detail_markdown(run, plan, tuple(), None),
+                citations=tuple(),
+                confidence="low",
+                warnings=tuple(warnings),
+                metadata={"agent_run_id": run.id, "permission_denied": True},
             )
 
         while True:
@@ -139,8 +215,8 @@ class ComprehensiveAgentService:
                 if not schema.read_only and not request.budget.allow_write_tools:
                     result = AgentToolResult(
                         tool_name=tool_call.tool_name,
-                        status="needs_approval",
-                        text="書き込み系toolは無効です。候補作成予定のみを記録しました。",
+                        status="failed",
+                        text="候補作成toolは許可されていないため実行しませんでした。",
                         warnings=("allow_write_tools=False のため候補作成は実行していません。",),
                         metadata={"planned_input": tool_call.input},
                     )
@@ -248,10 +324,14 @@ class ComprehensiveAgentService:
             detail_markdown=detail,
             citations=tuple(citations),
             confidence=confidence,
-            run=run,
+            candidates=tuple(_all_candidates(tool_results)),
             task_candidates=tuple(_candidate_dicts(tool_results, "task")),
+            task_change_candidates=tuple(_candidate_dicts(tool_results, "task_change")),
             event_candidates=tuple(_candidate_dicts(tool_results, "event")),
+            event_change_candidates=tuple(_candidate_dicts(tool_results, "event_change")),
+            schedule_candidates=tuple(_candidate_dicts(tool_results, "schedule")),
             server_operations=tuple(_candidate_dicts(tool_results, "server_operation")),
+            approvals=tuple(_metadata_items(tool_results, "approvals")),
             assets=tuple(_metadata_items(tool_results, "assets")),
             member_profiles=tuple(_metadata_items(tool_results, "member_profiles")),
             warnings=tuple(dict.fromkeys([*warnings, *(w for result in tool_results for w in result.warnings)])),
@@ -283,8 +363,16 @@ class ComprehensiveAgentService:
 
 
 class ComprehensiveAgentPlanner:
-    def __init__(self, *, registry: ToolSchemaRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        registry: ToolSchemaRegistry,
+        llm: object | None = None,
+        config: ComprehensiveLLMConfig | None = None,
+    ) -> None:
         self.registry = registry
+        self.llm = llm
+        self.config = config or ComprehensiveLLMConfig()
 
     def plan(
         self,
@@ -299,19 +387,52 @@ class ComprehensiveAgentPlanner:
                 needs_clarification=True,
                 clarification_question="何について調べるか、もう少し具体的に指定してください。",
             )
+        llm_plan = self._plan_with_llm(
+            request,
+            previous_results=previous_results,
+            previous_verification=previous_verification,
+        )
+        if llm_plan is not None:
+            return llm_plan
+        return self._fallback_plan(
+            request,
+            previous_results=previous_results,
+            previous_verification=previous_verification,
+        )
+
+    def _fallback_plan(
+        self,
+        request: ComprehensiveAgentRequest,
+        *,
+        previous_results: tuple[AgentToolResult, ...],
+        previous_verification: VerificationResult | None,
+    ) -> AgentPlan:
+        query = request.query.strip()
         features = list(request.required_features or detect_required_features(query, request.source_filter))
         if request.metadata.get("depth") == "deep" and "circle_rag" not in features:
             features.insert(0, "circle_rag")
         if not features:
             features.append("circle_rag")
+        direct_route = ""
+        if len(features) == 1 and request.metadata.get("depth") != "deep" and not previous_verification:
+            direct_route = _direct_route_for_feature(features[0])
+            if direct_route:
+                return AgentPlan(
+                    required_tools=tuple(),
+                    direct_route=direct_route,
+                    metadata={"required_features": features, "planner": "fallback"},
+                )
         tools = self._tools_for_features(features, query=query)
         if previous_verification and previous_verification.missing:
             if "circle_rag_search" not in tools:
                 tools.insert(0, "circle_rag_search")
+        replan_suffix = ""
+        if previous_verification and previous_verification.missing:
+            replan_suffix = " " + " ".join(previous_verification.missing[:2])
         tool_sequence = tuple(
             ToolCallPlan(
                 tool_name=tool,
-                input=self._tool_input(tool, request),
+                input=self._tool_input(tool, request, replan_suffix=replan_suffix),
                 reason=f"{tool} is required for {', '.join(features)}",
                 read_only=self.registry.get(tool).read_only,
                 side_effect_boundary=(
@@ -338,7 +459,163 @@ class ComprehensiveAgentPlanner:
             side_effect_boundary=boundary,
             retry_policy={"max_replans": request.budget.max_replans},
             answer_requirements=("結論", "根拠", "使用した機能", "未確認事項", "承認待ち候補"),
-            metadata={"required_features": features},
+            metadata={
+                "required_features": features,
+                "planner": "fallback",
+                "previous_result_count": len(previous_results),
+            },
+        )
+
+    def _plan_with_llm(
+        self,
+        request: ComprehensiveAgentRequest,
+        *,
+        previous_results: tuple[AgentToolResult, ...],
+        previous_verification: VerificationResult | None,
+    ) -> AgentPlan | None:
+        if not self.config.enabled or self.llm is None:
+            return None
+        system_prompt = _read_prompt(
+            self.config.prompts_dir,
+            self.config.prompt_name,
+            fallback="Return comprehensive agent planning JSON only.",
+        )
+        payload = {
+            "query": request.query,
+            "source_filter": request.source_filter,
+            "required_features": list(request.required_features),
+            "source_filters": request.source_filters,
+            "attribute_filters": sanitize_payload(request.attribute_filters, limit=800),
+            "risk": request.risk,
+            "metadata": sanitize_payload(request.metadata, limit=800),
+            "budget": asdict(request.budget),
+            "available_tools": [_dump_item(schema) for schema in self.registry.list()],
+            "previous_results": [_tool_result_payload(result) for result in previous_results[-8:]],
+            "previous_verification": (
+                _verification_payload(previous_verification)
+                if previous_verification is not None
+                else None
+            ),
+        }
+        for _ in range(max(1, self.config.max_retries)):
+            raw = _llm_generate(
+                self.llm,
+                system_prompt=system_prompt,
+                user_payload=payload,
+                temperature=self.config.temperature,
+                max_output_tokens=self.config.max_output_tokens,
+            )
+            parsed = _load_json_object(raw)
+            if parsed is None:
+                continue
+            plan = self._plan_from_payload(parsed, request=request)
+            if plan is not None:
+                return plan
+        return None
+
+    def _plan_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        request: ComprehensiveAgentRequest,
+    ) -> AgentPlan | None:
+        if bool(payload.get("needs_clarification")):
+            return AgentPlan(
+                needs_clarification=True,
+                clarification_question=str(payload.get("clarification_question") or "追加情報を確認してください。"),
+                metadata={"planner": "llm"},
+            )
+        direct_route = str(payload.get("direct_route") or "")
+        if direct_route and direct_route in {
+            "circle_rag",
+            "minecraft_wiki_rag",
+            "member_search",
+            "image_search",
+            "task_management",
+            "event_management",
+            "server_management",
+        }:
+            return AgentPlan(direct_route=direct_route, metadata={"planner": "llm"})
+        calls: list[ToolCallPlan] = []
+        for raw_call in payload.get("tool_sequence") or []:
+            if not isinstance(raw_call, dict):
+                continue
+            tool_name = str(raw_call.get("tool_name") or "")
+            try:
+                schema = self.registry.get(tool_name)
+            except KeyError:
+                continue
+            call_input = raw_call.get("input") if isinstance(raw_call.get("input"), dict) else {}
+            calls.append(
+                ToolCallPlan(
+                    tool_name=tool_name,
+                    input=sanitize_payload(call_input, limit=1200),
+                    reason=str(raw_call.get("reason") or ""),
+                    read_only=schema.read_only,
+                    side_effect_boundary=str(
+                        raw_call.get("side_effect_boundary")
+                        or ("read_only" if schema.read_only else "candidate_only")
+                    ),
+                )
+            )
+        if not calls:
+            return None
+        required_tools = tuple(dict.fromkeys(str(tool) for tool in payload.get("required_tools") or ()))
+        if not required_tools:
+            required_tools = tuple(dict.fromkeys(call.tool_name for call in calls))
+        required_tools = tuple(tool for tool in required_tools if tool in {schema.name for schema in self.registry.list()})
+        if not required_tools:
+            required_tools = tuple(dict.fromkeys(call.tool_name for call in calls))
+        tasks: list[AgentTask] = []
+        for index, raw_task in enumerate(payload.get("tasks") or []):
+            if not isinstance(raw_task, dict):
+                continue
+            tool_name = str(raw_task.get("tool_name") or (calls[min(index, len(calls) - 1)].tool_name))
+            if tool_name not in required_tools:
+                continue
+            task_input = raw_task.get("input") if isinstance(raw_task.get("input"), dict) else {}
+            criteria = raw_task.get("success_criteria") if isinstance(raw_task.get("success_criteria"), list) else []
+            tasks.append(
+                AgentTask(
+                    id=str(raw_task.get("id") or f"task-{index + 1}"),
+                    description=str(raw_task.get("description") or f"{tool_name} を実行する"),
+                    tool_name=tool_name,
+                    input=sanitize_payload(task_input, limit=1200),
+                    success_criteria=tuple(str(item) for item in criteria),
+                )
+            )
+        if not tasks:
+            tasks = [
+                AgentTask(
+                    id=f"task-{index + 1}",
+                    description=f"{call.tool_name} を実行する",
+                    tool_name=call.tool_name,
+                    input=dict(call.input),
+                    success_criteria=("tool result is available",),
+                )
+                for index, call in enumerate(calls)
+            ]
+        success_criteria = payload.get("success_criteria")
+        answer_requirements = payload.get("answer_requirements")
+        return AgentPlan(
+            tasks=tuple(tasks),
+            required_tools=required_tools,
+            tool_sequence=tuple(calls),
+            success_criteria=tuple(str(item) for item in success_criteria) if isinstance(success_criteria, list) else self._success_criteria(list(required_tools)),
+            side_effect_boundary=str(
+                payload.get("side_effect_boundary")
+                or ("read_only" if all(self.registry.get(tool).read_only for tool in required_tools) else "candidate_only")
+            ),
+            retry_policy=dict(payload.get("retry_policy") or {"max_replans": request.budget.max_replans}),
+            answer_requirements=(
+                tuple(str(item) for item in answer_requirements)
+                if isinstance(answer_requirements, list)
+                else ("結論", "根拠", "使用した機能", "未確認事項", "承認待ち候補")
+            ),
+            metadata={
+                **(dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}),
+                "planner": "llm",
+            },
         )
 
     def _tools_for_features(self, features: list[str], *, query: str) -> list[str]:
@@ -361,10 +638,16 @@ class ComprehensiveAgentPlanner:
                 tools.append("server_operation_candidate_create")
         return list(dict.fromkeys(tools))
 
-    def _tool_input(self, tool: str, request: ComprehensiveAgentRequest) -> dict[str, object]:
+    def _tool_input(
+        self,
+        tool: str,
+        request: ComprehensiveAgentRequest,
+        *,
+        replan_suffix: str = "",
+    ) -> dict[str, object]:
         if tool.endswith("_candidate_create") or tool == "approval_candidate_create":
             return {"instruction": request.query, "target": request.attribute_filters.get("target", "")}
-        return {"query": request.query, "source_filter": request.source_filter}
+        return {"query": (request.query + replan_suffix).strip(), "source_filter": request.source_filter}
 
     @staticmethod
     def _success_criteria(tools: list[str]) -> tuple[str, ...]:
@@ -387,6 +670,8 @@ class ComprehensiveToolAdapters:
                 return self._rag(call, request=request, source_filter=request.source_filter or "all")
             if call.tool_name == "minecraft_wiki_rag_search":
                 return self._rag(call, request=request, source_filter="minecraft_wiki")
+            if call.tool_name == "approval_candidate_create":
+                return self._approval_candidate_create(call, request=request)
             return self._workflow(call, request=request)
         except Exception as exc:  # pragma: no cover - defensive boundary
             return AgentToolResult(
@@ -435,18 +720,212 @@ class ComprehensiveToolAdapters:
                 work_type=work_type,
                 instruction=str(call.input.get("instruction") or call.input.get("query") or request.query),
                 target=str(call.input.get("target") or ""),
-                source_filter=_tool_source_filters(call.input, request=request),
                 access=request.access,
             )
         )
-        return _tool_result_from_work_response(call.tool_name, response)
+        result = _tool_result_from_work_response(call.tool_name, response)
+        if call.tool_name in {
+            "task_candidate_create",
+            "event_candidate_create",
+            "server_operation_candidate_create",
+        } and result.candidates:
+            result = self._attach_approval_artifacts(result, response, request=request, tool_name=call.tool_name)
+        return result
+
+    def _approval_candidate_create(
+        self,
+        call: ToolCallPlan,
+        *,
+        request: ComprehensiveAgentRequest,
+    ) -> AgentToolResult:
+        if self.workflow_service is None:
+            return AgentToolResult(
+                tool_name=call.tool_name,
+                status="insufficient_input",
+                text="workflow service is not configured.",
+                warnings=("workflow service is required for this tool.",),
+            )
+        target_type = str(call.input.get("target_type") or call.input.get("type") or "").strip()
+        raw_ids = call.input.get("target_ids") or call.input.get("target_id") or call.input.get("id") or []
+        if isinstance(raw_ids, str):
+            target_ids = [raw_ids]
+        elif isinstance(raw_ids, list):
+            target_ids = [str(item) for item in raw_ids]
+        else:
+            target_ids = []
+        if not target_type or not target_ids:
+            return AgentToolResult(
+                tool_name=call.tool_name,
+                status="insufficient_input",
+                text="承認対象の target_type と target_id が不足しています。",
+                warnings=("approval target is missing.",),
+            )
+        artifacts = self._create_approval_records(
+            targets=[{"type": target_type, "id": target_id} for target_id in target_ids],
+            request=request,
+            source_tool=call.tool_name,
+        )
+        return AgentToolResult(
+            tool_name=call.tool_name,
+            status="needs_approval",
+            text=f"承認待ち対象を {len(target_ids)} 件作成しました。",
+            candidates=tuple({"type": "approval", "id": str(item.get("id") or ""), "target_type": target_type} for item in artifacts.get("approvals", [])),
+            metadata=artifacts,
+        )
+
+    def _attach_approval_artifacts(
+        self,
+        result: AgentToolResult,
+        response: WorkResponse,
+        *,
+        request: ComprehensiveAgentRequest,
+        tool_name: str,
+    ) -> AgentToolResult:
+        targets = _approval_targets(response)
+        artifacts = self._create_approval_records(
+            targets=targets,
+            request=request,
+            source_tool=tool_name,
+        )
+        artifacts.update(self._create_approval_batches(response, request=request, source_tool=tool_name))
+        metadata = {**result.metadata, **artifacts}
+        warnings = list(result.warnings)
+        warnings.extend(str(item) for item in artifacts.get("warnings", []) if isinstance(item, str))
+        return replace(
+            result,
+            status="needs_approval",
+            text=sanitize_text(
+                result.text + "\n承認待ちrecord/batchを自動作成しました。",
+                limit=1200,
+            ),
+            warnings=tuple(dict.fromkeys(warnings)),
+            metadata=sanitize_payload(metadata, limit=1200),
+        )
+
+    def _create_approval_records(
+        self,
+        *,
+        targets: list[dict[str, str]],
+        request: ComprehensiveAgentRequest,
+        source_tool: str,
+    ) -> dict[str, Any]:
+        repository = getattr(self.workflow_service, "repository", None)
+        if repository is None:
+            return {"approval_targets": targets, "warnings": ["workflow repository is not available."]}
+        approvals: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        actor_id = request.access.user_id or "agent"
+        for target in targets:
+            target_type = str(target.get("type") or "")
+            target_id = str(target.get("id") or "")
+            if not target_type or not target_id:
+                continue
+            record = ApprovalRecord(
+                id=stable_hash(f"approval-request:{source_tool}:{target_type}:{target_id}")[:32],
+                target_type=target_type,
+                target_id=target_id,
+                action="requested",
+                actor_id=actor_id,
+                comment="comprehensive_agent auto approval request",
+            )
+            try:
+                stored = repository.save_approval(record)
+                approvals.append(_dump_item(stored))
+            except Exception as exc:  # pragma: no cover - repository-specific
+                warnings.append(f"approval record creation failed: {type(exc).__name__}")
+        return {"approval_targets": targets, "approvals": approvals, "warnings": warnings}
+
+    def _create_approval_batches(
+        self,
+        response: WorkResponse,
+        *,
+        request: ComprehensiveAgentRequest,
+        source_tool: str,
+    ) -> dict[str, Any]:
+        repository = getattr(self.workflow_service, "repository", None)
+        if repository is None:
+            return {}
+        payload: dict[str, Any] = {}
+        warnings: list[str] = []
+        task_ids = tuple(candidate.id for candidate in response.task_candidates)
+        task_change_ids = tuple(candidate.id for candidate in response.task_change_candidates)
+        if task_ids or task_change_ids:
+            batch = TaskApprovalBatch(
+                id=stable_hash(f"task-batch:{source_tool}:{':'.join(task_ids)}:{':'.join(task_change_ids)}")[:32],
+                candidate_ids=task_ids,
+                change_candidate_ids=task_change_ids,
+                period_start=datetime.now(UTC) - timedelta(days=1),
+                period_end=datetime.now(UTC),
+                status="pending",
+                metadata={"source": "comprehensive_agent", "auto_created": True},
+            )
+            try:
+                payload["task_approval_batches"] = [_dump_item(repository.save_task_approval_batch(batch))]
+            except Exception as exc:  # pragma: no cover - repository-specific
+                warnings.append(f"task approval batch creation failed: {type(exc).__name__}")
+        event_ids = tuple(candidate.id for candidate in response.event_candidates)
+        event_change_ids = tuple(candidate.id for candidate in response.event_change_candidates)
+        if event_ids or event_change_ids:
+            batch = EventApprovalBatch(
+                id=stable_hash(f"event-batch:{source_tool}:{':'.join(event_ids)}:{':'.join(event_change_ids)}")[:32],
+                candidate_ids=event_ids,
+                change_candidate_ids=event_change_ids,
+                period_start=datetime.now(UTC) - timedelta(days=1),
+                period_end=datetime.now(UTC),
+                status="pending",
+                metadata={"source": "comprehensive_agent", "auto_created": True},
+            )
+            try:
+                payload["event_approval_batches"] = [_dump_item(repository.save_event_approval_batch(batch))]
+            except Exception as exc:  # pragma: no cover - repository-specific
+                warnings.append(f"event approval batch creation failed: {type(exc).__name__}")
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
 
 class ComprehensiveAgentVerifier:
-    def __init__(self, *, registry: ToolSchemaRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        registry: ToolSchemaRegistry,
+        llm: object | None = None,
+        config: ComprehensiveLLMConfig | None = None,
+    ) -> None:
         self.registry = registry
+        self.llm = llm
+        self.config = config or ComprehensiveLLMConfig()
 
     def verify(
+        self,
+        *,
+        plan: AgentPlan,
+        results: tuple[AgentToolResult, ...],
+        budget: AgentBudget,
+    ) -> VerificationResult:
+        deterministic = self._deterministic_verify(plan=plan, results=results, budget=budget)
+        llm_result = self._verify_with_llm(plan=plan, results=results, deterministic=deterministic)
+        if llm_result is None:
+            return deterministic
+        missing = tuple(dict.fromkeys([*deterministic.missing, *llm_result.missing]))
+        conflicts = tuple(dict.fromkeys([*deterministic.conflicts, *llm_result.conflicts]))
+        warnings = tuple(dict.fromkeys([*deterministic.warnings, *llm_result.warnings]))
+        if conflicts:
+            status = "failed"
+        elif missing:
+            status = "needs_more_evidence"
+        else:
+            status = llm_result.status
+        return VerificationResult(
+            status=status,
+            satisfied=tuple(dict.fromkeys([*deterministic.satisfied, *llm_result.satisfied])),
+            missing=missing,
+            conflicts=conflicts,
+            warnings=warnings,
+            metadata={**deterministic.metadata, **llm_result.metadata, "verifier": "llm"},
+        )
+
+    def _deterministic_verify(
         self,
         *,
         plan: AgentPlan,
@@ -465,19 +944,74 @@ class ComprehensiveAgentVerifier:
                 missing.append("引用可能な根拠")
         for result in results:
             warnings.extend(result.warnings)
+            forbidden_paths = _find_forbidden_payload_paths(result.metadata)
+            if forbidden_paths:
+                conflicts.append(f"{result.tool_name} metadata contains forbidden payload keys: {', '.join(forbidden_paths[:5])}")
+            if _contains_unmasked_secret(result.text) or _contains_unmasked_secret(json.dumps(result.candidates, ensure_ascii=False, default=str)):
+                conflicts.append(f"{result.tool_name} output may contain unmasked secret")
             if result.tool_name in _WRITE_TOOLS:
                 for candidate in result.candidates:
                     if str(candidate.get("status") or "").lower() in {"done", "completed", "executed"}:
                         conflicts.append(f"{result.tool_name} returned executed candidate {candidate.get('id')}")
                 if result.metadata.get("execution_allowed") is True:
                     conflicts.append(f"{result.tool_name} attempted execution before approval")
+                if result.metadata.get("tasks") or result.metadata.get("events") or result.metadata.get("schedules"):
+                    conflicts.append(f"{result.tool_name} returned master records before approval")
+                if result.candidates and not result.metadata.get("approvals") and not (
+                    result.metadata.get("task_approval_batches") or result.metadata.get("event_approval_batches")
+                ):
+                    missing.append(f"{result.tool_name} の承認recordまたはbatch")
+        conflicts.extend(_semantic_field_conflicts(results))
         if conflicts:
-            return VerificationResult(status="failed", missing=tuple(missing), conflicts=tuple(conflicts), warnings=tuple(warnings))
+            return VerificationResult(status="failed", missing=tuple(dict.fromkeys(missing)), conflicts=tuple(dict.fromkeys(conflicts)), warnings=tuple(dict.fromkeys(warnings)), metadata={"verifier": "deterministic"})
         if missing:
-            return VerificationResult(status="needs_more_evidence", missing=tuple(dict.fromkeys(missing)), warnings=tuple(warnings))
+            return VerificationResult(status="needs_more_evidence", missing=tuple(dict.fromkeys(missing)), warnings=tuple(dict.fromkeys(warnings)), metadata={"verifier": "deterministic"})
         if any(result.status == "needs_approval" or result.candidates for result in results):
-            return VerificationResult(status="needs_approval", satisfied=tuple(plan.success_criteria), warnings=tuple(warnings))
-        return VerificationResult(status="succeeded", satisfied=tuple(plan.success_criteria), warnings=tuple(warnings))
+            return VerificationResult(status="needs_approval", satisfied=tuple(plan.success_criteria), warnings=tuple(dict.fromkeys(warnings)), metadata={"verifier": "deterministic"})
+        return VerificationResult(status="succeeded", satisfied=tuple(plan.success_criteria), warnings=tuple(dict.fromkeys(warnings)), metadata={"verifier": "deterministic"})
+
+    def _verify_with_llm(
+        self,
+        *,
+        plan: AgentPlan,
+        results: tuple[AgentToolResult, ...],
+        deterministic: VerificationResult,
+    ) -> VerificationResult | None:
+        if not self.config.enabled or self.llm is None:
+            return None
+        system_prompt = _read_prompt(
+            self.config.prompts_dir,
+            self.config.prompt_name,
+            fallback="Return comprehensive agent verification JSON only.",
+        )
+        payload = {
+            "plan": _plan_payload(plan),
+            "tool_results": [_tool_result_payload(result) for result in results],
+            "deterministic": _verification_payload(deterministic),
+        }
+        for _ in range(max(1, self.config.max_retries)):
+            raw = _llm_generate(
+                self.llm,
+                system_prompt=system_prompt,
+                user_payload=payload,
+                temperature=self.config.temperature,
+                max_output_tokens=self.config.max_output_tokens,
+            )
+            parsed = _load_json_object(raw)
+            if parsed is None:
+                continue
+            status = str(parsed.get("status") or "")
+            if status not in {"succeeded", "needs_approval", "needs_more_evidence", "failed"}:
+                continue
+            return VerificationResult(
+                status=status,
+                satisfied=_string_tuple(parsed.get("satisfied")),
+                missing=_string_tuple(parsed.get("missing")),
+                conflicts=_string_tuple(parsed.get("conflicts")),
+                warnings=_string_tuple(parsed.get("warnings")),
+                metadata=dict(parsed.get("metadata") or {}) if isinstance(parsed.get("metadata"), dict) else {},
+            )
+        return None
 
 
 class ComprehensiveAgentAnswerBuilder:
@@ -616,6 +1150,20 @@ def _tool_source_filters(payload: dict[str, object], *, request: ComprehensiveAg
     return tuple()
 
 
+def _direct_route_for_feature(feature: str) -> str:
+    return {
+        "circle_rag": "circle_rag",
+        "circle_rag_search": "circle_rag",
+        "minecraft_wiki": "minecraft_wiki_rag",
+        "minecraft_wiki_rag": "minecraft_wiki_rag",
+        "member_search": "member_search",
+        "image_search": "image_search",
+        "task_management": "task_management",
+        "event_management": "event_management",
+        "server_management": "server_management",
+    }.get(feature, "")
+
+
 def detect_required_features(query: str, source_filter: str = "all") -> tuple[str, ...]:
     text = query.lower()
     features: list[str] = []
@@ -662,6 +1210,10 @@ def _tool_result_from_work_response(tool_name: str, response: WorkResponse) -> A
             "member_profiles": [_dump_item(item) for item in response.member_profiles],
             "tasks": [_dump_item(item) for item in response.tasks],
             "events": [_dump_item(item) for item in response.events],
+            "schedules": [_dump_item(item) for item in response.schedules],
+            "approvals": [_dump_item(item) for item in response.approvals],
+            "task_approval_batches": [_dump_item(item) for item in response.task_approval_batches],
+            "event_approval_batches": [_dump_item(item) for item in response.event_approval_batches],
             "execution_allowed": False,
         }
     )
@@ -682,6 +1234,7 @@ def _work_candidates(response: WorkResponse) -> list[dict[str, Any]]:
     items.extend(("task_change", item) for item in response.task_change_candidates)
     items.extend(("event", item) for item in response.event_candidates)
     items.extend(("event_change", item) for item in response.event_change_candidates)
+    items.extend(("schedule", item) for item in response.schedule_candidates)
     items.extend(("server_operation", item) for item in response.server_operations)
     payload: list[dict[str, Any]] = []
     for item_type, item in items:
@@ -698,6 +1251,21 @@ def _work_candidates(response: WorkResponse) -> list[dict[str, Any]]:
             }
         )
     return payload
+
+
+def _approval_targets(response: WorkResponse) -> list[dict[str, str]]:
+    targets: list[dict[str, str]] = []
+    targets.extend({"type": "task", "id": item.id} for item in response.task_candidates)
+    targets.extend({"type": "task", "id": item.id} for item in response.task_change_candidates)
+    targets.extend({"type": "event", "id": item.id} for item in response.event_candidates)
+    targets.extend({"type": "event", "id": item.id} for item in response.event_change_candidates)
+    targets.extend({"type": "schedule", "id": item.id} for item in response.schedule_candidates)
+    targets.extend({"type": "server_operation", "id": item.id} for item in response.server_operations)
+    return targets
+
+
+def _all_candidates(results: list[AgentToolResult]) -> list[dict[str, Any]]:
+    return [candidate for result in results for candidate in result.candidates]
 
 
 def _candidate_dicts(results: list[AgentToolResult], candidate_type: str) -> list[dict[str, Any]]:
@@ -729,6 +1297,7 @@ def _plan_payload(plan: AgentPlan) -> dict[str, object]:
         "answer_requirements": list(plan.answer_requirements),
         "needs_clarification": plan.needs_clarification,
         "clarification_question": plan.clarification_question,
+        "direct_route": plan.direct_route,
         "metadata": dict(plan.metadata),
     }
 
@@ -768,6 +1337,130 @@ def _tool_summary(results: list[AgentToolResult]) -> list[dict[str, object]]:
     ]
 
 
+def _read_prompt(prompts_dir: Path | None, prompt_name: str, *, fallback: str) -> str:
+    if prompts_dir is None or not prompt_name:
+        return fallback
+    path = prompts_dir / f"{prompt_name}.md"
+    if not path.exists() and prompt_name.endswith(".md"):
+        path = prompts_dir / prompt_name
+    if not path.exists():
+        return fallback
+    return path.read_text(encoding="utf-8")
+
+
+def _llm_generate(
+    llm: object,
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    temperature: float,
+    max_output_tokens: int,
+) -> str:
+    generate = getattr(llm, "generate")
+    return str(
+        generate(
+            system_prompt=system_prompt,
+            user_prompt=json.dumps(user_payload, ensure_ascii=False, default=str),
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+    )
+
+
+def _load_json_object(text: str) -> dict[str, Any] | None:
+    stripped = str(text or "").strip()
+    match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
+    if match:
+        stripped = match.group(1).strip()
+    try:
+        parsed = json.loads(stripped)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(stripped[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        return tuple(str(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(str(item) for item in value)
+    return tuple()
+
+
+_FORBIDDEN_TRACE_KEYS = {
+    "secret",
+    "password",
+    "token",
+    "api_key",
+    "raw",
+    "contexts",
+    "context",
+    "llm_prompt",
+    "executor_args",
+    "server_state_before",
+    "server_state_after",
+    "container_state_before",
+    "container_state_after",
+}
+
+
+def _find_forbidden_payload_paths(value: object, *, prefix: str = "") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if key_text.lower() in _FORBIDDEN_TRACE_KEYS:
+                paths.append(path)
+                continue
+            paths.extend(_find_forbidden_payload_paths(item, prefix=path))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value[:50]):
+            paths.extend(_find_forbidden_payload_paths(item, prefix=f"{prefix}[{index}]"))
+    return paths
+
+
+def _contains_unmasked_secret(text: str) -> bool:
+    normalized = str(text or "")
+    if "[REDACTED]" in normalized:
+        return False
+    return bool(
+        re.search(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", normalized)
+        or re.search(r"(?i)(network[_-]?key|pin|unlock(?:ing)?[_ -]?steps?)\s*[:=]\s*[^\n]+", normalized)
+        or re.search(r"\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\.\d{1,3}\.\d{1,3}\b", normalized)
+    )
+
+
+def _semantic_field_conflicts(results: tuple[AgentToolResult, ...]) -> list[str]:
+    seen: dict[tuple[str, str], str] = {}
+    conflicts: list[str] = []
+    for result in results:
+        for candidate in result.candidates:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id:
+                continue
+            for field in ("title", "operation", "status"):
+                value = str(candidate.get(field) or "")
+                if not value:
+                    continue
+                key = (candidate_id, field)
+                previous = seen.get(key)
+                if previous is not None and previous != value:
+                    conflicts.append(f"candidate {candidate_id} has conflicting {field}: {previous} / {value}")
+                seen[key] = value
+    return conflicts
+
+
 def _within_budget(
     budget: AgentBudget,
     *,
@@ -781,6 +1474,40 @@ def _within_budget(
         and search_calls <= budget.max_search_calls
         and cost_usd <= budget.max_cost_usd
         and elapsed <= budget.max_latency_seconds
+    )
+
+
+def _merge_budget(default: AgentBudget, requested: AgentBudget) -> AgentBudget:
+    baseline = AgentBudget()
+    return AgentBudget(
+        max_steps=requested.max_steps if requested.max_steps != baseline.max_steps else default.max_steps,
+        max_search_calls=(
+            requested.max_search_calls
+            if requested.max_search_calls != baseline.max_search_calls
+            else default.max_search_calls
+        ),
+        max_read_chunks=(
+            requested.max_read_chunks
+            if requested.max_read_chunks != baseline.max_read_chunks
+            else default.max_read_chunks
+        ),
+        max_replans=(
+            requested.max_replans if requested.max_replans != baseline.max_replans else default.max_replans
+        ),
+        max_cost_usd=(
+            requested.max_cost_usd if requested.max_cost_usd != baseline.max_cost_usd else default.max_cost_usd
+        ),
+        max_latency_seconds=(
+            requested.max_latency_seconds
+            if requested.max_latency_seconds != baseline.max_latency_seconds
+            else default.max_latency_seconds
+        ),
+        allow_write_tools=requested.allow_write_tools,
+        require_citations=(
+            requested.require_citations
+            if requested.require_citations != baseline.require_citations
+            else default.require_citations
+        ),
     )
 
 

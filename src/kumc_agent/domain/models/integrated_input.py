@@ -117,6 +117,7 @@ class IntegratedInputResponse:
     detail_markdown: str = ""
     citations: tuple[Citation, ...] = tuple()
     confidence: ConfidenceLevel = "low"
+    candidates: tuple[dict[str, Any], ...] = tuple()
     task_candidates: tuple[TaskCandidate | dict[str, Any], ...] = tuple()
     task_change_candidates: tuple[TaskChangeCandidate | dict[str, Any], ...] = tuple()
     task_approval_batches: tuple[TaskApprovalBatch | dict[str, Any], ...] = tuple()
@@ -141,6 +142,7 @@ class IntegratedInputResponse:
             "detail_markdown": self.detail_markdown,
             "citations": _dump_items(self.citations),
             "confidence": self.confidence,
+            "candidates": _dump_items(self.candidates),
             "task_candidates": _dump_items(self.task_candidates),
             "task_change_candidates": _dump_items(self.task_change_candidates),
             "task_approval_batches": _dump_items(self.task_approval_batches),
