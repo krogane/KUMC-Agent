@@ -36,6 +36,8 @@ _RECENCY_KEYS = (
 _SECOND_REC_SPARSE_STAGE = "second_recursive_sparse"
 _KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 _KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
+_KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC = "minecraft_wiki_sparse_second_rec"
+_KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE = "minecraft_wiki_second_rec_sparse"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,9 @@ class RetrievalComponent:
         mmr_lambda: float = 0.75,
         rrf_k: int = 60,
         source_type_filter: set[str] | None = None,
+        sparse_sudachi_mode: str | None = None,
+        sparse_use_normalized_form: bool | None = None,
+        sparse_remove_symbols: bool | None = None,
     ) -> list[Chunk]:
         dense_limit = max(0, int(dense_top_k))
         sparse_limit = max(0, int(sparse_top_k))
@@ -108,6 +113,10 @@ class RetrievalComponent:
                     query=query,
                     top_k=sparse_limit,
                     sparse_top_k=sparse_initial_limit,
+                    source_type_filter=source_type_filter,
+                    sparse_sudachi_mode=sparse_sudachi_mode,
+                    sparse_use_normalized_form=sparse_use_normalized_form,
+                    sparse_remove_symbols=sparse_remove_symbols,
                 )
                 try:
                     dense_hits = dense_future.result()
@@ -126,6 +135,10 @@ class RetrievalComponent:
                 query=query,
                 top_k=sparse_limit,
                 sparse_top_k=sparse_initial_limit,
+                source_type_filter=source_type_filter,
+                sparse_sudachi_mode=sparse_sudachi_mode,
+                sparse_use_normalized_form=sparse_use_normalized_form,
+                sparse_remove_symbols=sparse_remove_symbols,
             )
 
         dense_hits = self._apply_recency_to_dense_hits(
@@ -205,20 +218,37 @@ class RetrievalComponent:
         query: str,
         top_k: int,
         sparse_top_k: int,
+        source_type_filter: set[str] | None = None,
+        sparse_sudachi_mode: str | None = None,
+        sparse_use_normalized_form: bool | None = None,
+        sparse_remove_symbols: bool | None = None,
     ) -> list[tuple[Chunk, float]]:
         if top_k <= 0:
             return []
+        token_settings = self._resolve_sparse_token_settings(
+            sparse_sudachi_mode=sparse_sudachi_mode,
+            sparse_use_normalized_form=sparse_use_normalized_form,
+            sparse_remove_symbols=sparse_remove_symbols,
+        )
         sparse_hits = self._search_sparse_mixed_sources(
             query=query,
             top_k=max(0, top_k),
             sparse_top_k=max(0, sparse_top_k),
+            source_type_filter=source_type_filter,
+            token_settings=token_settings,
         )
         if sparse_hits:
             return sparse_hits
-        return self._sparse_index.search_with_scores(
-            query,
-            top_k=max(0, top_k),
-        )
+        query_tokens = self._query_tokens(query, token_settings=token_settings)
+        search_with_scores = getattr(self._sparse_index, "search_with_scores")
+        try:
+            return search_with_scores(
+                query,
+                top_k=max(0, top_k),
+                query_tokens=query_tokens,
+            )
+        except TypeError:
+            return search_with_scores(query, top_k=max(0, top_k))
 
     def reorder_with_mmr(
         self,
@@ -296,6 +326,8 @@ class RetrievalComponent:
         query: str,
         top_k: int,
         sparse_top_k: int,
+        source_type_filter: set[str] | None,
+        token_settings: tuple[str, bool, bool],
     ) -> list[tuple[Chunk, float]]:
         total_k = max(0, top_k)
         if total_k <= 0:
@@ -303,21 +335,26 @@ class RetrievalComponent:
         sparse_k = min(max(0, sparse_top_k), total_k)
         second_rec_k = total_k - sparse_k
 
-        tokens = self._query_tokens(query)
+        tokens = self._query_tokens(query, token_settings=token_settings)
         if not tokens:
             return []
+        sparse_corpus, second_corpus = self._keyword_corpora_for_filter(
+            source_type_filter
+        )
 
         sparse_hits = self._search_keyword_index(
             tokens=tokens,
             top_k=total_k,
-            corpus_name=_KEYWORD_CORPUS_SPARSE_SECOND_REC,
+            corpus_name=sparse_corpus,
             restore_sparse_stage=True,
+            second_rec_corpus_name=second_corpus,
         )
         second_rec_hits = self._search_keyword_index(
             tokens=tokens,
             top_k=total_k,
-            corpus_name=_KEYWORD_CORPUS_SECOND_REC_SPARSE,
+            corpus_name=second_corpus,
             restore_sparse_stage=False,
+            second_rec_corpus_name=second_corpus,
         )
 
         selected_sparse = sparse_hits[:sparse_k]
@@ -336,6 +373,7 @@ class RetrievalComponent:
         top_k: int,
         corpus_name: str,
         restore_sparse_stage: bool,
+        second_rec_corpus_name: str,
     ) -> list[tuple[Chunk, float]]:
         if top_k <= 0 or not tokens:
             return []
@@ -360,7 +398,11 @@ class RetrievalComponent:
         ranked = sorted(range(len(keyword_index.docs)), key=lambda i: scores[i], reverse=True)
         hits: list[tuple[Chunk, float]] = []
         seen_ids: set[str] = set()
-        second_rec_map = self._second_rec_chunk_map() if restore_sparse_stage else {}
+        second_rec_map = (
+            self._second_rec_chunk_map(corpus_name=second_rec_corpus_name)
+            if restore_sparse_stage
+            else {}
+        )
         for idx in ranked:
             score = float(scores[idx])
             if score <= 0.0:
@@ -379,7 +421,21 @@ class RetrievalComponent:
                 break
         return hits
 
-    def _query_tokens(self, query: str) -> list[str]:
+    def _query_tokens(
+        self,
+        query: str,
+        *,
+        token_settings: tuple[str, bool, bool] | None = None,
+    ) -> list[str]:
+        sudachi_mode, use_normalized_form, remove_symbols = (
+            token_settings
+            if token_settings is not None
+            else (
+                self._sparse_sudachi_mode,
+                self._sparse_use_normalized_form,
+                self._sparse_remove_symbols,
+            )
+        )
         try:
             from kumc_agent.infra.indexing.sparse_normalizer import (
                 SparseNormalizer,
@@ -390,9 +446,9 @@ class RetrievalComponent:
         try:
             normalizer = SparseNormalizer(
                 config=SparseNormalizerConfig(
-                    sudachi_mode=self._sparse_sudachi_mode,
-                    use_normalized_form=self._sparse_use_normalized_form,
-                    remove_symbols=self._sparse_remove_symbols,
+                    sudachi_mode=sudachi_mode,
+                    use_normalized_form=use_normalized_form,
+                    remove_symbols=remove_symbols,
                     remove_stopwords=False,
                 )
             )
@@ -447,7 +503,11 @@ class RetrievalComponent:
         resolved = second_rec_map.get(key)
         return resolved if resolved is not None else chunk
 
-    def _second_rec_chunk_map(self) -> dict[tuple[object, ...], Chunk]:
+    def _second_rec_chunk_map(
+        self,
+        *,
+        corpus_name: str = _KEYWORD_CORPUS_SECOND_REC_SPARSE,
+    ) -> dict[tuple[object, ...], Chunk]:
         try:
             from kumc_agent.infra.indexing.keyword_inverted_index import (
                 load_keyword_index,
@@ -456,7 +516,7 @@ class RetrievalComponent:
             return {}
         keyword_index = load_keyword_index(
             index_dir=self.index_dir,
-            corpus_name=_KEYWORD_CORPUS_SECOND_REC_SPARSE,
+            corpus_name=corpus_name,
         )
         if keyword_index is None:
             return {}
@@ -478,11 +538,54 @@ class RetrievalComponent:
         *,
         chunk_id: int,
     ) -> tuple[object, ...] | None:
-        source = metadata.get("drive_file_id") or metadata.get("source_file_name")
+        source = (
+            metadata.get("drive_file_id")
+            or metadata.get("minecraft_wiki_page_id")
+            or metadata.get("source_file_name")
+        )
         if not source:
             return None
         source_type = metadata.get("source_type") or ""
         return (source_type, source, chunk_id)
+
+    def _resolve_sparse_token_settings(
+        self,
+        *,
+        sparse_sudachi_mode: str | None,
+        sparse_use_normalized_form: bool | None,
+        sparse_remove_symbols: bool | None,
+    ) -> tuple[str, bool, bool]:
+        mode = (
+            str(sparse_sudachi_mode or self._sparse_sudachi_mode or "B")
+            .strip()
+            .upper()
+            or "B"
+        )
+        return (
+            mode,
+            self._sparse_use_normalized_form
+            if sparse_use_normalized_form is None
+            else bool(sparse_use_normalized_form),
+            self._sparse_remove_symbols
+            if sparse_remove_symbols is None
+            else bool(sparse_remove_symbols),
+        )
+
+    @staticmethod
+    def _keyword_corpora_for_filter(
+        source_type_filter: set[str] | None,
+    ) -> tuple[str, str]:
+        normalized = {
+            str(value or "").strip().lower()
+            for value in (source_type_filter or set())
+            if str(value or "").strip()
+        }
+        if normalized == {"minecraft_wiki"}:
+            return (
+                _KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC,
+                _KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE,
+            )
+        return (_KEYWORD_CORPUS_SPARSE_SECOND_REC, _KEYWORD_CORPUS_SECOND_REC_SPARSE)
 
     @staticmethod
     def _normalize_chunk_id(value: object) -> int | None:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import threading
 from pathlib import Path
 
+from kumc_agent.domain.models.source import BackfillScope
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
@@ -35,6 +38,7 @@ class BuildIndexUsecase:
         crafters_colony_loader: CraftersColonyLoader | None,
         x_loader: XPostsLoader | None,
         notion_loader: NotionLoader | None = None,
+        ingestion_service: object | None = None,
     ) -> None:
         self._indexing_service = indexing_service
         self._drive_loader = drive_loader
@@ -43,6 +47,7 @@ class BuildIndexUsecase:
         self._crafters_colony_loader = crafters_colony_loader
         self._x_loader = x_loader
         self._notion_loader = notion_loader
+        self._ingestion_service = ingestion_service
 
     def execute(self, request: BuildIndexRequest) -> IndexBuildResult:
         loaded = 0
@@ -58,6 +63,7 @@ class BuildIndexUsecase:
                 if loader is None:
                     continue
                 loaded += loader.load()
+            loaded += self._refresh_minecraft_wiki_source(force=request.full_rebuild)
         return self._indexing_service.build(
             loaded_sources=loaded,
             full_rebuild=request.full_rebuild,
@@ -67,3 +73,27 @@ class BuildIndexUsecase:
             index_dir=request.index_dir,
             prefer_ingestion_repository=request.prefer_ingestion_repository,
         )
+
+    def _refresh_minecraft_wiki_source(self, *, force: bool) -> int:
+        if self._ingestion_service is None:
+            return 0
+        backfill_many = getattr(self._ingestion_service, "backfill_many", None)
+        if not callable(backfill_many):
+            return 0
+        available_sources = getattr(self._ingestion_service, "available_sources", None)
+        if callable(available_sources) and "minecraft_wiki" not in set(available_sources()):
+            return 0
+
+        async def _run() -> int:
+            results = await backfill_many(
+                source_kinds=("minecraft_wiki",),
+                scope=BackfillScope(force=force),
+            )
+            return sum(int(getattr(result, "seen", 0) or 0) for result in results)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_run())
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(_run())).result()

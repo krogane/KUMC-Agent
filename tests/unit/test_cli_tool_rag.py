@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.cli import _workflow_response_payload, main
+from kumc_agent.cli import _build_tool_rag_payload, _workflow_response_payload, main
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.source import Source
 from kumc_agent.domain.models.workflow import WorkResponse
@@ -178,6 +178,28 @@ class CliToolRagTests(unittest.TestCase):
         self.assertEqual(payload["metadata"]["query_filters"], {"status": "planning"})
         self.assertNotIn("contexts", payload["metadata"])
         self.assertNotIn("secret", payload["metadata"])
+
+    def test_tool_rag_payload_sanitizes_nested_diagnostics(self) -> None:
+        payload = _build_tool_rag_payload(
+            Answer(
+                text="answer",
+                route="minecraft_wiki_rag",
+                sources=[],
+                metadata={
+                    "routing_decision": {
+                        "target_model": "minecraft_wiki",
+                        "llm_prompt": {"user": "hidden"},
+                    },
+                    "raw": "hidden",
+                    "debug": {"contexts": ["hidden"], "token": "abc"},
+                },
+            )
+        )
+
+        self.assertNotIn("raw", payload["metadata"])
+        self.assertNotIn("llm_prompt", payload["metadata"]["routing_decision"])
+        self.assertNotIn("contexts", payload["metadata"]["debug"])
+        self.assertNotIn("token", payload["metadata"]["debug"])
 
 
 if __name__ == "__main__":

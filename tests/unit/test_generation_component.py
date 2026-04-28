@@ -93,6 +93,50 @@ class GenerationComponentTests(unittest.TestCase):
         self.assertEqual(prompt_payload.get("system_prompt"), llm.last_system_prompt)
         self.assertEqual(prompt_payload.get("user_prompt"), llm.last_user_prompt)
 
+    def test_minecraft_wiki_prompt_can_omit_circle_info_and_keeps_article_url_source(self) -> None:
+        component, llm = self._component(
+            {
+                "answer_minecraft_wiki": '{"answer":"...", "sources":[1]}',
+                "system_rules": "あなたはKUMC Agentです。今日は{today_label}です。",
+                "circle_basic_info": "KUMCはMinecraftサークルです。",
+            },
+            llm_response='{"answer":"丸石の説明です","sources":[1]}',
+        )
+        answer = component.generate_rag_answer(
+            query="丸石の入手方法",
+            chunks=[
+                Chunk(
+                    id="wiki-1",
+                    document_id="doc-1",
+                    text="丸石は石から得られる。",
+                    index=0,
+                    metadata={
+                        "source_type": "minecraft_wiki",
+                        "minecraft_wiki_title": "丸石",
+                        "heading_path": ["丸石", "入手"],
+                        "minecraft_wiki_revision_id": "123",
+                        "canonical_url": "https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3",
+                    },
+                )
+            ],
+            history=None,
+            include_capabilities_info=False,
+            temperature=0.0,
+            max_output_tokens=128,
+            answer_prompt_name="answer_minecraft_wiki",
+            append_sources_to_response=False,
+            include_circle_info=False,
+        )
+
+        self.assertNotIn("# サークルの基本情報", llm.last_user_prompt)
+        self.assertIn("minecraft_wiki_title: 丸石", llm.last_user_prompt)
+        self.assertIn("heading_path: 丸石 > 入手", llm.last_user_prompt)
+        self.assertEqual(answer.sources[0].label, "丸石 - 入手")
+        self.assertEqual(
+            answer.sources[0].uri,
+            "https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3",
+        )
+
     def test_no_rag_prompt_does_not_include_circle_basic_info(self) -> None:
         component, llm = self._component(
             {

@@ -24,6 +24,9 @@ from kumc_agent.utils.hashing import stable_hash
 KEYWORD_CORPUS_SPARSE = "sparse"
 KEYWORD_CORPUS_SPARSE_SECOND_REC = "sparse_second_rec"
 KEYWORD_CORPUS_SECOND_REC_SPARSE = "second_rec_sparse"
+KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE = "minecraft_wiki_sparse"
+KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC = "minecraft_wiki_sparse_second_rec"
+KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE = "minecraft_wiki_second_rec_sparse"
 KEYWORD_CORPUS_MATERIAL_NAMES = "material_names"
 _MATERIAL_NAME_INDEX_EXCLUDED_SOURCE_TYPES = frozenset(
     {"messages", "discord_message", "discord", "x_posts", "x"}
@@ -61,6 +64,7 @@ class IndexingService:
         raw_dir: Path,
         app_config: RuntimeConfig,
         summary_llm: LLMPort | None = None,
+        minecraft_wiki_summary_llm: LLMPort | None = None,
         image_asset_builder: object | None = None,
         ingestion_repository: IngestionRepository | None = None,
     ) -> None:
@@ -71,6 +75,7 @@ class IndexingService:
         self._raw_dir = raw_dir
         self._runtime = app_config
         self._summary_llm = summary_llm
+        self._minecraft_wiki_summary_llm = minecraft_wiki_summary_llm
         self._image_asset_builder = image_asset_builder
         self._ingestion_repository = ingestion_repository
         self._chunks_root = self._runtime.app.data_dir / "chunks"
@@ -168,20 +173,6 @@ class IndexingService:
         legacy_cfg = self._build_legacy_app_config()
         minecraft_wiki_cfg = self._build_minecraft_wiki_app_config()
         self._ensure_legacy_prompt_env_defaults()
-        self._run_legacy_chunk_pipeline(
-            legacy_cfg=legacy_cfg,
-            selected=selected,
-            allow_cancel=allow_cancel,
-            cancel_event=cancel_event,
-        )
-        self._run_minecraft_wiki_chunk_pipeline(
-            minecraft_wiki_cfg=minecraft_wiki_cfg,
-            selected=selected,
-            allow_cancel=allow_cancel,
-            cancel_event=cancel_event,
-        )
-        self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
-
         repository_chunks = (
             self._ingestion_repository.load_active_chunks()
             if prefer_ingestion_repository and self._ingestion_repository is not None
@@ -189,13 +180,45 @@ class IndexingService:
         )
         repository_artifacts: _RepositoryIndexArtifacts | None = None
         if repository_chunks:
+            repository_chunks = [
+                chunk
+                for chunk in repository_chunks
+                if not self._is_minecraft_wiki_chunk(chunk)
+            ]
             repository_artifacts = self._build_repository_index_artifacts(
                 repository_chunks=repository_chunks,
                 legacy_cfg=legacy_cfg,
                 selected=selected,
             )
-            index_chunks = repository_artifacts.index_chunks
+            self._run_minecraft_wiki_chunk_pipeline(
+                minecraft_wiki_cfg=minecraft_wiki_cfg,
+                selected=selected,
+                allow_cancel=allow_cancel,
+                cancel_event=cancel_event,
+            )
+            self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+            minecraft_wiki_artifacts = self._load_minecraft_wiki_stage_artifacts(
+                legacy_cfg=legacy_cfg,
+            )
+            index_chunks = [
+                *repository_artifacts.index_chunks,
+                *minecraft_wiki_artifacts.index_chunks,
+            ]
         else:
+            self._run_legacy_chunk_pipeline(
+                legacy_cfg=legacy_cfg,
+                selected=selected,
+                allow_cancel=allow_cancel,
+                cancel_event=cancel_event,
+            )
+            self._run_minecraft_wiki_chunk_pipeline(
+                minecraft_wiki_cfg=minecraft_wiki_cfg,
+                selected=selected,
+                allow_cancel=allow_cancel,
+                cancel_event=cancel_event,
+            )
+            self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+            minecraft_wiki_artifacts = None
             index_chunks = self._load_index_chunks_from_legacy_dirs(
                 legacy_cfg=legacy_cfg
             )
@@ -214,12 +237,24 @@ class IndexingService:
                 artifacts=repository_artifacts,
                 legacy_cfg=legacy_cfg,
             )
+            self._build_minecraft_wiki_keyword_inverted_indexes(
+                minecraft_wiki_cfg=minecraft_wiki_cfg,
+                artifacts=minecraft_wiki_artifacts,
+            )
         else:
             self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
             self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
+            self._build_minecraft_wiki_keyword_inverted_indexes(
+                minecraft_wiki_cfg=minecraft_wiki_cfg,
+                artifacts=None,
+            )
         self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
         stage_results: dict[str, object] = {
-            "source_of_chunks": "ingestion_repository" if repository_chunks else "raw_chunk_pipeline"
+            "source_of_chunks": (
+                "ingestion_repository_plus_minecraft_wiki_raw_chunk_pipeline"
+                if repository_artifacts is not None
+                else "raw_chunk_pipeline"
+            )
         }
         if self._image_asset_builder is not None:
             build_from_raw_sources = getattr(
@@ -947,13 +982,14 @@ class IndexingService:
                     metadata["parent_chunk_id"] = parent_chunk_id
                 metadata["chunk_id"] = output_index
                 metadata["chunk_stage"] = "summary"
+                summary_text = self._build_minecraft_wiki_summary_text(
+                    text=text,
+                    metadata=metadata,
+                    target_chars=target_chars,
+                )
                 output_chunks.append(
                     LegacyChunk(
-                        text=self._fallback_minecraft_wiki_summary(
-                            text=text,
-                            metadata=metadata,
-                            target_chars=target_chars,
-                        ),
+                        text=summary_text,
                         metadata=metadata,
                     )
                 )
@@ -968,6 +1004,73 @@ class IndexingService:
                     stale.unlink()
                 except Exception:
                     logger.warning("Failed to remove stale Minecraft Wiki summary: %s", stale)
+
+    def _build_minecraft_wiki_summary_text(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, object],
+        target_chars: int,
+    ) -> str:
+        fallback = self._fallback_minecraft_wiki_summary(
+            text=text,
+            metadata=metadata,
+            target_chars=target_chars,
+        )
+        provider = (
+            self._runtime.minecraft_wiki_rag.chunking.summary_llm_provider or ""
+        ).strip().lower()
+        if provider in {"", "none", "off", "disabled", "false", "0"}:
+            return fallback
+        if self._minecraft_wiki_summary_llm is None:
+            return fallback
+
+        title = str(metadata.get("minecraft_wiki_title") or "").strip()
+        heading_path = metadata.get("heading_path")
+        if isinstance(heading_path, list):
+            heading = " > ".join(
+                str(value).strip()
+                for value in heading_path
+                if str(value).strip()
+            )
+        else:
+            heading = str(heading_path or "").strip()
+        prompt = (
+            f"日本語版Minecraft Wikiの記事本文を{target_chars}文字以内で要約してください。"
+            "\n本文にある仕様条件、数値、クラフト素材、入手条件、例外は落とさないでください。"
+            "\n表や箇条書きの情報は文章として保持してください。"
+            "\n推測や本文外のバージョン判断は加えないでください。"
+            f"\n\n記事名: {title or '不明'}"
+            f"\n見出し: {heading or '不明'}"
+            f"\n\n本文:\n{text}"
+        )
+        try:
+            summary = self._minecraft_wiki_summary_llm.generate(
+                system_prompt=(
+                    "You summarize Japanese Minecraft Wiki articles faithfully."
+                ),
+                user_prompt=prompt,
+                temperature=self._runtime.minecraft_wiki_rag.chunking.summary_temperature,
+                max_output_tokens=(
+                    self._runtime.minecraft_wiki_rag.chunking.summary_max_output_tokens
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Minecraft Wiki summary chunk generation failed. Fallback to truncation."
+            )
+            return fallback
+        normalized = (summary or "").strip()
+        if not normalized or self._is_llm_error_text(normalized):
+            return fallback
+        if len(normalized) > target_chars:
+            normalized = normalized[:target_chars].rstrip() + "..."
+        prefix = ""
+        if title and not normalized.startswith("記事名:"):
+            prefix += f"記事名: {title}\n"
+        if heading and "見出し:" not in normalized[:80]:
+            prefix += f"見出し: {heading}\n"
+        return (prefix + normalized).strip()
 
     @staticmethod
     def _fallback_minecraft_wiki_summary(
@@ -1048,6 +1151,39 @@ class IndexingService:
             )
         return chunks
 
+    def _load_minecraft_wiki_stage_artifacts(self, *, legacy_cfg) -> _RepositoryIndexArtifacts:
+        first_chunks = self._load_legacy_chunks_from_dirs(
+            [self._first_rec_minecraft_wiki_dir]
+        )
+        second_base = (
+            self._second_rec_minecraft_wiki_dir
+            if legacy_cfg.second_rec_enabled
+            else self._first_rec_minecraft_wiki_dir
+        )
+        second_chunks = self._load_legacy_chunks_from_dirs([second_base])
+        sparse_chunks = self._load_legacy_chunks_from_dirs(
+            [self._sparse_second_rec_minecraft_wiki_dir]
+        )
+        summary_chunks = self._load_legacy_chunks_from_dirs(
+            [self._summary_minecraft_wiki_dir]
+        )
+        index_chunks = [*second_chunks, *summary_chunks]
+        return _RepositoryIndexArtifacts(
+            first_chunks=first_chunks,
+            second_chunks=second_chunks,
+            sparse_chunks=sparse_chunks,
+            summary_chunks=summary_chunks,
+            index_chunks=index_chunks,
+        )
+
+    @staticmethod
+    def _is_minecraft_wiki_chunk(chunk: Chunk) -> bool:
+        metadata = chunk.metadata or {}
+        source_type = str(
+            metadata.get("source_type") or metadata.get("source_kind") or ""
+        ).strip().lower()
+        return source_type == "minecraft_wiki"
+
     def _load_legacy_chunks_from_dirs(self, chunk_dirs: list[Path]) -> list[Chunk]:
         from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
 
@@ -1086,6 +1222,7 @@ class IndexingService:
         source_type = str(metadata.get("source_type") or "").strip()
         source_name = str(
             metadata.get("drive_file_id")
+            or metadata.get("minecraft_wiki_page_id")
             or metadata.get("source_file_name")
             or metadata.get("path")
             or ""
@@ -1108,6 +1245,7 @@ class IndexingService:
         source_type = str(metadata.get("source_type") or "").strip()
         source_name = str(
             metadata.get("drive_file_id")
+            or metadata.get("minecraft_wiki_page_id")
             or metadata.get("source_file_name")
             or metadata.get("path")
             or ""
@@ -1620,6 +1758,91 @@ class IndexingService:
                 tokenize_doc=_tokenize,
                 k1=legacy_cfg.sparse_bm25_k1,
                 b=legacy_cfg.sparse_bm25_b,
+            )
+
+    def _build_minecraft_wiki_keyword_inverted_indexes(
+        self,
+        *,
+        minecraft_wiki_cfg,
+        artifacts: _RepositoryIndexArtifacts | None,
+    ) -> None:
+        try:
+            from langchain_core.documents import Document as LangDocument
+            from kumc_agent.infra.indexing.keyword_inverted_index import (
+                KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE,
+                KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE,
+                KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC,
+                build_and_save_keyword_index,
+                tokenize_sparse_doc,
+            )
+            from kumc_agent.infra.indexing.sparse_normalizer import (
+                SparseNormalizer,
+                SparseNormalizerConfig,
+            )
+        except Exception:
+            logger.exception(
+                "Minecraft Wiki keyword inverted index dependencies are unavailable. "
+                "Falling back to lightweight keyword payload."
+            )
+            loaded = artifacts or self._load_minecraft_wiki_stage_artifacts(
+                legacy_cfg=minecraft_wiki_cfg,
+            )
+            self._write_keyword_corpus(
+                corpus_name=KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE,
+                chunks=loaded.sparse_chunks,
+            )
+            self._write_keyword_corpus(
+                corpus_name=KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC,
+                chunks=loaded.sparse_chunks,
+            )
+            self._write_keyword_corpus(
+                corpus_name=KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE,
+                chunks=loaded.second_chunks,
+            )
+            return
+
+        loaded = artifacts or self._load_minecraft_wiki_stage_artifacts(
+            legacy_cfg=minecraft_wiki_cfg,
+        )
+        normalizer = SparseNormalizer(
+            config=SparseNormalizerConfig(
+                sudachi_mode=minecraft_wiki_cfg.sudachi_mode,
+                use_normalized_form=minecraft_wiki_cfg.sparse_use_normalized_form,
+                remove_symbols=minecraft_wiki_cfg.sparse_remove_symbols,
+                remove_stopwords=False,
+            )
+        )
+
+        def _doc(chunk: Chunk) -> LangDocument:
+            metadata = dict(chunk.metadata or {})
+            metadata.setdefault("chunk_uid", chunk.id)
+            return LangDocument(page_content=chunk.text, metadata=metadata)
+
+        def _tokenize(doc: LangDocument) -> list[str]:
+            return tokenize_sparse_doc(
+                doc,
+                sparse_stage="second_recursive_sparse",
+                sudachi_tokenize=normalizer.normalize_tokens,
+            )
+
+        sparse_docs = [
+            _doc(chunk) for chunk in loaded.sparse_chunks if chunk.text.strip()
+        ]
+        second_docs = [
+            _doc(chunk) for chunk in loaded.second_chunks if chunk.text.strip()
+        ]
+        for corpus_name, docs in (
+            (KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE, sparse_docs),
+            (KEYWORD_CORPUS_MINECRAFT_WIKI_SPARSE_SECOND_REC, sparse_docs),
+            (KEYWORD_CORPUS_MINECRAFT_WIKI_SECOND_REC_SPARSE, second_docs),
+        ):
+            build_and_save_keyword_index(
+                index_dir=minecraft_wiki_cfg.index_dir,
+                corpus_name=corpus_name,
+                docs=docs,
+                tokenize_doc=_tokenize,
+                k1=minecraft_wiki_cfg.sparse_bm25_k1,
+                b=minecraft_wiki_cfg.sparse_bm25_b,
             )
 
     def _build_material_name_keyword_index(self, *, legacy_cfg) -> None:

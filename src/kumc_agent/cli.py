@@ -28,8 +28,7 @@ logger = logging.getLogger(__name__)
 
 def _build_tool_rag_payload(answer: object) -> dict[str, object]:
     metadata = dict(getattr(answer, "metadata", {}) or {})
-    for key in ("contexts", "llm_prompt", "raw"):
-        metadata.pop(key, None)
+    metadata = sanitize_payload_metadata(metadata)
     return {
         "answer": getattr(answer, "text", ""),
         "route": getattr(answer, "route", ""),

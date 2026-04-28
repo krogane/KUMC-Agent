@@ -73,6 +73,7 @@ class GenerationComponent:
         extra_mode_instruction: str | None = None,
         json_max_retries: int = 2,
         force_all_sources: bool = False,
+        include_circle_info: bool = True,
     ) -> Answer:
         context = self._format_context(chunks)
         prompt = self._prompt_first_available(
@@ -81,7 +82,9 @@ class GenerationComponent:
             default="",
         )
         history_text = self._format_history(history)
-        circle_basic_info_text = self._circle_basic_info_text()
+        circle_basic_info_text = (
+            self._circle_basic_info_text() if include_circle_info else ""
+        )
         capabilities_text = self._capabilities_text(
             include_capabilities_info=include_capabilities_info
         )
@@ -366,6 +369,32 @@ class GenerationComponent:
                 header = "\n".join(lines)
                 return f"{header}\n{annotated_content}"
             return annotated_content
+        if source_type == "minecraft_wiki":
+            lines = []
+            title = str(metadata.get("minecraft_wiki_title") or "").strip()
+            if title:
+                lines.append(f"minecraft_wiki_title: {title}")
+            heading_path = metadata.get("heading_path")
+            if isinstance(heading_path, list):
+                heading = " > ".join(
+                    str(value).strip()
+                    for value in heading_path
+                    if str(value).strip()
+                )
+            else:
+                heading = str(heading_path or "").strip()
+            if heading:
+                lines.append(f"heading_path: {heading}")
+            revision_id = str(metadata.get("minecraft_wiki_revision_id") or "").strip()
+            if revision_id:
+                lines.append(f"minecraft_wiki_revision_id: {revision_id}")
+            url = str(metadata.get("canonical_url") or "").strip()
+            if url:
+                lines.append(f"canonical_url: {url}")
+            if lines:
+                header = "\n".join(lines)
+                return f"{header}\n{annotated_content}"
+            return annotated_content
         first_message_date = str(metadata.get("first_message_date") or "").strip()
         guild_name = str(metadata.get("guild_name") or "").strip()
         category_name = str(metadata.get("category_name") or "").strip()
@@ -620,22 +649,38 @@ class GenerationComponent:
             if pos < 0 or pos >= len(chunks):
                 continue
             chunk = chunks[pos]
-            ref = self._source_ref_for_selection(
+            label, uri = self._source_label_uri_for_selection(
                 chunk=chunk,
                 sub_index=selection.sub_index,
             )
-            if not ref or ref in seen:
+            dedupe_key = uri or label
+            if not label or dedupe_key in seen:
                 continue
-            seen.add(ref)
+            seen.add(dedupe_key)
             source_id = (
                 f"{chunk.id}:{selection.doc_index}"
                 if selection.sub_index is None
                 else f"{chunk.id}:{selection.doc_index}-{selection.sub_index}"
             )
-            selected.append(Source(id=source_id, label=ref, uri=ref))
+            selected.append(Source(id=source_id, label=label, uri=uri))
             if limit is not None and len(selected) >= limit:
                 break
         return selected
+
+    def _source_label_uri_for_selection(
+        self,
+        *,
+        chunk: Chunk,
+        sub_index: int | None,
+    ) -> tuple[str, str]:
+        metadata = chunk.metadata or {}
+        source_type = str(metadata.get("source_type") or "").strip().lower()
+        if source_type == "minecraft_wiki":
+            return _minecraft_wiki_label_uri_from_metadata(metadata)
+        ref = self._source_ref_for_selection(chunk=chunk, sub_index=sub_index)
+        if not ref:
+            return "", ""
+        return ref, ref
 
     def _source_ref_for_selection(
         self,
@@ -649,8 +694,6 @@ class GenerationComponent:
             ref = self._discord_url_for_selection(chunk=chunk, sub_index=sub_index)
             if ref:
                 return ref
-        if source_type == "minecraft_wiki":
-            return _minecraft_wiki_ref_from_metadata(metadata)
         ref = _x_url_from_metadata(metadata)
         if ref:
             return ref
@@ -1047,14 +1090,14 @@ def _notion_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     return url
 
 
-def _minecraft_wiki_ref_from_metadata(
+def _minecraft_wiki_label_uri_from_metadata(
     metadata: dict[str, object] | None,
-) -> str | None:
+) -> tuple[str, str]:
     if not metadata:
-        return None
+        return "", ""
     url = str(metadata.get("canonical_url") or "").strip()
     if not url.lower().startswith(("http://", "https://")):
-        return None
+        return "", ""
     title = str(metadata.get("minecraft_wiki_title") or "").strip()
     heading_path = metadata.get("heading_path")
     heading = ""
@@ -1065,10 +1108,10 @@ def _minecraft_wiki_ref_from_metadata(
     elif heading_path:
         heading = str(heading_path).strip()
     if title and heading:
-        return f"{title} - {heading}: {url}"
+        return f"{title} - {heading}", url
     if title:
-        return f"{title}: {url}"
-    return url
+        return title, url
+    return url, url
 
 
 def _discord_url_from_metadata(metadata: dict[str, object] | None) -> str | None:

@@ -104,6 +104,29 @@ class QueryRouterTests(unittest.TestCase):
         self.assertIn("needs_additional_query", called_tasks)
         self.assertIn("additional_queries", called_tasks)
 
+    def test_minecraft_wiki_route_suppresses_additional_query_fields(self) -> None:
+        router = _build_router()
+        values = {
+            "target_model": "minecraft_wiki",
+            "include_capabilities_info": True,
+            "material_names": ["運営資料"],
+            "recency_mode": "hard",
+            "needs_additional_query": True,
+            "additional_queries": ["丸石 レシピ"],
+        }
+
+        with patch.object(router, "_run_task_with_retries") as mocked:
+            mocked.side_effect = (
+                lambda *, task_name, **_: values.get(task_name, router._default_task_value(task_name))
+            )
+            decision = router.route("丸石のレシピを教えて")
+
+        self.assertEqual(decision.target_model, "minecraft_wiki")
+        self.assertEqual(decision.recency_mode, "off")
+        self.assertEqual(decision.material_names, [])
+        self.assertEqual(decision.additional_queries, [])
+        self.assertFalse(decision.include_capabilities_info)
+
     def test_routing_disabled_returns_safe_default(self) -> None:
         router = _build_router()
         router._routing_enabled = False  # test setup only

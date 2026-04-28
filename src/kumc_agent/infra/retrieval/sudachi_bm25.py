@@ -103,11 +103,18 @@ class SudachiBM25Retriever:
     def search(self, query: str, *, top_k: int) -> list[Chunk]:
         return [chunk for chunk, _ in self.search_with_scores(query, top_k=top_k)]
 
-    def search_with_scores(self, query: str, *, top_k: int) -> list[tuple[Chunk, float]]:
+    def search_with_scores(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        query_tokens: list[str] | None = None,
+    ) -> list[tuple[Chunk, float]]:
         bm25 = self._load_bm25()
         if bm25 is None:
             return []
-        scores = bm25.get_scores(self._tokenize(query))
+        tokens = query_tokens if query_tokens is not None else self._tokenize(query)
+        scores = bm25.get_scores(tokens)
         order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         chunks = self._load_chunks()
         out: list[tuple[Chunk, float]] = []

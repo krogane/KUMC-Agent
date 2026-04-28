@@ -124,6 +124,8 @@ class RagService:
                 material_names=[],
                 additional_queries=[],
                 recency_mode="off",
+                include_capabilities_info=False,
+                use_additional_memory=False,
             )
         if force_disable_additional_memory and decision.use_additional_memory:
             decision = replace(decision, use_additional_memory=False)
@@ -137,6 +139,15 @@ class RagService:
         effective_fast_mode = bool(force_fast_mode or decision.fast_mode)
         if effective_fast_mode and (decision.material_names or decision.additional_queries):
             decision = replace(decision, material_names=[], additional_queries=[])
+        if decision.target_model == "minecraft_wiki":
+            decision = replace(
+                decision,
+                material_names=[],
+                additional_queries=[],
+                recency_mode="off",
+                include_capabilities_info=False,
+                use_additional_memory=False,
+            )
 
         if generation_history_override is not None:
             generation_history = list(generation_history_override)
@@ -317,6 +328,7 @@ class RagService:
             extra_mode_instruction=None,
             json_max_retries=self._config.answer_json_max_retries,
             force_all_sources=True,
+            include_circle_info=False,
         )
         answer = replace(answer, route="minecraft_wiki_rag")
         return self._finalize_answer(
@@ -431,6 +443,22 @@ class RagService:
             else self._config.parent_chunk_cap
         )
 
+    def _minecraft_wiki_sparse_sudachi_mode(self) -> str:
+        return str(
+            self._config.minecraft_wiki_sparse_sudachi_mode
+            or "B"
+        ).strip() or "B"
+
+    def _minecraft_wiki_sparse_use_normalized_form(self) -> bool:
+        if self._config.minecraft_wiki_sparse_use_normalized_form is not None:
+            return bool(self._config.minecraft_wiki_sparse_use_normalized_form)
+        return True
+
+    def _minecraft_wiki_sparse_remove_symbols(self) -> bool:
+        if self._config.minecraft_wiki_sparse_remove_symbols is not None:
+            return bool(self._config.minecraft_wiki_sparse_remove_symbols)
+        return True
+
     def _retrieve_chunks(
         self,
         *,
@@ -499,6 +527,11 @@ class RagService:
             mmr_lambda=self._minecraft_wiki_mmr_lambda(),
             rrf_k=self._minecraft_wiki_rrf_k(),
             source_type_filter={"minecraft_wiki"},
+            sparse_sudachi_mode=self._minecraft_wiki_sparse_sudachi_mode(),
+            sparse_use_normalized_form=(
+                self._minecraft_wiki_sparse_use_normalized_form()
+            ),
+            sparse_remove_symbols=self._minecraft_wiki_sparse_remove_symbols(),
         )
         chunks = [
             chunk
@@ -524,7 +557,8 @@ class RagService:
             rerank_pool = ranked[:pool_size] if pool_size > 0 else ranked
             scored = self._reranker.score_documents(query=query, chunks=rerank_pool)
             scored.sort(key=lambda item: (-item[0], item[1]))
-            ranked = [chunk for _, _, chunk in scored]
+            reranked = [chunk for _, _, chunk in scored]
+            ranked = reranked + ranked[len(rerank_pool):]
 
         ranked = self._apply_parent_chunk_cap_with_limit(
             ranked,
@@ -537,12 +571,48 @@ class RagService:
                 chunks=ranked,
                 mmr_lambda=self._minecraft_wiki_mmr_lambda(),
             )
+            ranked = self._diversify_minecraft_wiki_sections(ranked)
 
         selected = ranked[: max(0, int(self._minecraft_wiki_top_k()))]
         return self._append_parent_chunks_with_enabled(
             selected,
             parent_doc_enabled=self._minecraft_wiki_parent_doc_enabled(),
         )
+
+    @staticmethod
+    def _diversify_minecraft_wiki_sections(chunks: list[Chunk]) -> list[Chunk]:
+        if len(chunks) <= 1:
+            return chunks
+        primary: list[Chunk] = []
+        remainder: list[Chunk] = []
+        seen_sections: set[tuple[str, str]] = set()
+        for chunk in chunks:
+            metadata = chunk.metadata or {}
+            if str(metadata.get("source_type") or "").strip().lower() != "minecraft_wiki":
+                primary.append(chunk)
+                continue
+            page = str(
+                metadata.get("minecraft_wiki_page_id")
+                or metadata.get("source_file_name")
+                or metadata.get("canonical_url")
+                or ""
+            ).strip()
+            heading_path = metadata.get("heading_path")
+            if isinstance(heading_path, list):
+                heading = " > ".join(
+                    str(value).strip()
+                    for value in heading_path
+                    if str(value).strip()
+                )
+            else:
+                heading = str(heading_path or "").strip()
+            key = (page, heading or str(metadata.get("chunk_id") or chunk.id))
+            if key in seen_sections:
+                remainder.append(chunk)
+                continue
+            seen_sections.add(key)
+            primary.append(chunk)
+        return primary + remainder
 
     def _retrieve_material_route_chunks(
         self,
@@ -1006,7 +1076,11 @@ class RagService:
     def _chunk_doc_key(chunk: Chunk) -> tuple[object, ...]:
         metadata = chunk.metadata or {}
         stage = metadata.get("chunk_stage")
-        source = metadata.get("drive_file_id") or metadata.get("source_file_name")
+        source = (
+            metadata.get("drive_file_id")
+            or metadata.get("minecraft_wiki_page_id")
+            or metadata.get("source_file_name")
+        )
         chunk_id = metadata.get("chunk_id")
         if stage or source or chunk_id:
             return (stage, source, chunk_id)

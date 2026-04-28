@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 import re
 import time
-from urllib.parse import urlencode, quote
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, quote, urlparse
+from urllib.request import Request, urlopen
 
 from kumc_agent.domain.models.source import (
     AccessScope,
@@ -31,9 +32,19 @@ class MinecraftWikiConnector:
     request_interval_seconds: float = 1.0
     namespaces: tuple[int, ...] = (0,)
     full_backfill_enabled: bool = False
+    max_request_retries: int = 3
+    retry_initial_delay_seconds: float = 1.0
+    retry_max_delay_seconds: float = 8.0
 
     source_kind: str = "minecraft_wiki"
     _last_request_monotonic: float = field(default=0.0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_japanese_minecraft_wiki_url(self.api_url, field_name="api_url")
+        _validate_japanese_minecraft_wiki_url(
+            self.page_url_base,
+            field_name="page_url_base",
+        )
 
     async def backfill(self, scope: BackfillScope) -> AsyncIterator[SourceRawItem]:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +54,7 @@ class MinecraftWikiConnector:
         if self.max_pages > 0:
             titles = titles[: self.max_pages]
         for title in titles:
-            raw = self._fetch_page(title)
+            raw = self._fetch_page(title, force=scope.force)
             if raw is None:
                 continue
             yield raw
@@ -56,7 +67,7 @@ class MinecraftWikiConnector:
             yield item
 
     async def fetch_item(self, external_id: str) -> SourceRawItem:
-        raw = self._fetch_page(external_id)
+        raw = self._fetch_page(external_id, force=True)
         if raw is None:
             raise KeyError(f"Minecraft Wiki page not found: {external_id}")
         return raw
@@ -78,18 +89,34 @@ class MinecraftWikiConnector:
             metadata=dict(raw.metadata),
         )
 
-    def _fetch_page(self, title: str) -> SourceRawItem | None:
+    def _fetch_page(self, title: str, *, force: bool = False) -> SourceRawItem | None:
         clean_title = (title or "").strip()
         if not clean_title:
             return None
         path = self.raw_dir / f"{_safe_name(clean_title)}.md"
         meta_path = path.with_suffix(path.suffix + ".meta.json")
-        if path.exists():
+        if path.exists() and not force:
             text = path.read_text(encoding="utf-8", errors="ignore")
             metadata = _read_json(meta_path)
-            return self._raw_item(title=clean_title, text=text, metadata=metadata)
+            cached_revision = str(
+                metadata.get("minecraft_wiki_revision_id") or ""
+            ).strip()
+            try:
+                remote_metadata = self._revision_metadata(title=clean_title)
+            except Exception:
+                remote_metadata = {}
+            remote_revision = str(remote_metadata.get("revid") or "").strip()
+            if not remote_revision or remote_revision == cached_revision:
+                return self._raw_item(title=clean_title, text=text, metadata=metadata)
 
-        text, metadata = self._download_page(clean_title)
+        try:
+            text, metadata = self._download_page(clean_title)
+        except Exception:
+            if path.exists():
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                metadata = _read_json(meta_path)
+                return self._raw_item(title=clean_title, text=text, metadata=metadata)
+            raise
         if not text.strip():
             return None
         metadata["checksum"] = stable_hash(text)
@@ -213,11 +240,34 @@ class MinecraftWikiConnector:
         return {key: value for key, value in metadata.items() if value}
 
     def _request_json(self, params: dict[str, str]) -> dict[str, object]:
-        self._wait_for_rate_limit()
         query = urlencode(params)
-        with urlopen(f"{self.api_url}?{query}", timeout=20) as response:  # nosec B310
-            payload = json.loads(response.read().decode("utf-8"))
-        return payload if isinstance(payload, dict) else {}
+        retries = max(0, int(self.max_request_retries))
+        for attempt in range(retries + 1):
+            self._wait_for_rate_limit()
+            request = Request(
+                f"{self.api_url}?{query}",
+                headers={
+                    "User-Agent": "KUMC-Agent Minecraft Wiki RAG/1.0",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urlopen(request, timeout=20) as response:  # nosec B310
+                    payload = json.loads(response.read().decode("utf-8"))
+                return payload if isinstance(payload, dict) else {}
+            except HTTPError as exc:
+                if exc.code not in {429, 500, 502, 503, 504} or attempt >= retries:
+                    raise
+            except (URLError, TimeoutError, json.JSONDecodeError):
+                if attempt >= retries:
+                    raise
+            wait_seconds = min(
+                float(self.retry_max_delay_seconds),
+                float(self.retry_initial_delay_seconds) * (2 ** attempt),
+            )
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+        return {}
 
     def _wait_for_rate_limit(self) -> None:
         interval = max(0.0, float(self.request_interval_seconds))
@@ -267,6 +317,15 @@ def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value).strip("_") or "page"
 
 
+def _validate_japanese_minecraft_wiki_url(value: str, *, field_name: str) -> None:
+    parsed = urlparse(str(value or ""))
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme != "https" or host != "ja.minecraft.wiki":
+        raise ValueError(
+            f"Minecraft Wiki {field_name} must point to https://ja.minecraft.wiki"
+        )
+
+
 def _read_json(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -286,7 +345,7 @@ def _normalize_wikitext(text: str) -> str:
     cleaned = re.sub(r"(?is)<!--.*?-->", "", cleaned)
     cleaned = re.sub(r"(?m)^\s*\[\[カテゴリ:[^\]]+\]\]\s*$", "", cleaned)
     cleaned = re.sub(r"(?m)^\s*\[\[Category:[^\]]+\]\]\s*$", "", cleaned)
-    cleaned = _strip_balanced_templates(cleaned)
+    cleaned = _templates_to_text(cleaned)
     cleaned = re.sub(r"(?m)^(={2,6})\s*(.*?)\s*\1\s*$", _heading_to_markdown, cleaned)
     cleaned = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", cleaned)
     cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
@@ -295,19 +354,43 @@ def _normalize_wikitext(text: str) -> str:
     cleaned = re.sub(r"''([^']+)''", r"\1", cleaned)
     cleaned = re.sub(r"(?m)^\{\|.*$", "", cleaned)
     cleaned = re.sub(r"(?m)^\|\}.*$", "", cleaned)
-    cleaned = re.sub(r"(?m)^[!|]-?.*$", lambda m: _table_line_to_text(m.group(0)), cleaned)
+    cleaned = re.sub(r"(?m)^[!|].*$", lambda m: _table_line_to_text(m.group(0)), cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
 
-def _strip_balanced_templates(text: str) -> str:
+def _templates_to_text(text: str) -> str:
     previous = None
     cleaned = text
     pattern = re.compile(r"\{\{[^{}]*\}\}", re.DOTALL)
     while previous != cleaned:
         previous = cleaned
-        cleaned = pattern.sub("", cleaned)
+        cleaned = pattern.sub(lambda m: _template_to_text(m.group(0)), cleaned)
     return cleaned
+
+
+def _template_to_text(value: str) -> str:
+    body = value.strip()[2:-2].strip()
+    if not body:
+        return ""
+    parts = [part.strip() for part in body.split("|")]
+    if len(parts) <= 1:
+        return ""
+    preserved: list[str] = []
+    for raw in parts[1:]:
+        if not raw:
+            continue
+        if "=" in raw:
+            key, item = raw.split("=", 1)
+            key = key.strip().lower()
+            item = item.strip()
+            if key in {"image", "画像", "file", "ファイル", "alt", "class", "style"}:
+                continue
+        else:
+            item = raw.strip()
+        if item:
+            preserved.append(item)
+    return " ".join(preserved)
 
 
 def _heading_to_markdown(match: re.Match[str]) -> str:
@@ -318,7 +401,10 @@ def _heading_to_markdown(match: re.Match[str]) -> str:
 
 def _table_line_to_text(line: str) -> str:
     stripped = line.strip()
+    if stripped.startswith("|-"):
+        return ""
     stripped = stripped.lstrip("!|").strip()
     stripped = stripped.replace("!!", " | ").replace("||", " | ")
+    stripped = re.sub(r"^[^|=]+=[^|]+\|", "", stripped).strip()
     stripped = re.sub(r"\s+", " ", stripped)
     return stripped

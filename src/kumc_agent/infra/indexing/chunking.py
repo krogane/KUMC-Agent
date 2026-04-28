@@ -122,6 +122,7 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "minecraft_wiki_revision_id",
         "canonical_url",
         "visibility",
+        "access_scope",
         "checksum",
     ):
         value = data.get(key)
@@ -881,7 +882,7 @@ def sparse_chunk_jsonl_dir(
         config=SparseNormalizerConfig(
             sudachi_mode=config.sudachi_mode,
             use_normalized_form=config.sparse_use_normalized_form,
-            remove_symbols=True,
+            remove_symbols=config.sparse_remove_symbols,
             remove_stopwords=True,
         )
     )

@@ -177,6 +177,32 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertNotIn("contexts", response.metadata)
         self.assertEqual(response.citations[0]["url"], "https://example.com/s1")
 
+    def test_usecase_routes_minecraft_wiki_rag_to_chat_answer_service(self) -> None:
+        ask = FakeAskService([])
+        chat = FakeChatAnswerService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=ask,
+            chat_answer_service=chat,
+            workflow_service=FakeWorkflowService([]),
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(route="minecraft_wiki_rag", required_features=("minecraft_wiki",))
+            ),  # type: ignore[arg-type]
+        )
+        access = AccessContext(user_id="u1", guild_id="g1", role_ids=("r1",))
+
+        response = usecase.execute(
+            IntegratedInputRequest(text="丸石の入手方法", source="minecraft_wiki", access=access)
+        )
+
+        self.assertEqual(response.text, "rag:丸石の入手方法")
+        self.assertEqual(response.metadata["route"], "minecraft_wiki_rag")
+        self.assertEqual(response.metadata["handler"], "minecraft_wiki_rag")
+        self.assertEqual(chat.requests[0].access_context, access)
+        self.assertEqual(chat.requests[0].route_override, "minecraft_wiki")
+        self.assertTrue(chat.requests[0].force_disable_additional_memory)
+        self.assertEqual(ask.queries, [])
+
     def test_usecase_routes_workflow_and_sanitizes_metadata(self) -> None:
         workflow = FakeWorkflowService([])
         usecase = IntegratedInputUsecase(

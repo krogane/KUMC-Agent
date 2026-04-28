@@ -69,7 +69,7 @@ _DEFAULT_ROUTING_SYSTEM_PROMPT = (
     "- use_additional_memory: 回答に追加のチャット履歴があると望ましい場合（例: 指示語が含まれる・文脈が曖昧・過去のチャットに関連する）は true とする。\n"
     "- include_capabilities_info: ボット自身の機能説明が必要な場合は true。\n"
     "- fast_mode: 低遅延・低負荷を優先すべき短い質問では true。\n"
-    "- additional_queries: RAG検索に有用な重複しない追加クエリを必要最小限で返す。追加不要な場合は [] とする。\n\n"
+    "- additional_queries: RAG検索に有用な重複しない追加クエリを必要最小限で返す。追加不要な場合は [] とする。target_model が minecraft_wiki の場合は必ず [] とする。\n\n"
     "## サークル情報\n"
     "- 主な活動内容: 週1回（土曜20:00〜）のオンライン例会・メンバー同士のマルチプレイ（サバイバルやHypixelなど）・マップ制作（京大RPGやミニゲーム）・Minecraftサーバー運営・NFなどのイベント出展・新歓の開催・外部団体とのコラボ（コラボ先はStardy・エンドラRTA軍団・北田さんなど）・対面でのご飯会・プログラミング関連（AtCoderやハッカソンへの参加）\n\n"
     "## 現在の日付\n"
@@ -231,6 +231,11 @@ class QueryRouter:
             additional_queries = []
         if not needs_additional_query:
             additional_queries = []
+        if target_model == "minecraft_wiki":
+            recency_mode = "off"
+            material_names = []
+            additional_queries = []
+            include_capabilities_info = False
 
         return RoutingDecision(
             target_model=target_model,

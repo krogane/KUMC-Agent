@@ -5,6 +5,8 @@
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の共通部品は `features/ingestion`、`features/rag`、`infra/connectors`、`infra/retrieval`、`domain/models` を優先して使う。現行実装と設計が矛盾する場合は `kumc-agent.md` を優先するが、Minecraft Version / Minecraft Edition判定、属性フィルタリング、additional_queriesは実装対象から除外する。
 
+2026-04-28時点で本計画の完全実装は完了済みである。以後は回帰防止と運用改善のため、本計画を受け入れ条件とテスト観点として維持する。
+
 ## 2. 完了条件
 - 日本語版Minecraft Wiki記事のみを取得し、Raw cacheとmetadataを保存できる。
 - 取得済み記事から第1 Recursive Chunk、第2 Recursive Chunk、Summary Chunkを作成できる。
@@ -14,7 +16,7 @@
 - `additional_queries`、合成クエリ生成、Minecraft Version / Minecraft Edition判定、属性フィルタリングを行わない。
 - Dense、通常Sparse、ステミングSparse、RRF、ReRank、Doc Cap、MMRで検索できる。
 - ReRankの後にDoc Capを行う。
-- 追加履歴が有効な場合は同一チャンネル履歴だけを回答生成に含める。
+- 過去チャット履歴やサークル基本情報をMinecraft Wiki RAGの検索・回答根拠に含めない。
 - 回答生成時はJava版前提で回答を作成する。
 - 回答フィルタリングを行わずに回答を返す。
 - CLIや外部連携payloadの診断情報が `metadata` 配下に入る。
@@ -40,8 +42,8 @@
 1. `minecraft_wiki_rag.chunking.*` 設定を追加する。
 2. `minecraft_wiki_rag.retrieval.*` 設定を追加する。
 3. 専用設定が未指定の場合だけ既存RAG設定へfallbackする。
-4. 設定ロード、env map、schema、デフォルト値を追加する。
-5. `.env` または `.env.example` に項目を追加する場合は、必ず他方にも反映する。
+4. 設定ロード、schema、デフォルト値を追加する。
+5. パラメータは `configs` 配下に置き、`.env` / `.env.example` にはsecret以外を追加しない。
 
 検証:
 - サークル情報RAGと異なるチャンクサイズを設定できること。
@@ -76,8 +78,8 @@
 
 ### Phase 5: Routing
 1. Entry routingでMinecraft Wiki向けクエリを `minecraft_wiki` に振り分ける。
-2. Minecraft Wiki専用routing resultを追加し、`use_additional_memory` と `fast_mode` を保持する。
-3. `additional_queries` をrouting resultに含めない。
+2. Minecraft Wiki専用routing resultを追加し、`fast_mode` を保持する。
+3. Minecraft Wiki routeでは `use_additional_memory=false`、`additional_queries=[]`、`recency_mode=off` に正規化する。
 4. 合成クエリ生成を呼ばず、検索には入力クエリをそのまま使う。
 5. Minecraft Version / Minecraft Editionの属性抽出を行わない。
 6. CLI payloadではrouting詳細を `metadata` 配下に置く。
@@ -110,7 +112,7 @@
 2. プロンプトに「日本語版Minecraft Wikiを根拠にする」「Java版前提で回答する」を明記する。
 3. Java版/統合版やMinecraft Versionの判定・比較を回答生成機能として扱わない。
 4. 親/子チャンク展開ではSummary Chunkを優先する。
-5. `use_additional_memory=true` の場合は同一チャンネル履歴だけを含める。
+5. 過去チャット履歴とサークル基本情報を回答生成promptに含めない。
 6. 回答フィルタリングを無効化する。
 7. 出典表示を記事タイトル、見出し、canonical URL中心に整形する。
 
@@ -135,7 +137,7 @@
 - 削除対象のフィールドが出力されないこと。
 
 ### Phase 9: 運用・ドキュメント
-1. `docs/explanation/cli.md` にMinecraft Wiki RAGの呼び出し例を追記する。
+1. `docs/explanation/` にMinecraft Wiki RAGの実装・運用・検証結果を記録する。
 2. 必要な設定を `configs/main/indexing.yaml`、`configs/main/integrations.yaml`、`configs/main/features.yaml` に追加する。
 3. `.env` または `.env.example` に項目を追加する場合は、必ず他方にも反映する。
 4. 取得速度制限、日本語版全記事取得、再取得、rollbackの運用手順をrunbook化する。
@@ -170,7 +172,7 @@
 | --- | --- |
 | 日本語版以外の記事が混入する | `api_url`、`page_url_base`、canonical URLの検証を追加する |
 | 全記事取得でWiki側に負荷をかける | 速度制限、max_pages、安全弁、キャッシュ再利用を必須にする |
-| Wiki記法が検索ノイズになる | 軽量Markdown正規化とテンプレート除去を導入する |
+| Wiki記法が検索ノイズになる | 軽量Markdown正規化を導入し、テンプレート・表の検索可能な本文情報は保持する |
 | 共通RAG設定変更がMinecraft Wiki RAGに影響する | `minecraft_wiki_rag.*` 専用設定を追加し、専用設定を優先する |
 | 共通RAGとindexが混在する | `source_type=minecraft_wiki` filterを検索経路に必須化する |
 | 既存RAGの回答フィルタが適用される | Minecraft Wiki RAG経路ではAnswerFilterを呼ばない |
@@ -196,17 +198,17 @@
 - 取得範囲制限
 - 速度制限設定の反映
 - Minecraft Wiki専用チャンク設定
-- Minecraft Wiki専用検索設定
+- Minecraft Wiki専用検索設定のindex構築時・検索時反映
 - edition/version判定metadataが生成されないこと
 - additional_queriesが使われないこと
 - source filter
 - 属性フィルタリングが呼ばれないこと
 - 通常モードの順序: RRF -> ReRank -> Doc Cap -> MMR
 - ファストモードの順序: RRF -> Doc Cap
-- 親/子チャンク展開
+- 親/子チャンク展開とSummary Chunk優先
 - Java版前提の回答生成
 - 回答フィルタ無効化
-- payload metadata方針
+- payload metadata方針と再帰sanitize
 
 ## 7. 推奨実装順
 1. Connectorの日本語版固定化とmetadata保存

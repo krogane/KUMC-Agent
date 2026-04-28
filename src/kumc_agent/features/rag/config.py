@@ -67,3 +67,6 @@ class RagConfig:
     minecraft_wiki_mmr_lambda: float | None = None
     minecraft_wiki_parent_doc_enabled: bool | None = None
     minecraft_wiki_parent_chunk_cap: int | None = None
+    minecraft_wiki_sparse_sudachi_mode: str | None = None
+    minecraft_wiki_sparse_use_normalized_form: bool | None = None
+    minecraft_wiki_sparse_remove_symbols: bool | None = None

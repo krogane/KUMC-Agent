@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -15,9 +17,12 @@ from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.routing import RoutingDecision
 from kumc_agent.domain.models.source import BackfillScope
+from kumc_agent.config.load import load_runtime_config
 from kumc_agent.features.rag.config import RagConfig, RagGenerationSettings
 from kumc_agent.features.rag.service import RagService
+from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.connectors.minecraft_wiki import MinecraftWikiConnector
+from kumc_agent.usecases.indexing.build import BuildIndexRequest, BuildIndexUsecase
 
 
 def _rag_config() -> RagConfig:
@@ -55,6 +60,9 @@ def _rag_config() -> RagConfig:
         minecraft_wiki_mmr_lambda=0.5,
         minecraft_wiki_parent_doc_enabled=False,
         minecraft_wiki_parent_chunk_cap=1,
+        minecraft_wiki_sparse_sudachi_mode="C",
+        minecraft_wiki_sparse_use_normalized_form=False,
+        minecraft_wiki_sparse_remove_symbols=False,
     )
 
 
@@ -219,10 +227,247 @@ class MinecraftWikiRagTests(unittest.TestCase):
         self.assertEqual(retrieval.retrieve_kwargs["dense_top_k"], 5)
         self.assertEqual(retrieval.retrieve_kwargs["sparse_top_k"], 6)
         self.assertEqual(retrieval.retrieve_kwargs["rrf_k"], 17)
+        self.assertEqual(retrieval.retrieve_kwargs["sparse_sudachi_mode"], "C")
+        self.assertEqual(retrieval.retrieve_kwargs["sparse_use_normalized_form"], False)
+        self.assertEqual(retrieval.retrieve_kwargs["sparse_remove_symbols"], False)
         self.assertEqual(retrieval.calls, ["retrieve", "rerank", "mmr", "generate"])
         self.assertEqual(generation.prompt_name, "answer_minecraft_wiki")
         self.assertEqual([chunk.id for chunk in generation.chunks], ["same-parent-1", "other-parent"])
-        self.assertEqual(generation.history, [("u", "a", [])])
+        self.assertEqual(generation.history, [])
+
+    def test_connector_refreshes_cached_page_when_revision_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = Path(tmp)
+            raw_path = raw_dir / "丸石.md"
+            meta_path = raw_path.with_suffix(raw_path.suffix + ".meta.json")
+            raw_path.write_text("old text", encoding="utf-8")
+            meta_path.write_text(
+                '{"minecraft_wiki_title":"丸石","minecraft_wiki_page_id":"123","minecraft_wiki_revision_id":"1","canonical_url":"https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3"}',
+                encoding="utf-8",
+            )
+            connector = _Connector(
+                raw_dir=raw_dir,
+                page_titles=("丸石",),
+                api_url="https://ja.minecraft.wiki/api.php",
+                page_url_base="https://ja.minecraft.wiki/w/",
+                max_pages=20,
+                payloads=[
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 123,
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3",
+                                    "revisions": [
+                                        {"revid": 2, "timestamp": "2026-01-03T00:00:00Z"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "parse": {
+                            "title": "丸石",
+                            "pageid": 123,
+                            "revid": 2,
+                            "wikitext": "== 入手 ==\n更新後の本文",
+                        }
+                    },
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 123,
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3",
+                                    "revisions": [
+                                        {"revid": 2, "timestamp": "2026-01-03T00:00:00Z"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                ],
+            )
+
+            raw = asyncio.run(_first_backfill_item(connector))
+
+        self.assertIn("更新後の本文", raw.text)
+        self.assertEqual(raw.metadata["minecraft_wiki_revision_id"], "2")
+
+    def test_connector_rejects_non_japanese_minecraft_wiki_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                MinecraftWikiConnector(
+                    raw_dir=Path(tmp),
+                    page_titles=("Stone",),
+                    api_url="https://minecraft.wiki/api.php",
+                    page_url_base="https://minecraft.wiki/w/",
+                    max_pages=1,
+                )
+
+    def test_minecraft_wiki_summary_uses_llm_when_configured(self) -> None:
+        class _SummaryLLM:
+            def __init__(self) -> None:
+                self.user_prompt = ""
+
+            def generate(self, *, system_prompt, user_prompt, temperature, max_output_tokens):  # noqa: ANN001, ARG002
+                self.user_prompt = user_prompt
+                return "丸石は石を採掘すると得られる。"
+
+        llm = _SummaryLLM()
+        service = object.__new__(IndexingService)
+        service._minecraft_wiki_summary_llm = llm
+        service._runtime = SimpleNamespace(
+            minecraft_wiki_rag=SimpleNamespace(
+                chunking=SimpleNamespace(
+                    summary_llm_provider="gemini",
+                    summary_temperature=0.0,
+                    summary_max_output_tokens=128,
+                )
+            )
+        )
+
+        summary = service._build_minecraft_wiki_summary_text(
+            text="丸石は石を採掘すると得られる。用途はクラフト素材。",
+            metadata={
+                "minecraft_wiki_title": "丸石",
+                "heading_path": ["丸石", "入手"],
+            },
+            target_chars=80,
+        )
+
+        self.assertIn("記事名: 丸石", summary)
+        self.assertIn("丸石は石を採掘すると得られる。", summary)
+        self.assertIn("表や箇条書きの情報は文章として保持", llm.user_prompt)
+
+    def test_manual_build_refreshes_minecraft_wiki_connector(self) -> None:
+        class _Loader:
+            def load(self) -> int:
+                return 2
+
+        class _Indexing:
+            def __init__(self) -> None:
+                self.loaded_sources = 0
+
+            def build(self, **kwargs):  # noqa: ANN001
+                self.loaded_sources = int(kwargs["loaded_sources"])
+                return IndexBuildResult(
+                    loaded_sources=self.loaded_sources,
+                    documents=0,
+                    chunks=0,
+                    index_dir=Path("/tmp/index"),
+                )
+
+        class _Ingestion:
+            def available_sources(self):
+                return ("minecraft_wiki",)
+
+            async def backfill_many(self, *, source_kinds, scope):  # noqa: ANN001
+                self.source_kinds = source_kinds
+                self.force = scope.force
+                return (SimpleNamespace(seen=3),)
+
+        indexing = _Indexing()
+        ingestion = _Ingestion()
+        usecase = BuildIndexUsecase(
+            indexing_service=indexing,
+            drive_loader=_Loader(),
+            discord_loader=None,
+            hatenablog_loader=None,
+            crafters_colony_loader=None,
+            x_loader=None,
+            notion_loader=None,
+            ingestion_service=ingestion,
+        )
+
+        result = usecase.execute(BuildIndexRequest(refresh_sources=True, full_rebuild=True))
+
+        self.assertEqual(result.loaded_sources, 5)
+        self.assertEqual(ingestion.source_kinds, ("minecraft_wiki",))
+        self.assertTrue(ingestion.force)
+
+    def test_raw_minecraft_wiki_pipeline_builds_indexable_second_and_summary_chunks(self) -> None:
+        class _Storage:
+            def __init__(self) -> None:
+                self.chunks: list[Chunk] = []
+
+            def save_documents(self, documents):  # noqa: ANN001
+                self.documents = documents
+
+            def save_chunks(self, chunks):  # noqa: ANN001
+                self.chunks = list(chunks)
+
+        class _Embedder:
+            def embed_documents(self, texts):  # noqa: ANN001
+                return [[1.0, 0.0] for _ in texts]
+
+        class _DenseIndex:
+            def __init__(self, index_dir: Path) -> None:
+                self._index_dir = index_dir
+                self.chunks: list[Chunk] = []
+
+            def build(self, *, chunks, embeddings):  # noqa: ANN001, ARG002
+                self.chunks = list(chunks)
+
+        class _SparseIndex:
+            def __init__(self) -> None:
+                self.chunks: list[Chunk] = []
+
+            def build(self, chunks):  # noqa: ANN001
+                self.chunks = list(chunks)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_runtime_config(base_dir=ROOT)
+            app = replace(
+                config.app,
+                data_dir=root / "data",
+                raw_dir=root / "data" / "raw",
+                chunks_path=root / "data" / "chunks",
+                index_dir=root / "data" / "index",
+            )
+            config = replace(config, app=app)
+            raw_dir = config.app.raw_dir / "minecraft_wiki"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / "丸石.md"
+            raw_path.write_text(
+                "# 丸石\n\n== 入手 ==\n丸石は石を採掘すると得られる。\n\n== 用途 ==\nクラフト素材。",
+                encoding="utf-8",
+            )
+            raw_path.with_suffix(raw_path.suffix + ".meta.json").write_text(
+                '{"minecraft_wiki_title":"丸石","minecraft_wiki_page_id":"123","minecraft_wiki_revision_id":"7","canonical_url":"https://ja.minecraft.wiki/w/%E4%B8%B8%E7%9F%B3","access_scope":{"visibility":"public"},"visibility":"public"}',
+                encoding="utf-8",
+            )
+            storage = _Storage()
+            dense = _DenseIndex(config.app.index_dir)
+            sparse = _SparseIndex()
+            service = IndexingService(
+                storage=storage,
+                embedder=_Embedder(),
+                faiss_index=dense,
+                bm25_index=sparse,
+                raw_dir=config.app.raw_dir,
+                app_config=config,
+                summary_llm=None,
+                minecraft_wiki_summary_llm=None,
+            )
+
+            result = service.build(loaded_sources=1)
+            keyword_index_exists = (
+                result.index_dir / "keyword" / "minecraft_wiki_sparse_second_rec.json"
+            ).exists()
+
+        wiki_chunks = [
+            chunk
+            for chunk in dense.chunks
+            if chunk.metadata.get("source_type") == "minecraft_wiki"
+        ]
+        self.assertGreaterEqual(len(wiki_chunks), 2)
+        self.assertTrue(
+            any(chunk.metadata.get("chunk_stage") == "second_recursive" for chunk in wiki_chunks)
+        )
+        self.assertTrue(any(chunk.metadata.get("chunk_stage") == "summary" for chunk in wiki_chunks))
+        self.assertTrue(keyword_index_exists)
 
 
 async def _first_backfill_item(connector: MinecraftWikiConnector):

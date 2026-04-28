@@ -129,6 +129,17 @@ def _build_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
     )
 
 
+def _build_minecraft_wiki_summary_chunk_llm(config: RuntimeConfig) -> LLMPort | None:
+    chunking = config.minecraft_wiki_rag.chunking
+    return _build_indexing_stage_llm(
+        provider=chunking.summary_llm_provider,
+        gemini_model=chunking.summary_gemini_model,
+        gemini_api_key=config.integrations.gemini_api_key,
+        gemini_requests_per_minute=config.integrations.gemini_summary_requests_per_minute,
+        limiter_name=index_summary_rate_limiter_name(),
+    )
+
+
 def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     config = load_runtime_config(base_dir=base_dir)
     migrate_summery_chunk_dir(base_dir=config.base_dir)
@@ -160,6 +171,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         gemini_requests_per_minute=config.integrations.gemini_requests_per_minute,
     )
     summary_chunk_llm = _build_summary_chunk_llm(config)
+    minecraft_wiki_summary_chunk_llm = _build_minecraft_wiki_summary_chunk_llm(config)
 
     storage = FileSystemStorage(
         chunks_path=config.app.chunks_path,
@@ -372,6 +384,15 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             minecraft_wiki_parent_chunk_cap=(
                 config.minecraft_wiki_rag.retrieval.parent_chunk_cap
             ),
+            minecraft_wiki_sparse_sudachi_mode=(
+                config.minecraft_wiki_rag.retrieval.sudachi_mode
+            ),
+            minecraft_wiki_sparse_use_normalized_form=(
+                config.minecraft_wiki_rag.retrieval.sparse_use_normalized_form
+            ),
+            minecraft_wiki_sparse_remove_symbols=(
+                config.minecraft_wiki_rag.retrieval.sparse_remove_symbols
+            ),
         ),
         router=router,
         retrieval=retrieval_component,
@@ -416,8 +437,27 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         raw_dir=config.app.raw_dir,
         app_config=config,
         summary_llm=summary_chunk_llm,
+        minecraft_wiki_summary_llm=minecraft_wiki_summary_chunk_llm,
         image_asset_builder=image_asset_builder,
         ingestion_repository=ingestion_repository,
+    )
+
+    ingestion_service = IngestionService(
+        connectors=build_source_connectors(config),
+        repository=ingestion_repository,
+        raw_snapshots=RawSnapshotStore(
+            config=config.infrastructure.object_storage,
+            local_root=config.base_dir / "data" / "object_storage",
+            s3=S3ObjectStorageClient(config.infrastructure.object_storage),
+        ),
+        chunker=IngestionChunker(
+            ChunkingSettings(
+                max_characters=config.indexing.chunking.second_recursive_chunk_size * 4,
+                overlap_characters=config.indexing.chunking.second_recursive_chunk_overlap * 4,
+            )
+        ),
+        secret_detector=SecretFindingDetector(),
+        audit_log=audit_log,
     )
 
     drive_loader = GoogleDriveLoader(
@@ -472,23 +512,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         crafters_colony_loader=crafters_loader,
         x_loader=x_loader,
         notion_loader=notion_loader,
-    )
-    ingestion_service = IngestionService(
-        connectors=build_source_connectors(config),
-        repository=ingestion_repository,
-        raw_snapshots=RawSnapshotStore(
-            config=config.infrastructure.object_storage,
-            local_root=config.base_dir / "data" / "object_storage",
-            s3=S3ObjectStorageClient(config.infrastructure.object_storage),
-        ),
-        chunker=IngestionChunker(
-            ChunkingSettings(
-                max_characters=config.indexing.chunking.second_recursive_chunk_size * 4,
-                overlap_characters=config.indexing.chunking.second_recursive_chunk_overlap * 4,
-            )
-        ),
-        secret_detector=SecretFindingDetector(),
-        audit_log=audit_log,
+        ingestion_service=ingestion_service,
     )
     member_profile_guild_ids = tuple(
         str(value) for value in config.security.effective_member_profile_guild_ids()

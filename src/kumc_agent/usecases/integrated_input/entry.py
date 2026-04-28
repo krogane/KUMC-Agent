@@ -148,6 +148,22 @@ class IntegratedInputUsecase:
                 decision,
                 handler="circle_rag",
             )
+        if decision.route == "minecraft_wiki_rag" and self.chat_answer_service is not None:
+            return self._from_rag_answer(
+                self.chat_answer_service.execute(
+                    ChatRequest(
+                        query=request.text,
+                        question_author=access.user_id or None,
+                        history_scope=request.history_scope or self._history_scope(request, access),
+                        force_fast_mode=request.mode == "fast",
+                        force_disable_additional_memory=True,
+                        access_context=access,
+                        route_override="minecraft_wiki",
+                    )
+                ),
+                decision,
+                handler="minecraft_wiki_rag",
+            )
         if decision.route in {"circle_rag", "minecraft_wiki_rag"}:
             source_filter = "minecraft_wiki" if decision.route == "minecraft_wiki_rag" else self._rag_source(request, decision)
             return self._from_ask_response(

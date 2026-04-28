@@ -1,7 +1,9 @@
 # Minecraft Wiki RAG 詳細設計
 
 ## 1. 目的
-Minecraft Wiki RAGは、ユーザーの入力クエリ、過去の同一チャンネル内チャット履歴、サークル基本情報をもとに、日本語版Minecraft Wikiの記事から根拠付き回答を生成する機能である。
+Minecraft Wiki RAGは、ユーザーの入力クエリをもとに、日本語版Minecraft Wikiの記事だけから根拠付き回答を生成する機能である。
+
+過去の同一チャンネル内チャット履歴やサークル基本情報は、Minecraft Wiki RAGの回答根拠として使わない。入口やルーティングの補助情報として存在する場合でも、検索クエリ生成、回答生成コンテキスト、出典には混入させない。
 
 本設計は `docs/design/kumc-agent.md` の「2. Minecraft Wiki RAG」を上位仕様とし、詳細部分は現行実装の `infra/connectors/minecraft_wiki.py`、`features/ingestion`、`features/rag`、`infra/retrieval` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先するが、本設計ではMinecraft Version / Minecraft Edition判定と属性フィルタリングは扱わない。
 
@@ -49,6 +51,19 @@ flowchart TD
     GEN --> OUT["回答 / 出典"]
   end
 ```
+
+### 3.1 正式入口
+Minecraft Wiki RAGの正式入口は、サークル情報RAGと同じく `ChatAnswerUsecase` / `RagService` である。
+
+次の入口はすべて同じMinecraft Wiki RAG経路へ接続する。
+
+- Discord `/ask source=minecraft_wiki`
+- HTTP / 統合入力受付の `minecraft_wiki_rag`
+- CLI `chat`
+- CLI `tool rag --scope minecraft_wiki`
+- 評価用 `EvaluateRagasUsecase`
+
+統合入力受付は `AskService` ではなく `ChatAnswerUsecase` に委譲し、`route_override=minecraft_wiki` を指定する。これにより、専用prompt、回答filter無効化、親/子chunk展開、Minecraft Wiki専用検索設定が入口によらず一貫して適用される。
 
 ## 4. データ取得
 ### 4.1 取得元
@@ -108,6 +123,10 @@ Minecraft Version、Minecraft Edition、Java版/統合版の判定結果はmetad
 MediaWikiのテンプレート・カテゴリ・表は、検索品質を損ねない範囲でMarkdown相当へ正規化する。完全なレンダリングよりも、見出し、箇条書き、表のキー情報が検索可能であることを優先する。
 
 ## 5. インデックス作成
+Minecraft Wiki RAGのindex正本は、`data/chunks/*/minecraft_wiki` に出力されるraw chunk pipeline成果物である。
+
+ingestion repositoryは取得、変更検知、Raw snapshot、監査のために使うが、Minecraft Wiki RAGのDense/BM25/keyword indexへ投入する正本chunkにはしない。auto-indexでingestion repositoryを優先する場合も、Minecraft Wikiだけは専用raw chunk pipelineを再実行し、その第2 Recursive ChunkとSummary ChunkをDense/keyword indexへ投入する。
+
 ### 5.1 保存先
 インデックス成果物は次の場所に置く。
 
@@ -206,6 +225,10 @@ Minecraft Wikiでは、要約に記事名、見出し、重要な仕様・数値
   - `sparse`
   - `sparse_second_rec`
   - `second_rec_sparse`
+- Minecraft Wiki routeでは、共通corpusとは別にMinecraft Wiki専用BM25パラメータで作成した次のcorpusを検索する。
+  - `minecraft_wiki_sparse`
+  - `minecraft_wiki_sparse_second_rec`
+  - `minecraft_wiki_second_rec_sparse`
 
 通常Sparse検索とステミングSparse検索は別系統として扱い、検索時にMinecraft Wiki専用設定で定めた比率で混合する。Minecraft固有語、英語表記、日本語表記、アイテム名、エンティティ名、数値は落とさない。
 
@@ -214,10 +237,10 @@ Minecraft Wikiでは、要約に記事名、見出し、重要な仕様・数値
 Minecraft Wiki RAGのルーティングは、次を入力として専用LLMまたは決定的ルールが判定する。
 
 - 入力クエリ
-- 過去の同一チャンネル内チャット履歴
-- サークル基本情報
 - 現在日付
 - 質問者情報
+
+過去の同一チャンネル内チャット履歴やサークル基本情報をルーティング補助に使う実装は許容するが、Minecraft Wiki RAG経路へ入った後は `use_additional_memory=false` として扱い、検索・回答根拠には使わない。
 
 ### 6.2 出力
 ルーティング結果は次のフィールドを持つ。
@@ -225,10 +248,10 @@ Minecraft Wiki RAGのルーティングは、次を入力として専用LLMま�
 | フィールド | 型 | 説明 |
 | --- | --- | --- |
 | `target_model` | `string` | `minecraft_wiki` を選択できるようにする |
-| `use_additional_memory` | `bool` | 同一チャンネル履歴を回答生成コンテキストに使うか |
+| `use_additional_memory` | `bool` | Minecraft Wiki RAGでは常に `false` として扱う |
 | `fast_mode` | `bool` | 低遅延・低負荷モード |
 
-Minecraft Wiki RAGでは `additional_queries` を使わない。検索クエリは入力クエリそのものを使う。履歴は回答生成時の文脈としてのみ使い、追加クエリ生成や合成クエリ生成は行わない。
+Minecraft Wiki RAGでは `additional_queries` を使わない。検索クエリは入力クエリそのものを使う。追加クエリ生成、合成クエリ生成、履歴由来の検索拡張は行わない。
 
 CLIや外部連携payloadでは、主結果に必要な安定フィールドのみをトップレベルに置き、診断情報、ルーティング判断、実行モード、trace idは `metadata` 配下に入れる。
 
@@ -288,9 +311,9 @@ MMR後、またはファストモードではDoc Cap後に、上位 `minecraft_w
 `skip_parent_context=true` の場合は親チャンクを追加しない。
 
 ### 8.2 履歴搭載
-`use_additional_memory=true` の場合は、過去のチャット履歴をコンテキストに含める。コンテキストに含めるのは同一チャンネル内の履歴のみである。
+Minecraft Wiki RAGでは、過去のチャット履歴を回答生成コンテキストに含めない。
 
-履歴は回答の文脈理解に使うが、検索クエリ生成には使わず、Minecraft Wikiの根拠より優先しない。
+入口側で履歴が渡されても、Minecraft Wiki RAG経路では `use_additional_memory=false` に正規化する。検索クエリはユーザーの入力クエリそのものを使い、回答根拠は日本語版Minecraft Wikiの取得コンテキストだけに限定する。
 
 ### 8.3 プロンプト方針
 回答生成では次を明示する。
@@ -306,7 +329,7 @@ MMR後、またはファストモードではDoc Cap後に、上位 `minecraft_w
 
 - 表示名は記事タイトルと見出しを優先する。
 - URLは `canonical_url` を使う。
-- セクションアンカーを安定生成できる場合は見出しへのリンクを使う。
+- 日本語MediaWiki見出しのsection anchorを安定生成できない場合は記事URLのみを使う。現行実装では記事URLのみを出力し、見出しは `Source.label` に保持する。
 - 同一記事から複数チャンクを引用する場合は重複を抑制する。
 
 ## 9. 回答出力
@@ -349,36 +372,22 @@ CLIや外部連携向けpayloadのトップレベルには、利用者・連携�
 | `minecraft_wiki_rag.chunking.*` | Minecraft Wiki専用チャンク設定 |
 | `minecraft_wiki_rag.retrieval.*` | Minecraft Wiki専用検索設定 |
 
-`.env` または `.env.example` に設定を追加・削除する場合は、必ず他方にも同じ項目を反映する。
+パラメータは `configs` 配下で管理する。`.env` / `.env.example` にはAPIキーやトークンなどのsecretだけを置き、Minecraft Wiki RAGのchunking/retrievalパラメータやpromptは保存しない。`.env` または `.env.example` にsecret項目を追加・削除する場合は、必ず他方にも同じ項目を反映する。
 
-## 12. 現行実装との差分
-現行実装に存在するもの:
+## 12. 実装状態
+現行実装は、本設計のMinecraft Wiki RAG完全実装を満たす。
 
-- `MinecraftWikiConnector`
-- `features.sources.minecraft_wiki`
-- `integrations.minecraft_wiki.page_titles`
-- `integrations.minecraft_wiki.api_url`
-- `integrations.minecraft_wiki.page_url_base`
-- `integrations.minecraft_wiki.max_pages`
-- Raw cache、metadata sidecar、NormalizedDocument化
-- 汎用RAGのDense/Sparse/RRF/ReRank/MMR/親チャンク展開部品
-
-未実装または不足しているもの:
-
-- 日本語版Minecraft Wikiのみを対象にする明示的な設定・検証
-- Minecraft Wiki全記事タイトル列挙
-- 取得速度制限
-- revision timestampや差分更新
-- Wiki記法の検索向けMarkdown正規化
-- Minecraft Wiki専用の第1/第2/Summary Chunk成果物作成
-- Minecraft Wiki専用チャンク・検索設定
-- Minecraft WikiチャンクをDense/Sparse indexへ組み込む処理
-- source filter付きのMinecraft Wiki検索経路
-- ReRank後にDoc Capを行うMinecraft Wiki専用ランキング順序
-- Minecraft Wiki専用routing modelまたはrouting metadata
-- 回答フィルタリングを無効化する経路
-- Java版前提の回答生成プロンプト
-- 引用表示のMinecraft Wiki向け整形
+- `MinecraftWikiConnector` は日本語版URL検証、rate limit、429/5xx backoff、revision id比較、Raw cache、metadata sidecar、NormalizedDocument化を行う。
+- 手動 `index build` はMinecraft Wiki connector ingestionを呼び、Raw取得からindex作成まで完結できる。
+- auto-indexでingestion repositoryを使う場合も、Minecraft Wikiは専用raw chunk pipeline成果物をDense/keyword indexの正本にする。
+- Minecraft Wiki専用の第1/第2/sparse/Summary Chunk成果物を作成し、Summary Chunkは専用LLMを使い、失敗時だけfallback要約にする。
+- 検索時にはMinecraft Wiki専用のSudachi mode、normalized form、symbol処理、RRF k、sparse混合比率を適用する。
+- keyword index構築時にはMinecraft Wiki専用BM25 k1/bとSudachi設定で専用corpusを作る。
+- すべての正式入口は `ChatAnswerUsecase` / `RagService` 経路を通る。
+- Minecraft Wiki RAGではQuerySynthesizer、additional_queries、AnswerFilter、チャット履歴、サークル基本情報を使わない。
+- ReRank pool外候補はDoc Cap前に保持し、Doc Cap後にMMRと記事/見出し重複抑制を行う。
+- `Source.label` は記事名・見出し、`Source.uri` は記事URLとして分離する。
+- CLIや外部連携payloadは共通sanitizerで再帰的にmetadataを除外・マスクする。
 
 ## 13. テスト方針
 pytestは未導入の環境であることに留意し、既存の `unittest` スタイルに合わせる。
@@ -391,9 +400,12 @@ pytestは未導入の環境であることに留意し、既存の `unittest` �
 - Minecraft Version / Minecraft Edition判定用metadataが生成されない。
 - Dense/Sparse検索結果が `source_type=minecraft_wiki` に限定される。
 - Minecraft Wiki専用チャンク・検索設定がサークル情報RAG設定とは独立して使われる。
+- Minecraft Wiki専用keyword corpusが検索時に使われる。
 - ReRank後にDoc Capが適用される。
+- ReRank pool外候補がDoc Cap前に保持される。
 - ファストモードでReRank/MMRがスキップされ、RRF後にDoc Capが適用される。
 - 親/子チャンク展開でSummary Chunkが優先される。
 - 回答生成プロンプトにJava版前提が含まれる。
 - Minecraft Wiki RAGでは回答フィルタリングが呼ばれない。
 - CLI payloadで診断情報が `metadata` 配下に入る。
+- `sources[].uri` が純粋な記事URLになる。
