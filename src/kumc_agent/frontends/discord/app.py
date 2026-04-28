@@ -208,6 +208,134 @@ def create_bot(
             batch_id=batch_id,
         )
 
+    def _parse_event_custom_id(custom_id: str) -> tuple[str, str, str, str]:
+        parts = custom_id.split(":")
+        if len(parts) < 3 or parts[0] != "event":
+            return "", "", "", ""
+        target_id = parts[1]
+        action = parts[2]
+        batch_id = parts[3] if len(parts) > 3 else "single"
+        nonce = parts[4] if len(parts) > 4 else ""
+        return target_id, action, batch_id, nonce
+
+    def _parse_event_complete_custom_id(custom_id: str) -> tuple[str, str, str, str]:
+        parts = custom_id.split(":")
+        if len(parts) < 5 or parts[0] != "event_complete":
+            return "", "", "", ""
+        event_id = parts[1]
+        action = parts[2]
+        nonce = parts[-1]
+        key = ":".join(parts[3:-1])
+        return event_id, action, key, nonce
+
+    async def _run_event_component(
+        interaction: discord.Interaction,
+        *,
+        target_id: str,
+        action: str,
+        batch_id: str = "single",
+        comment: str = "",
+    ) -> None:
+        if action in {"done", "not_done"}:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if action == "not_done":
+                await interaction.followup.send(
+                    content="Event は未完了のままにしました。",
+                    ephemeral=True,
+                )
+                return
+            try:
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.run,
+                    WorkRequest(
+                        work_type="event_complete",
+                        target=target_id,
+                        instruction=comment or f"discord_component:complete:key={batch_id}",
+                        access=_access_context(interaction),
+                    ),
+                )
+            except (KeyError, ValueError) as exc:
+                await interaction.followup.send(
+                    content=str(exc) or "対象が見つからないか、操作できません。",
+                    ephemeral=True,
+                )
+                return
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                response = await asyncio.to_thread(
+                    workflow_context.workflow.approval,
+                    action=action,
+                    target_type="event",
+                    target_id=target_id,
+                    comment=comment or f"discord_component:{action}:batch={batch_id}",
+                    access=_access_context(interaction),
+                )
+            except (KeyError, ValueError) as exc:
+                await interaction.followup.send(
+                    content=str(exc) or "対象が見つからないか、操作できません。",
+                    ephemeral=True,
+                )
+                return
+        kwargs = {"content": response.text, "ephemeral": True}
+        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
+            kwargs["file"] = _format_markdown_attachment(
+                content=response.detail_markdown,
+                filename="kumc-agent-event-approval-detail.md",
+            )
+        await interaction.followup.send(**kwargs)
+
+    @bot.listen("on_interaction")
+    async def _event_component_listener(interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None)
+        if not isinstance(data, dict):
+            return
+        custom_id = str(data.get("custom_id") or "")
+        complete_target, complete_action, complete_key, _complete_nonce = (
+            _parse_event_complete_custom_id(custom_id)
+        )
+        if complete_target and complete_action:
+            if interaction.response.is_done():
+                return
+            await _run_event_component(
+                interaction,
+                target_id=complete_target,
+                action=complete_action,
+                batch_id=complete_key,
+            )
+            return
+        target_id, action, batch_id, _nonce = _parse_event_custom_id(custom_id)
+        if not target_id or not action:
+            return
+        if interaction.response.is_done():
+            return
+        if action == "edit":
+            class EventEditModal(discord.ui.Modal, title="Edit Event Candidate"):
+                comment = discord.ui.TextInput(
+                    label="修正内容",
+                    style=discord.TextStyle.paragraph,
+                    required=True,
+                    max_length=1000,
+                )
+
+                async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                    await _run_event_component(
+                        modal_interaction,
+                        target_id=target_id,
+                        action="edit",
+                        batch_id=batch_id,
+                        comment=str(self.comment.value),
+                    )
+
+            await interaction.response.send_modal(EventEditModal())
+            return
+        await _run_event_component(
+            interaction,
+            target_id=target_id,
+            action=action,
+            batch_id=batch_id,
+        )
+
     def _first_candidate_id(response: IntegratedInputResponse) -> str:
         candidates = (
             tuple(response.task_candidates or tuple())
@@ -248,76 +376,18 @@ def create_bot(
                 nonce = "v1"
                 for label, action, style in (
                     ("Approve", "approve", discord.ButtonStyle.success),
-                    ("Reject", "reject", discord.ButtonStyle.danger),
                     ("Edit", "edit", discord.ButtonStyle.primary),
-                    ("Evidence", "show", discord.ButtonStyle.secondary),
-                    ("Diff", "show", discord.ButtonStyle.secondary),
+                    ("Reject", "reject", discord.ButtonStyle.danger),
+                    ("Evidence", "evidence", discord.ButtonStyle.secondary),
+                    ("Diff", "diff", discord.ButtonStyle.secondary),
+                    ("Duplicates", "duplicates", discord.ButtonStyle.secondary),
                 ):
                     button = discord.ui.Button(
                         label=label,
                         style=style,
-                        custom_id=f"event:{candidate_id}:{action}:{batch_id or 'single'}:{nonce}",
+                        custom_id=f"event:{candidate_id}:{action}:{batch_id or 'single'}:{nonce}"[:100],
                     )
-                    if action == "edit":
-                        button.callback = self._edit_callback
-                    else:
-                        button.callback = self._button_callback(action)
                     self.add_item(button)
-
-            async def _run(self, interaction: discord.Interaction, action: str) -> None:
-                await interaction.response.defer(ephemeral=True, thinking=True)
-                response = await asyncio.to_thread(
-                    workflow_context.workflow.approval,
-                    action=action,
-                    target_type="event",
-                    target_id=self.candidate_id,
-                    comment=f"discord_component:{action}:batch={batch_id}",
-                    access=_access_context(interaction),
-                )
-                kwargs = {"content": response.text, "ephemeral": True}
-                if response.detail_markdown and len(response.detail_markdown) > len(response.text):
-                    kwargs["file"] = _format_markdown_attachment(
-                        content=response.detail_markdown,
-                        filename="kumc-agent-event-approval-detail.md",
-                    )
-                await interaction.followup.send(**kwargs)
-
-            def _button_callback(self, action: str):
-                async def _callback(interaction: discord.Interaction) -> None:
-                    await self._run(interaction, action)
-
-                return _callback
-
-            async def _edit_callback(self, interaction: discord.Interaction) -> None:
-                view = self
-
-                class EventEditModal(discord.ui.Modal, title="Edit Event Candidate"):
-                    comment = discord.ui.TextInput(
-                        label="修正内容",
-                        style=discord.TextStyle.paragraph,
-                        required=True,
-                        max_length=1000,
-                    )
-
-                    async def on_submit(self, modal_interaction: discord.Interaction) -> None:
-                        await modal_interaction.response.defer(ephemeral=True, thinking=True)
-                        response = await asyncio.to_thread(
-                            workflow_context.workflow.approval,
-                            action="edit",
-                            target_type="event",
-                            target_id=view.candidate_id,
-                            comment=str(self.comment.value),
-                            access=_access_context(modal_interaction),
-                        )
-                        kwargs = {"content": response.text, "ephemeral": True}
-                        if response.detail_markdown and len(response.detail_markdown) > len(response.text):
-                            kwargs["file"] = _format_markdown_attachment(
-                                content=response.detail_markdown,
-                                filename="kumc-agent-event-edit-detail.md",
-                            )
-                        await modal_interaction.followup.send(**kwargs)
-
-                await interaction.response.send_modal(EventEditModal())
 
         return EventApprovalView(target_id)
 

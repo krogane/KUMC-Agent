@@ -523,12 +523,12 @@ class FileWorkflowRepository:
         if candidate.status not in {"proposed", "approved"}:
             raise ValueError(f"EventCandidate is not approvable: {candidate.status}")
         stored_event = self.save_event(event)
+        stored_approval = self.save_approval(approval)
         merged = self.update_event_candidate_status(
             candidate_id=candidate_id,
             status="merged",
             metadata=metadata,
         )
-        stored_approval = self.save_approval(approval)
         return stored_event, merged, stored_approval
 
     def merge_event_change_candidate(
@@ -545,12 +545,12 @@ class FileWorkflowRepository:
         if candidate.status not in {"proposed", "approved"}:
             raise ValueError(f"EventChangeCandidate is not approvable: {candidate.status}")
         stored_event = self.save_event(event)
+        stored_approval = self.save_approval(approval)
         merged = self.update_event_change_candidate_status(
             candidate_id=candidate_id,
             status="merged",
             metadata=metadata,
         )
-        stored_approval = self.save_approval(approval)
         return stored_event, merged, stored_approval
 
     def save_event_candidate(self, candidate: EventCandidate) -> EventCandidate:

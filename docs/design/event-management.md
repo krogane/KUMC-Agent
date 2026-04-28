@@ -24,22 +24,23 @@
 
 対象外は、外部カレンダーを正本にする設計、外部カレンダー双方向同期、会計・参加者募集・出欠管理の詳細である。`ScheduleEvent` はイベントに紐づく個別予定を表す補助正本であり、本設計の主対象は `Event` とする。
 
-## 3. 現行実装との差分
-現行実装は、手動入力から `EventCandidate` を作成し、承認後に `Event` へ昇格する最小経路を持つ。
+## 3. 実装同期状況
+2026-04-28時点で、本設計の主要要件は現行実装へ同期済みである。実装は初期実装ではなく、候補抽出、正本変更候補、承認、Discord通知、auto-index差分連携まで含む。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| 候補抽出 | `event_add` がラベルと日付のルールベース抽出で `EventCandidate` を作成する | RAGデータ差分・自動登録は専用LLMが抽出し、重複検出と変更・削除検出も行う |
-| 手動登録 | `event_add` はtitle未抽出時に先頭行または `Untitled event` を使う | 必要情報を抽出できない場合は候補保存前にユーザーへ質問する |
-| 正本登録 | `/approval --type event approve` で `EventCandidate` を `Event` に昇格する | Discord Componentを含む承認UIから昇格できる |
-| 候補修正 | `/approval --type event edit` でtitle、summary、place、starts_atを修正できる | 自然言語修正をComponentから受け付け、変更前後の差分を明示する |
-| 却下 | `/approval --type event reject` で `status=rejected` にする | まとめ承認時も却下理由を保存する |
-| 表示 | `event_list` は全Eventを表示し、`event_brief` は関連タスクとRAG抜粋を表示する | 日時、場所、状態、関連タスクで絞り込める |
-| 変更・削除 | 正本Eventの変更・削除候補は未実装 | 正本変更前に候補作成と承認を通す |
-| 通知 | イベント通知と完了確認は未実装 | n日前通知、当日通知、完了確認、`done` 反映を行う |
-| 権限 | event系操作にadmin限定チェックが未徹底 | イベント管理はadmin限定にする |
-| 保存先 | JSONL repositoryとPostgres repositoryがある | production正本は内部DBとし、JSONLはローカル・テスト用に限定する |
-| 承認UI | slash command中心。Taskだけ簡易Componentがある | Event用Discord Componentで承認、修正、却下を選択できる |
+| 項目 | 実装状態 |
+| --- | --- |
+| 候補抽出 | `EventExtractionService` が専用promptで `new_events` と `event_changes` を抽出する。LLM未設定、schema不正、根拠不足では候補を保存せず `metadata.degraded` を返す。 |
+| RAG差分連携 | `auto_index_update` がingestion差分のactive chunkを `event_extract_from_delta` へ渡し、EventCandidate / EventChangeCandidateを作成する。 |
+| 手動登録 | `event_add` も専用LLM抽出を使い、必須情報を抽出できない場合は候補を保存せず確認応答を返す。 |
+| 手動変更・削除 | `event_update` / `event_delete` は既存Event一覧を入力に含めてLLM抽出し、一意に変更候補を作れない場合は保存しない。 |
+| 対象解決 | `_resolve_event()` は先頭Eventへのfallbackを行わず、ID・titleから一意に決まる場合だけEventを返す。 |
+| 正本登録 | `approval --type event approve` で候補をEventへ昇格し、候補statusを `merged` にする。変更候補は承認後だけ正本へ反映する。 |
+| 承認UI | Discord Component custom id `event:{target_id}:{action}:{batch_id}:v1` で approve / edit / reject / evidence / diff / duplicates を処理する。 |
+| まとめ承認 | `event_batch_approval` が期間、候補ID、変更候補ID、通知先、送信message id、deliveryを保存する。 |
+| 通知 | `event_notify` が設定値を既定としてbefore/day_of/completion通知をDiscordへ送信し、deliveryと通知keyを `Event.metadata.notifications` に保存する。 |
+| 完了確認 | `event_complete:{event_id}:done:{key}:v1` Componentから `event_complete` を実行し、Eventを `done` にする。 |
+| 権限 | `configs/main/event_management.yaml` のadmin user id / role idと `security.maintenance_command_author_ids` を `EventAccessPolicy` に接続する。 |
+| 保存先 | productionはPostgres、ローカル・テストはJSONL repositoryを使う。Postgresは承認反映をtransaction内で処理する。 |
 
 `src/kumc_agent/infra/legacy` は参照・依存しない。
 
@@ -125,10 +126,7 @@ flowchart TD
 - 将来、検索性能や外部連携上必要になった場合のみ `Event.metadata.related_task_ids` または別テーブルでmaterializeする。
 
 ### 5.4 EventChangeCandidate
-現行実装には正本Eventの変更・削除候補モデルがない。本設計では次のいずれかで表現する。
-
-- `EventChangeCandidate` を新設する。
-- 汎用 `WorkflowCandidate(candidate_type="event_change")` に専用schemaを持たせる。
+`EventChangeCandidate` は、正本Eventの変更・削除を承認前に保持する候補である。
 
 保持する項目は次の通り。
 
@@ -206,7 +204,7 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 議事録下書き
 - 統合入力受付または自律エージェントの出力
 
-現行実装ではイベント自動登録は未実装である。`event_add` は手動登録相当の入力を処理する。
+`auto_index_update` のingestion差分処理から `WorkflowService.event_extract_from_delta()` を呼び、変更されたactive chunkと `Citation` を専用LLMへ渡す。
 
 ### 7.2 抽出
 イベント自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、イベントらしい記述を `EventCandidate` として抽出する。
@@ -260,8 +258,6 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 手動登録では、入力からイベント名、日時、場所、概要を抽出する。登録に必要な情報を抽出できなかった場合は、候補を保存する前にユーザーへ質問し、不足情報を補完してから `EventCandidate` を作成する。
 
 必須情報は、少なくとも `title` と `starts_at` とする。`place` と `summary` は任意にできるが、ユーザーの入力が場所や日時を指定しているように見えるにもかかわらず解釈できない場合は質問する。
-
-現行実装では、title未抽出時に先頭行または `Untitled event` を使い、候補を作成する。`kumc-agent.md` に従い、必要情報を抽出できない場合は候補保存前に質問する実装へ変更する。
 
 手動登録の候補は、即時承認UIを返してもよいが、承認前に `Event` を作成してはならない。
 
@@ -338,7 +334,7 @@ JSONL repositoryではappend-only方式を維持しつつ、二重承認を検�
 5. LLMが条件に合うイベントを要約して回答する。
 6. 抽出条件、limit、内部判断は `metadata` 配下に入れる。
 
-現行実装では `event_list` は全Eventを表示し、`event_brief` は指定Eventまたは先頭Eventについて未完了タスクとRAG抜粋を表示する。今後は日時、場所、状態、関連タスクで絞り込めるようにrepository queryとプロンプトを拡張する。
+`event_list` は日時、場所、状態、関連タスク条件で絞り込む。`event_brief` は対象Eventが一意に決まる場合にその関連未完了タスクとRAG抜粋を表示し、対象未指定の場合は全体の未完了関連タスクを表示する。
 
 表示形式の基本例:
 
@@ -357,7 +353,7 @@ Event ID / title / starts_at / ends_at / place / status / related open tasks
 
 通知対象は、`status in planning/announced` かつ `starts_at` が設定されているEventである。`canceled` と `done` は通知対象外にする。
 
-通知済み状態は `Event.metadata.notifications` に保存する。通知keyは `before:{n}`、`day_of:{YYYY-MM-DD}`、`completion:{YYYY-MM-DD}` のように安定化し、同じ通知を重複送信しない。
+通知済み状態は `Event.metadata.notifications` に保存する。通知keyは `before:{n}:{YYYY-MM-DD}`、`day_of:{YYYY-MM-DD}`、`completion:{YYYY-MM-DD}` のように安定化し、同じ通知を重複送信しない。
 
 完了確認で完了が選択された場合は、承認またはadmin操作として `status="done"` に変更し、`done_by`、`done_comment`、通知message idをmetadataへ保存する。
 

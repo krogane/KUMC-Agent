@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.docgen import DocGenRequest
@@ -41,7 +42,9 @@ from kumc_agent.features.event_management import (
     DuplicateEventDetector,
     EventAccessPolicy,
     EventExtractionService,
+    EventNotificationMessage,
     EventNotificationPlanner,
+    EventNotificationSender,
 )
 from kumc_agent.features.minecraft import MinecraftSupportService
 from kumc_agent.features.task_management import (
@@ -104,6 +107,11 @@ class WorkflowService:
         event_access_policy: EventAccessPolicy | None = None,
         event_duplicate_detector: DuplicateEventDetector | None = None,
         event_notification_planner: EventNotificationPlanner | None = None,
+        event_notification_sender: EventNotificationSender | None = None,
+        event_notification_channel_id: str = "",
+        event_approval_batch_interval_days: int = 7,
+        event_notification_before_days: int = 1,
+        event_timezone: str = "Asia/Tokyo",
         llm: LLMPort | None = None,
         prompts_dir: Path | None = None,
         llm_model_name: str = "",
@@ -138,6 +146,11 @@ class WorkflowService:
         self.event_access_policy = event_access_policy or EventAccessPolicy()
         self.event_duplicate_detector = event_duplicate_detector or DuplicateEventDetector()
         self.event_notification_planner = event_notification_planner or EventNotificationPlanner()
+        self.event_notification_sender = event_notification_sender
+        self.event_notification_channel_id = event_notification_channel_id
+        self.event_approval_batch_interval_days = event_approval_batch_interval_days
+        self.event_notification_before_days = event_notification_before_days
+        self.event_timezone = event_timezone or "Asia/Tokyo"
 
     def run(self, request: WorkRequest) -> WorkResponse:
         run_record = self._start_workflow_run(request)
@@ -808,45 +821,59 @@ class WorkflowService:
         if not self.event_access_policy.can_manage(request.access):
             return self._event_forbidden_response("workflow.event_add", request.access)
         source_text = self._source_text(request)
-        event = self._event_from_text(source_text)
-        missing: list[str] = []
-        if not event.title:
-            missing.append("title")
-        if event.starts_at is None:
-            missing.append("starts_at")
-        if missing:
+        result = self.event_extractor.extract(
+            text=source_text,
+            evidence=tuple(),
+            access=request.access,
+            existing_events=tuple(self.repository.list_events(include_canceled=True)),
+            metadata={
+                "source": "event_add",
+                "created_by": "user",
+                "manual": True,
+                "expected_operation": "create",
+            },
+        )
+        if result.metadata.get("degraded"):
             return WorkResponse(
                 text="イベント候補を作成する前に不足情報を確認してください。",
-                detail_markdown="必要項目: title, starts_at。例: イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+                detail_markdown=(
+                    "EventCandidate は作成していません。title と starts_at を含め、"
+                    "LLM抽出が利用できる状態で再試行してください。"
+                ),
                 metadata={
-                    "missing_fields": missing,
+                    "missing_fields": ["title", "starts_at"],
                     "candidate_created": False,
+                    "extraction": result.metadata,
                 },
             )
-        date_mentioned = bool(re.search(r"(日時|日付|開催|date|time|at)[:：]?\s*\S+", source_text, flags=re.IGNORECASE))
-        if date_mentioned and event.starts_at is None:
+        if not result.candidates:
             return WorkResponse(
-                text="イベント日時の解釈を確認してください。YYYY-MM-DD HH:MM 形式で指定してください。",
-                detail_markdown="EventCandidate は作成していません。",
-                metadata={"ambiguous_fields": ["starts_at"], "candidate_created": False},
+                text="イベント候補を作成する前に不足情報を確認してください。",
+                detail_markdown=(
+                    "EventCandidate は作成していません。イベント名、開始日時、根拠を明確に指定してください。"
+                ),
+                metadata={
+                    "missing_fields": ["title", "starts_at"],
+                    "candidate_created": False,
+                    "extraction": result.metadata,
+                },
+            )
+        if len(result.candidates) > 1:
+            return WorkResponse(
+                text="複数のイベント候補が抽出されたため、登録対象を一つに絞ってください。",
+                detail_markdown=self._format_event_candidates(list(result.candidates)),
+                metadata={"candidate_created": False, "ambiguous": True},
             )
         candidate = self.repository.save_event_candidate(
             self._annotate_event_duplicate(
-                EventCandidate(
-                    id=stable_hash(f"event-candidate:{event.title}:{event.starts_at}:{event.place}")[:32],
-                title=event.title,
-                summary=event.summary,
-                starts_at=event.starts_at,
-                ends_at=event.ends_at,
-                place=event.place,
-                related_source_ids=event.related_source_ids,
-                confidence="high" if event.starts_at and event.place else "medium",
-                status="proposed",
-                created_by="user",
-                metadata={
-                    **event.metadata,
-                    "created_by_user_id": request.access.user_id,
-                },
+                replace(
+                    result.candidates[0],
+                    created_by="user",
+                    metadata={
+                        **result.candidates[0].metadata,
+                        "source": "event_add",
+                        "created_by_user_id": request.access.user_id,
+                    },
                 )
             )
         )
@@ -870,18 +897,84 @@ class WorkflowService:
             text=combined,
             evidence=tuple(retrieved["citations"]),
             access=request.access,
+            existing_events=tuple(self.repository.list_events(include_canceled=True)),
             metadata={"source": "event_extract"},
         )
         stored: list[EventCandidate] = []
+        stored_changes: list[EventChangeCandidate] = []
         if not result.metadata.get("degraded"):
             for candidate in result.candidates:
                 stored.append(self.repository.save_event_candidate(self._annotate_event_duplicate(candidate)))
+            for candidate in result.change_candidates:
+                stored_changes.append(self.repository.save_event_change_candidate(candidate))
         self._audit("workflow.event_extract", request.access, "succeeded", "event_candidates")
         return WorkResponse(
-            text=f"EventCandidate を {len(stored)} 件登録しました。承認されるまで Event 正本には入りません。",
-            detail_markdown=self._format_event_candidates(stored),
+            text=(
+                f"EventCandidate を {len(stored)} 件、Event変更候補を {len(stored_changes)} 件登録しました。"
+                "承認されるまで Event 正本には入りません。"
+            ),
+            detail_markdown="\n\n".join(
+                [
+                    self._format_event_candidates(stored),
+                    self._format_event_change_candidates(stored_changes),
+                ]
+            ),
             event_candidates=tuple(stored),
-            metadata={"extraction": {**result.metadata, "candidate_count": len(stored)}},
+            event_change_candidates=tuple(stored_changes),
+            metadata={
+                "extraction": {
+                    **result.metadata,
+                    "candidate_count": len(stored),
+                    "change_candidate_count": len(stored_changes),
+                }
+            },
+        )
+
+    def event_extract_from_delta(
+        self,
+        *,
+        text: str,
+        evidence: tuple[Citation, ...],
+        access: AccessContext,
+        metadata: dict[str, Any],
+    ) -> WorkResponse:
+        if not self.event_access_policy.can_manage(access):
+            return self._event_forbidden_response("workflow.event_extract_delta", access)
+        result = self.event_extractor.extract(
+            text=text,
+            evidence=evidence,
+            access=access,
+            existing_events=tuple(self.repository.list_events(include_canceled=True)),
+            metadata={**metadata, "source": metadata.get("source") or "auto_index_update"},
+        )
+        stored: list[EventCandidate] = []
+        stored_changes: list[EventChangeCandidate] = []
+        if not result.metadata.get("degraded"):
+            for candidate in result.candidates:
+                stored.append(self.repository.save_event_candidate(self._annotate_event_duplicate(candidate)))
+            for candidate in result.change_candidates:
+                stored_changes.append(self.repository.save_event_change_candidate(candidate))
+        self._audit("workflow.event_extract_delta", access, "succeeded", "event_candidates")
+        return WorkResponse(
+            text=(
+                f"EventCandidate を {len(stored)} 件、Event変更候補を {len(stored_changes)} 件登録しました。"
+                "承認されるまで Event 正本には入りません。"
+            ),
+            detail_markdown="\n\n".join(
+                [
+                    self._format_event_candidates(stored),
+                    self._format_event_change_candidates(stored_changes),
+                ]
+            ),
+            event_candidates=tuple(stored),
+            event_change_candidates=tuple(stored_changes),
+            metadata={
+                "extraction": {
+                    **result.metadata,
+                    "candidate_count": len(stored),
+                    "change_candidate_count": len(stored_changes),
+                }
+            },
         )
 
     def event_list(self, request: WorkRequest) -> WorkResponse:
@@ -947,47 +1040,58 @@ class WorkflowService:
     def event_update(self, request: WorkRequest) -> WorkResponse:
         if not self.event_access_policy.can_manage(request.access):
             return self._event_forbidden_response("workflow.event_update", request.access)
-        event = self._resolve_event(request)
-        if event is None:
-            raise KeyError(request.target or request.instruction)
-        after = _event_payload_for_change(event)
-        title = _extract_labeled_value(request.instruction, ("イベント", "event", "title", "件名", "名前"))
-        summary = _extract_labeled_value(request.instruction, ("summary", "概要", "説明", "本文"))
-        place = _extract_labeled_value(request.instruction, ("場所", "会場", "place"))
-        starts_at = _extract_datetime(request.instruction)
-        status = _extract_event_status(request.instruction)
-        if title:
-            after["title"] = _clean_title(title)
-        if summary:
-            after["summary"] = summary
-        if place:
-            after["place"] = place
-        if starts_at:
-            after["starts_at"] = starts_at.isoformat()
-        if status:
-            after["status"] = status
-        if after == _event_payload_for_change(event):
+        existing_events = tuple(self.repository.list_events(include_canceled=True))
+        target_event = self._resolve_event(request) if request.target else None
+        result = self.event_extractor.extract(
+            text=self._source_text(request),
+            evidence=tuple(),
+            access=request.access,
+            existing_events=existing_events,
+            metadata={
+                "source": "event_update",
+                "created_by": "user",
+                "manual": True,
+                "expected_operation": "update",
+                "target": request.target,
+            },
+        )
+        candidates = [candidate for candidate in result.change_candidates if candidate.operation == "update"]
+        if target_event is not None:
+            candidates = [candidate for candidate in candidates if candidate.event_id == target_event.id]
+        if result.metadata.get("degraded") or not candidates:
             return WorkResponse(
-                text="変更内容を解釈できませんでした。title/status/日時/場所/概要を指定してください。",
-                metadata={"candidate_created": False, "missing_fields": ["change"]},
+                text="Event変更候補を作成する前に対象イベントと変更内容を確認してください。",
+                detail_markdown=(
+                    "EventChangeCandidate は作成していません。LLM抽出が利用できる状態で、"
+                    "一意に特定できる Event と変更後の日時・場所・概要・状態などを指定してください。"
+                ),
+                metadata={
+                    "candidate_created": False,
+                    "missing_fields": ["target_event", "change"],
+                    "extraction": result.metadata,
+                },
             )
+        if len(candidates) > 1:
+            return WorkResponse(
+                text="複数のEvent変更候補が抽出されたため、対象を一つに絞ってください。",
+                detail_markdown=self._format_event_change_candidates(candidates),
+                metadata={"candidate_created": False, "ambiguous": True},
+            )
+        raw_candidate = candidates[0]
         candidate = self.repository.save_event_change_candidate(
-            EventChangeCandidate(
-                id=stable_hash(f"event-change:update:{event.id}:{json.dumps(after, sort_keys=True, default=str)}")[:32],
-                event_id=event.id,
-                operation="update",
-                before=_event_payload_for_change(event),
-                after=after,
-                reason=request.instruction,
-                confidence="high",
-                status="proposed",
+            replace(
+                raw_candidate,
                 created_by="user",
-                metadata={"source": "event_update", "created_by_user_id": request.access.user_id},
+                metadata={
+                    **raw_candidate.metadata,
+                    "source": "event_update",
+                    "created_by_user_id": request.access.user_id,
+                },
             )
         )
         self._audit("workflow.event_update", request.access, "proposed", candidate.id)
         return WorkResponse(
-            text=f"Event変更候補を作成しました。承認されるまで正本は変更されません: {event.id}",
+            text=f"Event変更候補を作成しました。承認されるまで正本は変更されません: {candidate.event_id}",
             detail_markdown=self._format_event_change_candidates([candidate]),
             event_change_candidates=(candidate,),
         )
@@ -995,26 +1099,58 @@ class WorkflowService:
     def event_delete(self, request: WorkRequest) -> WorkResponse:
         if not self.event_access_policy.can_manage(request.access):
             return self._event_forbidden_response("workflow.event_delete", request.access)
-        event = self._resolve_event(request)
-        if event is None:
-            raise KeyError(request.target or request.instruction)
+        existing_events = tuple(self.repository.list_events(include_canceled=True))
+        target_event = self._resolve_event(request) if request.target else None
+        result = self.event_extractor.extract(
+            text=self._source_text(request),
+            evidence=tuple(),
+            access=request.access,
+            existing_events=existing_events,
+            metadata={
+                "source": "event_delete",
+                "created_by": "user",
+                "manual": True,
+                "expected_operation": "delete",
+                "target": request.target,
+            },
+        )
+        candidates = [candidate for candidate in result.change_candidates if candidate.operation == "delete"]
+        if target_event is not None:
+            candidates = [candidate for candidate in candidates if candidate.event_id == target_event.id]
+        if result.metadata.get("degraded") or not candidates:
+            return WorkResponse(
+                text="Event削除候補を作成する前に対象イベントを確認してください。",
+                detail_markdown=(
+                    "EventChangeCandidate は作成していません。LLM抽出が利用できる状態で、"
+                    "削除対象の Event を一意に特定できる情報を指定してください。"
+                ),
+                metadata={
+                    "candidate_created": False,
+                    "missing_fields": ["target_event"],
+                    "extraction": result.metadata,
+                },
+            )
+        if len(candidates) > 1:
+            return WorkResponse(
+                text="複数のEvent削除候補が抽出されたため、対象を一つに絞ってください。",
+                detail_markdown=self._format_event_change_candidates(candidates),
+                metadata={"candidate_created": False, "ambiguous": True},
+            )
+        raw_candidate = candidates[0]
         candidate = self.repository.save_event_change_candidate(
-            EventChangeCandidate(
-                id=stable_hash(f"event-change:delete:{event.id}:{request.instruction}")[:32],
-                event_id=event.id,
-                operation="delete",
-                before=_event_payload_for_change(event),
-                after={"status": "canceled"},
-                reason=request.instruction,
-                confidence="high",
-                status="proposed",
+            replace(
+                raw_candidate,
                 created_by="user",
-                metadata={"source": "event_delete", "created_by_user_id": request.access.user_id},
+                metadata={
+                    **raw_candidate.metadata,
+                    "source": "event_delete",
+                    "created_by_user_id": request.access.user_id,
+                },
             )
         )
         self._audit("workflow.event_delete", request.access, "proposed", candidate.id)
         return WorkResponse(
-            text=f"Event削除候補を作成しました。承認されるまで正本はcanceledになりません: {event.id}",
+            text=f"Event削除候補を作成しました。承認されるまで正本はcanceledになりません: {candidate.event_id}",
             detail_markdown=self._format_event_change_candidates([candidate]),
             event_change_candidates=(candidate,),
         )
@@ -1022,41 +1158,86 @@ class WorkflowService:
     def event_notify(self, request: WorkRequest) -> WorkResponse:
         if not self.event_access_policy.can_manage(request.access):
             return self._event_forbidden_response("workflow.event_notify", request.access)
-        before_days = _extract_int_labeled_value(request.instruction, ("days", "日数")) or 1
+        before_days = (
+            _extract_int_labeled_value(request.instruction, ("days", "日数"))
+            or self.event_notification_before_days
+        )
         kind = _extract_labeled_value(request.instruction, ("kind", "type", "通知種別")) or "before"
+        channel_id = (
+            _extract_labeled_value(request.instruction, ("channel", "channel_id", "通知先"))
+            or self.event_notification_channel_id
+        )
         events = self.repository.list_events(include_canceled=False)
+        now = self._event_now()
         selected = self.event_notification_planner.notifications(
             events=events,
+            now=now,
             before_days=before_days,
             kind=kind,
         )
-        stored: list[Event] = []
-        now = datetime.now(UTC)
+        stored_by_id: dict[str, Event] = {}
+        deliveries: list[dict[str, object]] = []
+        now_text = now.isoformat()
         for event in selected:
+            current_event = stored_by_id.get(event.id, event)
             key = self.event_notification_planner.notification_key(
-                event=event,
+                event=current_event,
                 now=now,
                 before_days=before_days,
                 kind=kind,
             )
             if key is None:
                 continue
-            notifications = dict(event.metadata.get("notifications") or {})
-            notifications[key] = {
-                "sent_at": now.isoformat(),
-                "channel_id": _extract_labeled_value(request.instruction, ("channel", "channel_id", "通知先")),
+            delivery_payload: dict[str, object] = {
+                "status": "not_configured",
+                "channel": "none",
             }
-            stored.append(
-                self.repository.save_event(
-                    replace(event, metadata={**event.metadata, "notifications": notifications})
+            if self.event_notification_sender is not None and channel_id:
+                delivery = self.event_notification_sender.send(
+                    EventNotificationMessage(
+                        kind=kind,
+                        event_id=current_event.id,
+                        title=current_event.title,
+                        channel_id=channel_id,
+                        content=_event_notification_content(current_event, kind),
+                        custom_id=f"event_complete:{current_event.id}:done:{key}:v1",
+                        metadata={
+                            "buttons": (
+                                _event_completion_buttons(event_id=current_event.id, key=key)
+                                if kind in {"day_of", "completion"}
+                                else []
+                            )
+                        },
+                    )
+                )
+                delivery_payload = asdict(delivery)
+            deliveries.append({"event_id": current_event.id, "kind": key, "delivery": delivery_payload})
+            notifications = dict(current_event.metadata.get("notifications") or {})
+            notifications[key] = {
+                "sent_at": now_text,
+                "channel_id": channel_id,
+                "delivery": delivery_payload,
+            }
+            stored_by_id[current_event.id] = self.repository.save_event(
+                replace(
+                    current_event,
+                    metadata={**current_event.metadata, "notifications": notifications},
                 )
             )
         self._audit("workflow.event_notify", request.access, "succeeded", "events")
+        stored = list(stored_by_id.values())
         return WorkResponse(
             text=f"通知対象 Event は {len(stored)} 件です。",
             detail_markdown=self._format_events(stored),
             events=tuple(stored),
-            metadata={"notification_count": len(stored), "before_days": before_days, "kind": kind},
+            metadata={
+                "notification_count": len(stored),
+                "notification_events": len(deliveries),
+                "before_days": before_days,
+                "kind": kind,
+                "channel_id": channel_id,
+                "deliveries": deliveries,
+            },
         )
 
     def event_batch_approval(self, request: WorkRequest) -> WorkResponse:
@@ -1068,6 +1249,10 @@ class WorkflowService:
             if candidate.created_by == "agent"
         ]
         change_candidates = self.repository.list_event_change_candidates(status="proposed")
+        channel_id = (
+            _extract_labeled_value(request.instruction, ("channel", "channel_id", "通知先"))
+            or self.event_notification_channel_id
+        )
         idempotency_key = stable_hash(
             "event-batch:"
             + ":".join(candidate.id for candidate in candidates)
@@ -1078,18 +1263,54 @@ class WorkflowService:
         if existing is not None:
             batch = existing
         else:
+            period_end = datetime.now(UTC)
+            period_start = period_end - timedelta(days=max(1, self.event_approval_batch_interval_days))
             batch = self.repository.save_event_approval_batch(
                 EventApprovalBatch(
                     id=idempotency_key,
                     candidate_ids=tuple(candidate.id for candidate in candidates),
                     change_candidate_ids=tuple(candidate.id for candidate in change_candidates),
-                    period_end=datetime.now(UTC),
-                    notification_channel_id=_extract_labeled_value(
-                        request.instruction,
-                        ("channel", "channel_id", "通知先"),
-                    ),
+                    period_start=period_start,
+                    period_end=period_end,
+                    notification_channel_id=channel_id,
                     status="pending",
-                    metadata={"source": "event_batch_approval", "idempotency_key": idempotency_key},
+                    metadata={
+                        "source": "event_batch_approval",
+                        "idempotency_key": idempotency_key,
+                        "component_nonce": "v1",
+                    },
+                )
+            )
+        if (
+            self.event_notification_sender is not None
+            and channel_id
+            and not batch.notification_message_id
+        ):
+            delivery = self.event_notification_sender.send(
+                EventNotificationMessage(
+                    kind="approval_batch",
+                    event_id=batch.id,
+                    title="Event approval batch",
+                    channel_id=channel_id,
+                    content=(
+                        f"Event承認batch: {batch.id}\n"
+                        f"候補 {len(candidates)} 件 / 変更候補 {len(change_candidates)} 件"
+                    ),
+                    metadata={
+                        "buttons": _event_approval_buttons(
+                            candidate_ids=[candidate.id for candidate in candidates],
+                            change_candidate_ids=[candidate.id for candidate in change_candidates],
+                            batch_id=batch.id,
+                        )
+                    },
+                )
+            )
+            batch = self.repository.save_event_approval_batch(
+                replace(
+                    batch,
+                    notification_message_id=delivery.message_id or batch.notification_message_id,
+                    status="sent" if delivery.status == "sent" else batch.status,
+                    metadata={**batch.metadata, "delivery": asdict(delivery)},
                 )
             )
         detail = "\n\n".join(
@@ -1108,7 +1329,7 @@ class WorkflowService:
             event_candidates=tuple(candidates),
             event_change_candidates=tuple(change_candidates),
             event_approval_batches=(batch,),
-            metadata={"batch_id": batch.id},
+            metadata={"batch_id": batch.id, "channel_id": channel_id},
         )
 
     def event_complete(self, request: WorkRequest) -> WorkResponse:
@@ -1116,7 +1337,10 @@ class WorkflowService:
             return self._event_forbidden_response("workflow.event_complete", request.access)
         event = self._resolve_event(request)
         if event is None:
-            raise KeyError(request.target or request.instruction)
+            return WorkResponse(
+                text="完了対象の Event を一意に特定できませんでした。",
+                metadata={"candidate_created": False, "missing_fields": ["target_event"]},
+            )
         stored = self.repository.save_event(
             replace(
                 event,
@@ -1726,7 +1950,7 @@ class WorkflowService:
                 event_candidates=tuple(candidates),
                 event_change_candidates=tuple(change_candidates),
             )
-        if action == "show":
+        if action in {"show", "evidence", "duplicates", "diff", "show_evidence", "show_duplicates", "show_diff"}:
             candidate = self.repository.get_event_candidate(target_id) if target_id else None
             change_candidate = (
                 self.repository.get_event_change_candidate(target_id) if target_id else None
@@ -2736,6 +2960,13 @@ class WorkflowService:
             metadata={"source": "event_add"},
         )
 
+    def _event_now(self) -> datetime:
+        try:
+            timezone = ZoneInfo(self.event_timezone)
+        except ZoneInfoNotFoundError:
+            timezone = UTC
+        return datetime.now(timezone)
+
     def _schedule_from_text(self, text: str) -> ScheduleEvent:
         title = _extract_labeled_value(text, ("予定", "件名", "title", "名前"))
         title = title or _first_nonempty_line(text) or "Untitled schedule"
@@ -2753,19 +2984,35 @@ class WorkflowService:
         )
 
     def _resolve_event(self, request: WorkRequest) -> Event | None:
-        target = (request.target or request.instruction).strip()
+        target = (
+            request.target
+            or _extract_labeled_value(request.instruction, ("event_id", "イベントID", "event", "イベント"))
+            or request.instruction
+        ).strip()
         if target:
             direct = self.repository.get_event(target)
             if direct:
                 return direct
         events = self.repository.list_events()
-        if not events:
+        if not events or not target:
             return None
         lowered = target.lower()
+        matches: list[Event] = []
         for event in events:
-            if lowered and (lowered in event.title.lower() or event.id.startswith(lowered)):
-                return event
-        return events[0]
+            event_id = event.id.lower()
+            title = event.title.lower()
+            if (
+                lowered == event_id
+                or event_id.startswith(lowered)
+                or lowered == title
+                or lowered in title
+                or title in lowered
+            ):
+                matches.append(event)
+        unique: dict[str, Event] = {event.id: event for event in matches}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        return None
 
     def _build_meeting_agenda(
         self,
@@ -3623,6 +3870,88 @@ def _task_approval_components(
             }
         )
     return rows
+
+
+def _event_notification_content(event: Event, kind: str) -> str:
+    start = event.starts_at.isoformat() if event.starts_at else "日時未定"
+    end = event.ends_at.isoformat() if event.ends_at else "未定"
+    place = event.place or "場所未定"
+    labels = {
+        "before": "開催前のイベント通知です。",
+        "day_of": "本日開催のイベントです。",
+        "completion": "イベント完了確認です。",
+    }
+    return "\n".join(
+        [
+            labels.get(kind, "イベント確認が必要です。"),
+            f"Event: {event.title}",
+            f"ID: {event.id}",
+            f"開始: {start}",
+            f"終了: {end}",
+            f"場所: {place}",
+            f"状態: {event.status}",
+        ]
+    )
+
+
+def _event_completion_buttons(*, event_id: str, key: str) -> list[dict[str, object]]:
+    return [
+        {
+            "label": "完了",
+            "style": 3,
+            "custom_id": f"event_complete:{event_id}:done:{key}:v1"[:100],
+        },
+        {
+            "label": "未完了",
+            "style": 2,
+            "custom_id": f"event_complete:{event_id}:not_done:{key}:v1"[:100],
+        },
+    ]
+
+
+def _event_approval_buttons(
+    *,
+    candidate_ids: list[str],
+    change_candidate_ids: list[str],
+    batch_id: str,
+) -> list[dict[str, object]]:
+    buttons: list[dict[str, object]] = []
+    for target_id in [*candidate_ids, *change_candidate_ids][:4]:
+        buttons.extend(
+            [
+                {
+                    "label": "Approve",
+                    "style": 3,
+                    "custom_id": f"event:{target_id}:approve:{batch_id}:v1"[:100],
+                },
+                {
+                    "label": "Edit",
+                    "style": 1,
+                    "custom_id": f"event:{target_id}:edit:{batch_id}:v1"[:100],
+                },
+                {
+                    "label": "Reject",
+                    "style": 4,
+                    "custom_id": f"event:{target_id}:reject:{batch_id}:v1"[:100],
+                },
+                {
+                    "label": "Evidence",
+                    "style": 2,
+                    "custom_id": f"event:{target_id}:evidence:{batch_id}:v1"[:100],
+                },
+                {
+                    "label": "Diff",
+                    "style": 2,
+                    "custom_id": f"event:{target_id}:diff:{batch_id}:v1"[:100],
+                },
+                {
+                    "label": "Duplicates",
+                    "style": 2,
+                    "custom_id": f"event:{target_id}:duplicates:{batch_id}:v1"[:100],
+                },
+            ]
+        )
+    return buttons[:25]
 
 
 def _event_line(event: Event | None) -> str:

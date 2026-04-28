@@ -48,6 +48,7 @@ from kumc_agent.features.indexing.service import IndexingService
 from kumc_agent.features.indexing.task_event import TaskEventIndexBuildService
 from kumc_agent.features.ingestion.chunking import ChunkingSettings, IngestionChunker
 from kumc_agent.features.ingestion.service import IngestionService
+from kumc_agent.features.event_management import EventAccessPolicy, EventExtractionService
 from kumc_agent.features.rag.config import (
     RagConfig,
     RagGenerationSettings,
@@ -63,6 +64,7 @@ from kumc_agent.features.summarization.config import SummarizationConfig
 from kumc_agent.features.summarization.service import SummarizationService
 from kumc_agent.features.vc.config import VCManagerConfig
 from kumc_agent.features.vc.service import VCService
+from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.runtime.context import RuntimeContext
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
@@ -579,6 +581,34 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     ).integrated_input
     chat_route_usecase = ChatRouteUsecase(router=router)
     vc_usecase = VCUsecase(service=VCService(config=VCManagerConfig.from_runtime(config)))
+    prompts_dir = config.base_dir / "assets" / "prompts"
+    event_admin_user_ids = tuple(
+        dict.fromkeys(
+            [
+                *[str(value) for value in config.security.maintenance_command_author_ids],
+                *[str(value) for value in config.event_management.admin_user_ids],
+            ]
+        )
+    )
+    event_delta_workflow = WorkflowService(
+        repository=workflow_repository,
+        ask_service=retrieval_app.ask,
+        audit_log=audit_log,
+        operations=operations_repository,
+        event_extractor=EventExtractionService(
+            llm=rag_llm,
+            prompts_dir=prompts_dir,
+            prompt_name=config.event_management.prompt_name,
+            model_name=config.providers.llm.gemini_model,
+        ),
+        event_access_policy=EventAccessPolicy(
+            admin_user_ids=event_admin_user_ids,
+            admin_role_ids=tuple(config.event_management.admin_role_ids),
+        ),
+        llm=rag_llm,
+        prompts_dir=prompts_dir,
+        llm_model_name=config.providers.llm.gemini_model,
+    )
 
     return RuntimeContext(
         config=config,
@@ -601,6 +631,8 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 repository=workflow_repository,
                 embedder=embedder,
             ),
+            event_delta_extractor=event_delta_workflow,
+            event_delta_chunk_source=ingestion_repository,
         ),
         eval_ragas=EvaluateRagasUsecase(
             chat_usecase=chat_answer_usecase,

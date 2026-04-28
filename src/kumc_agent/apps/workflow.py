@@ -26,6 +26,11 @@ from kumc_agent.features.task_management import (
     TaskAccessPolicy,
     TaskExtractionService,
 )
+from kumc_agent.features.event_management import (
+    DiscordEventNotificationSender,
+    EventAccessPolicy,
+    EventExtractionService,
+)
 from kumc_agent.features.minecraft import MinecraftSupportService, settings_from_runtime
 from kumc_agent.features.minecraft.access import ServerManagementAccessPolicy
 from kumc_agent.features.workflow import WorkflowService
@@ -198,6 +203,25 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         and foundation.config.task_management.notification_channel_id
         else None
     )
+    event_admin_user_ids = tuple(
+        dict.fromkeys(
+            [
+                *[
+                    str(value)
+                    for value in foundation.config.security.maintenance_command_author_ids
+                ],
+                *foundation.config.event_management.admin_user_ids,
+            ]
+        )
+    )
+    event_notification_sender = (
+        DiscordEventNotificationSender(
+            bot_token=foundation.config.integrations.discord.bot_token,
+        )
+        if foundation.config.integrations.discord.bot_token
+        and foundation.config.event_management.notification_channel_id
+        else None
+    )
     return WorkflowAppContext(
         workflow=WorkflowService(
             repository=repository,
@@ -242,6 +266,23 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
                 foundation.config.task_management.approval_batch_interval_days
             ),
             task_due_soon_notice_days=foundation.config.task_management.due_soon_notice_days,
+            event_extractor=EventExtractionService(
+                llm=llm,
+                prompts_dir=prompts_dir,
+                prompt_name=foundation.config.event_management.prompt_name,
+                model_name=foundation.config.providers.llm.gemini_model,
+            ),
+            event_access_policy=EventAccessPolicy(
+                admin_user_ids=event_admin_user_ids,
+                admin_role_ids=tuple(foundation.config.event_management.admin_role_ids),
+            ),
+            event_notification_sender=event_notification_sender,
+            event_notification_channel_id=foundation.config.event_management.notification_channel_id,
+            event_approval_batch_interval_days=(
+                foundation.config.event_management.approval_batch_interval_days
+            ),
+            event_notification_before_days=foundation.config.event_management.notification_before_days,
+            event_timezone=foundation.config.event_management.timezone,
             llm=llm,
             prompts_dir=prompts_dir,
             llm_model_name=foundation.config.providers.llm.gemini_model,

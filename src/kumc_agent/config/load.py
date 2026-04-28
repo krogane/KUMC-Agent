@@ -20,6 +20,7 @@ from kumc_agent.config.schema import (
     AutonomousAgentSection,
     DatabaseSection,
     EmbeddingSection,
+    EventManagementSection,
     FeatureSection,
     FunctionCallSection,
     ImageSearchFeatureSection,
@@ -400,6 +401,19 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     task_management.setdefault("prompt_name", "task_extraction.md")
     task_management.setdefault("auto_extract_after_index_update", True)
 
+    event_management = updated.get("event_management")
+    if not isinstance(event_management, dict):
+        event_management = {}
+        updated["event_management"] = event_management
+    event_management.setdefault("approval_batch_interval_days", 7)
+    event_management.setdefault("notification_before_days", 1)
+    event_management.setdefault("notification_channel_id", "")
+    event_management.setdefault("admin_user_ids", [])
+    event_management.setdefault("admin_role_ids", [])
+    event_management.setdefault("prompt_name", "event_extraction.md")
+    event_management.setdefault("auto_extract_after_index_update", True)
+    event_management.setdefault("timezone", "Asia/Tokyo")
+
     features = updated.get("features")
     if not isinstance(features, dict):
         features = {}
@@ -612,6 +626,7 @@ def _to_runtime_config(
     scheduler = merged["scheduler"]
     autonomous_agent = merged.get("autonomous_agent", {})
     task_management = merged.get("task_management", {})
+    event_management = merged.get("event_management", {})
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
     image_search_raw = features.get("image_search", {})
@@ -925,6 +940,28 @@ def _to_runtime_config(
             auto_extract_after_index_update=bool(
                 task_management.get("auto_extract_after_index_update", True)
             ),
+        ),
+        event_management=EventManagementSection(
+            approval_batch_interval_days=int(
+                event_management.get("approval_batch_interval_days", 7)
+            ),
+            notification_before_days=int(
+                event_management.get("notification_before_days", 1)
+            ),
+            notification_channel_id=str(
+                event_management.get("notification_channel_id", "")
+            ),
+            admin_user_ids=[
+                str(value) for value in event_management.get("admin_user_ids", [])
+            ],
+            admin_role_ids=[
+                str(value) for value in event_management.get("admin_role_ids", [])
+            ],
+            prompt_name=str(event_management.get("prompt_name", "event_extraction.md")),
+            auto_extract_after_index_update=bool(
+                event_management.get("auto_extract_after_index_update", True)
+            ),
+            timezone=str(event_management.get("timezone", "Asia/Tokyo")),
         ),
         infrastructure=InfrastructureSection(
             database=DatabaseSection(

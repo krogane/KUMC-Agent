@@ -1,5 +1,9 @@
 # イベント管理 実装計画
 
+実装同期日: 2026-04-28
+
+本計画の主要項目は実装済みである。現行実装は `EventExtractionService`、`WorkflowService`、`auto_index_update`、Discord frontend、RuntimeConfig、`configs/main/event_management.yaml` に分散しており、`src/kumc_agent/infra/legacy` には依存しない。
+
 ## 1. 方針
 `docs/design/kumc-agent.md` と `docs/design/event-management.md` に従い、イベント管理を実装する。
 
@@ -23,7 +27,22 @@
 - CLIや外部連携payloadの診断情報が `metadata` 配下に入る。
 - 主要動作を既存テスト方式で検証できる。
 
-## 3. 実装ステップ
+2026-04-28時点の完了確認:
+
+| 項目 | 状態 |
+| --- | --- |
+| RAG / ingestion差分からの自動抽出 | 完了。`auto_index_update` が差分chunkを `event_extract_from_delta` へ渡す。 |
+| 専用LLM抽出schema | 完了。`new_events` / `event_changes` / `ignored_items` / `degraded` を使う。 |
+| 手動登録の不足情報確認 | 完了。LLM抽出不可・必須情報不足では候補を作成しない。 |
+| 手動変更・削除の確認 | 完了。LLMが対象Eventと差分を一意に抽出できない場合は候補を作成しない。 |
+| 対象Event解決 | 完了。先頭Eventへのfallbackを廃止し、一意解決時のみ操作する。 |
+| Discord通知 | 完了。`discord.py` で指定チャンネルへ送信し、deliveryをmetadataに残す。 |
+| 完了確認Component | 完了。`event_complete:{event_id}:done:{key}:v1` から `event_complete` を実行する。 |
+| まとめ承認Component | 完了。approve / edit / reject / evidence / diff / duplicates をcustom idで処理する。 |
+| 設定接続 | 完了。`configs/main/event_management.yaml` をRuntimeConfigへ取り込み、securityの保守管理者IDもadminとして扱う。 |
+| 仕様改善点 | 完了。入力契約、schema分離、状態遷移、対象解決、batch状態、通知key、action語彙、設定型、delivery分離を仕様・実装へ反映した。 |
+
+## 3. 実装ステップ（完了済みの履歴）
 ### Phase 1: 仕様固定と現行テスト補強
 1. `EventCandidate`、`Event`、`ApprovalRecord` の現行動作をテストで固定する。
 2. `event_add` が承認前に `Event` を作らないことを明示的に検証する。
@@ -237,7 +256,7 @@
 - 実装済みwork typeとドキュメントのコマンド例が一致すること。
 - payload方針に反するトップレベル診断フィールドが説明されていないこと。
 
-## 4. 推奨実装順序
+## 4. 推奨実装順序（完了済み）
 1. 現行イベント経路のテスト補強
 2. admin限定AccessPolicy
 3. repository検索条件拡張

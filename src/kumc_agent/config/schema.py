@@ -130,6 +130,18 @@ class TaskManagementSection:
 
 
 @dataclass(frozen=True)
+class EventManagementSection:
+    approval_batch_interval_days: int
+    notification_before_days: int
+    notification_channel_id: str
+    admin_user_ids: list[str]
+    admin_role_ids: list[str]
+    prompt_name: str
+    auto_extract_after_index_update: bool
+    timezone: str
+
+
+@dataclass(frozen=True)
 class DatabaseSection:
     url: str
     connect_timeout_seconds: float
@@ -607,6 +619,7 @@ class RuntimeConfig:
     scheduler: SchedulerSection
     autonomous_agent: AutonomousAgentSection
     task_management: TaskManagementSection
+    event_management: EventManagementSection
     infrastructure: InfrastructureSection
     features: FeatureSection
     minecraft_wiki_rag: MinecraftWikiRagSection

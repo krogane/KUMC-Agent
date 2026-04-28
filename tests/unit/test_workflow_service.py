@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import re
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +14,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from kumc_agent.domain.models.retrieval import AccessContext
-from kumc_agent.domain.models.workflow import Task, WorkRequest
+from kumc_agent.domain.models.workflow import Event, Task, WorkRequest
+from kumc_agent.features.event_management import EventNotificationDelivery
 from kumc_agent.features.task_management import TaskNotificationDelivery
 from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.workflow import FileWorkflowRepository
@@ -54,23 +57,79 @@ class FakeEventLLM:
         temperature: float,
         max_output_tokens: int,
     ) -> str:
-        return """
-        {
-          "events": [
+        payload = json.loads(user_prompt)
+        text = str(payload.get("text") or "")
+        expected = str(payload.get("expected_operation") or "")
+        existing_events = list(payload.get("existing_events") or [])
+        target = existing_events[0] if existing_events else {}
+        if expected == "update" and target:
+            after = dict(target)
+            after["place"] = "第2会議室" if "第2会議室" in text else target.get("place")
+            return json.dumps(
+                {
+                    "new_events": [],
+                    "event_changes": [
+                        {
+                            "event_id": target["id"],
+                            "operation": "update",
+                            "after": after,
+                            "reason": text,
+                            "confidence": "high",
+                            "evidence": ["input"],
+                        }
+                    ],
+                    "ignored_items": [],
+                    "degraded": False,
+                },
+                ensure_ascii=False,
+            )
+        if expected == "delete" and target:
+            return json.dumps(
+                {
+                    "new_events": [],
+                    "event_changes": [
+                        {
+                            "event_id": target["id"],
+                            "operation": "delete",
+                            "reason": text,
+                            "confidence": "high",
+                            "evidence": ["input"],
+                        }
+                    ],
+                    "ignored_items": [],
+                    "degraded": False,
+                },
+                ensure_ascii=False,
+            )
+        starts_at = "2026-05-05T14:00:00+00:00"
+        date_match = re.search(
+            r"(\d{4}-\d{1,2}-\d{1,2})(?:[ T](\d{1,2}):(\d{2}))?",
+            text,
+        )
+        if date_match:
+            date_part, hour, minute = date_match.groups()
+            starts_at = f"{date_part}T{hour or '00'}:{minute or '00'}:00+00:00"
+        return json.dumps(
             {
-              "title": "新歓会",
-              "summary": "新入生歓迎イベント",
-              "starts_at": "2026-05-05T14:00:00+00:00",
-              "ends_at": null,
-              "place": "部室",
-              "related_source_ids": ["discord:1"],
-              "related_task_query": "新歓",
-              "confidence": "high",
-              "evidence": ["input"]
-            }
-          ]
-        }
-        """
+                "new_events": [
+                    {
+                        "title": "新歓会",
+                        "summary": "新入生歓迎イベント",
+                        "starts_at": starts_at,
+                        "ends_at": None,
+                        "place": "第2会議室" if "第2会議室" in text else "部室",
+                        "related_source_ids": ["discord:1"],
+                        "related_task_query": "新歓",
+                        "confidence": "high",
+                        "evidence": ["input"],
+                    }
+                ],
+                "event_changes": [],
+                "ignored_items": [],
+                "degraded": False,
+            },
+            ensure_ascii=False,
+        )
 
 
 class FakeTaskNotificationSender:
@@ -86,6 +145,19 @@ class FakeTaskNotificationSender:
         )
 
 
+class FakeEventNotificationSender:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def send(self, message):
+        self.messages.append(message)
+        return EventNotificationDelivery(
+            status="sent",
+            channel="fake",
+            message_id=f"event-msg-{len(self.messages)}",
+        )
+
+
 class WorkflowServiceTests(unittest.TestCase):
     def _service(
         self,
@@ -93,12 +165,16 @@ class WorkflowServiceTests(unittest.TestCase):
         *,
         llm: object | None = None,
         task_notification_sender: object | None = None,
+        event_notification_sender: object | None = None,
     ) -> WorkflowService:
         return WorkflowService(
             repository=FileWorkflowRepository(root_dir=root / "workflow"),
             llm=llm,
             task_notification_sender=task_notification_sender,
             task_notification_channel_id="tasks",
+            event_notification_sender=event_notification_sender,
+            event_notification_channel_id="events",
+            event_notification_before_days=1,
         )
 
     def test_task_extract_creates_candidate_not_task_until_approved(self) -> None:
@@ -377,7 +453,7 @@ class WorkflowServiceTests(unittest.TestCase):
 
     def test_event_brief_includes_related_open_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(Path(tmp))
+            service = self._service(Path(tmp), llm=FakeEventLLM())
             event = service.run(
                 WorkRequest(
                     work_type="event_add",
@@ -467,21 +543,43 @@ class WorkflowServiceTests(unittest.TestCase):
             self.assertEqual(degraded.event_candidates, tuple())
             self.assertTrue(degraded.metadata["extraction"]["degraded"])
 
-    def test_event_list_filters_duplicates_update_delete_and_notify(self) -> None:
+    def test_event_update_without_llm_does_not_create_change_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(Path(tmp))
+            event = service.repository.save_event(
+                Event(id="event-1", title="新歓会", starts_at=datetime(2026, 5, 5, tzinfo=UTC))
+            )
+
+            response = service.run(
+                WorkRequest(
+                    work_type="event_update",
+                    target=event.id,
+                    instruction="場所: 第2会議室",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertEqual(response.event_change_candidates, tuple())
+            self.assertFalse(response.metadata["candidate_created"])
+            self.assertEqual(service.repository.list_event_change_candidates(), [])
+
+    def test_event_list_filters_duplicates_update_delete_and_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), llm=FakeEventLLM())
             access = AccessContext(user_id="admin", is_admin=True)
+            event_start = datetime.now(UTC) + timedelta(days=1)
+            starts_text = event_start.strftime("%Y-%m-%d %H:%M")
             first = service.run(
                 WorkRequest(
                     work_type="event_add",
-                    instruction="イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+                    instruction=f"イベント: 新歓会 日時: {starts_text} 場所: 部室",
                     access=access,
                 )
             ).event_candidates[0]
             second = service.run(
                 WorkRequest(
                     work_type="event_add",
-                    instruction="イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+                    instruction=f"イベント: 新歓会 日時: {starts_text} 場所: 部室",
                     access=access,
                 )
             ).event_candidates[0]
@@ -503,7 +601,11 @@ class WorkflowServiceTests(unittest.TestCase):
             listed = service.run(
                 WorkRequest(
                     work_type="event_list",
-                    instruction="状態: planning 場所: 部室 2026-05-01から2026-05-31まで",
+                    instruction=(
+                        "状態: planning 場所: 部室 "
+                        f"{(event_start - timedelta(days=1)).strftime('%Y-%m-%d')}から"
+                        f"{(event_start + timedelta(days=1)).strftime('%Y-%m-%d')}まで"
+                    ),
                     access=access,
                 )
             )
@@ -530,14 +632,14 @@ class WorkflowServiceTests(unittest.TestCase):
             notified = service.run(
                 WorkRequest(
                     work_type="event_notify",
-                    instruction="days: 999",
+                    instruction="days: 1",
                     access=access,
                 )
             )
             notified_again = service.run(
                 WorkRequest(
                     work_type="event_notify",
-                    instruction="days: 999",
+                    instruction="days: 1",
                     access=access,
                 )
             )
@@ -563,7 +665,8 @@ class WorkflowServiceTests(unittest.TestCase):
 
     def test_event_batch_and_completion_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = self._service(Path(tmp), llm=FakeEventLLM())
+            sender = FakeEventNotificationSender()
+            service = self._service(Path(tmp), llm=FakeEventLLM(), event_notification_sender=sender)
             access = AccessContext(user_id="admin", is_admin=True)
             extracted = service.run(
                 WorkRequest(
@@ -580,6 +683,8 @@ class WorkflowServiceTests(unittest.TestCase):
                 )
             )
             self.assertEqual(len(batch.event_approval_batches), 1)
+            self.assertEqual(batch.event_approval_batches[0].notification_message_id, "event-msg-1")
+            self.assertEqual(sender.messages[0].metadata["buttons"][0]["label"], "Approve")
             event = service.approval(
                 action="approve",
                 target_type="event",

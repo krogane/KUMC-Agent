@@ -8,12 +8,14 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kumc_agent.config.schema import RuntimeConfig
+from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.operations import ActionRun, IndexingRun
+from kumc_agent.domain.models.retrieval import AccessContext, Citation
 from kumc_agent.domain.models.source import BackfillScope
 from kumc_agent.features.indexing.lock import build_indexing_lock
 from kumc_agent.features.indexing.quality import IndexQualitySmokeChecker
 from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
-from kumc_agent.features.ingestion.service import IngestionService
+from kumc_agent.features.ingestion.service import IngestionResult, IngestionService
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.usecases.indexing.build import BuildIndexRequest, BuildIndexUsecase
 from kumc_agent.utils.hashing import stable_hash
@@ -29,6 +31,23 @@ class MemberProfileRebuildPort(Protocol):
 
 class TaskEventIndexPort(Protocol):
     def rebuild(self, *, index_dir: Path) -> IndexingRun:
+        ...
+
+
+class EventDeltaExtractionPort(Protocol):
+    def event_extract_from_delta(
+        self,
+        *,
+        text: str,
+        evidence: tuple[Citation, ...],
+        access: AccessContext,
+        metadata: dict[str, Any],
+    ) -> Any:
+        ...
+
+
+class EventDeltaChunkSourcePort(Protocol):
+    def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
         ...
 
 
@@ -77,6 +96,8 @@ class AutoIndexUpdateUsecase:
         member_profile_builder: MemberProfileRebuildPort | None = None,
         member_profile_guild_ids: tuple[str, ...] = tuple(),
         task_event_indexer: TaskEventIndexPort | None = None,
+        event_delta_extractor: EventDeltaExtractionPort | None = None,
+        event_delta_chunk_source: EventDeltaChunkSourcePort | None = None,
     ) -> None:
         self._config = config
         self._build_usecase = build_usecase
@@ -87,6 +108,8 @@ class AutoIndexUpdateUsecase:
             str(value) for value in member_profile_guild_ids if str(value)
         )
         self._task_event_indexer = task_event_indexer
+        self._event_delta_extractor = event_delta_extractor
+        self._event_delta_chunk_source = event_delta_chunk_source
         self._publisher = IndexSnapshotPublisher(
             index_dir=config.app.index_dir,
             keep_snapshots=config.scheduler.rollback_keep_snapshots,
@@ -371,6 +394,11 @@ class AutoIndexUpdateUsecase:
                 "current_pointer": str(publish.current_pointer),
                 "previous_pointer": str(publish.previous_pointer),
             }
+            self._run_event_delta_extraction(
+                run_id=run_id,
+                ingestion_results=ingestion_results,
+                metadata=metadata,
+            )
             return self._save_result(
                 replace(
                     run,
@@ -442,6 +470,73 @@ class AutoIndexUpdateUsecase:
             for guild_id in self._member_profile_guild_ids
         )
 
+    def _run_event_delta_extraction(
+        self,
+        *,
+        run_id: str,
+        ingestion_results: tuple[IngestionResult, ...],
+        metadata: dict[str, Any],
+    ) -> None:
+        event_config = getattr(self._config, "event_management", None)
+        if not getattr(event_config, "auto_extract_after_index_update", False):
+            return
+        changed_results = [
+            result
+            for result in ingestion_results
+            if result.status == "succeeded" and (result.changed or result.deleted)
+        ]
+        if not changed_results:
+            return
+        if self._event_delta_extractor is None or self._event_delta_chunk_source is None:
+            metadata["event_extraction"] = {
+                "status": "not_configured",
+                "source_kinds": [result.source_kind for result in changed_results],
+            }
+            return
+        source_kinds = tuple(
+            dict.fromkeys(result.source_kind for result in changed_results if result.source_kind)
+        )
+        try:
+            chunks = self._event_delta_chunk_source.load_active_chunks(source_kinds=source_kinds)
+            selected_chunks = _event_delta_chunks(chunks)
+            text = _event_delta_text(
+                chunks=selected_chunks,
+                source_results=changed_results,
+            )
+            evidence = tuple(_event_delta_citation(chunk) for chunk in selected_chunks[:12])
+            response = self._event_delta_extractor.event_extract_from_delta(
+                text=text,
+                evidence=evidence,
+                access=AccessContext(
+                    user_id="auto_index_update",
+                    role_ids=("admin",),
+                    is_admin=True,
+                ),
+                metadata={
+                    "source": "auto_index_update",
+                    "run_id": run_id,
+                    "source_kinds": list(source_kinds),
+                    "changed": sum(result.changed for result in changed_results),
+                    "deleted": sum(result.deleted for result in changed_results),
+                },
+            )
+            extraction_metadata = dict(getattr(response, "metadata", {}) or {})
+            metadata["event_extraction"] = {
+                "status": "succeeded",
+                "source_kinds": list(source_kinds),
+                "chunks": len(selected_chunks),
+                "candidate_count": len(getattr(response, "event_candidates", tuple())),
+                "change_candidate_count": len(getattr(response, "event_change_candidates", tuple())),
+                "metadata": extraction_metadata.get("extraction", extraction_metadata),
+            }
+        except Exception as exc:
+            metadata["event_extraction"] = {
+                "status": "failed",
+                "degraded": True,
+                "source_kinds": list(source_kinds),
+                "error": str(exc)[:500],
+            }
+
     def _save_result(self, run: IndexingRun) -> AutoIndexUpdateResult:
         run = self._with_notification_delivery(run)
         stored = self._operations.save_indexing_run(run)
@@ -500,6 +595,91 @@ class AutoIndexUpdateUsecase:
             }
         except Exception as exc:
             return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _event_delta_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    selected: list[Chunk] = []
+    seen_documents: set[str] = set()
+    for chunk in chunks:
+        text = str(chunk.text or "").strip()
+        if not text:
+            continue
+        document_id = chunk.document_id or chunk.id
+        if document_id in seen_documents and chunk.index > 1:
+            continue
+        seen_documents.add(document_id)
+        selected.append(chunk)
+        if len(selected) >= 24:
+            break
+    return selected
+
+
+def _event_delta_text(
+    *,
+    chunks: list[Chunk],
+    source_results: list[IngestionResult],
+) -> str:
+    lines = [
+        "auto_index_update で変更または削除が検出されたソースから、イベントの新規登録・変更・削除だけを抽出してください。",
+        "変更サマリ:",
+        *[
+            (
+                f"- {result.source_kind}: changed={result.changed}, "
+                f"deleted={result.deleted}, seen={result.seen}"
+            )
+            for result in source_results
+        ],
+    ]
+    if not chunks:
+        lines.append("アクティブchunkはありません。削除差分だけの場合は既存Eventとの対応が明確な場合のみ削除候補を返してください。")
+        return "\n".join(lines)
+    for index, chunk in enumerate(chunks, start=1):
+        metadata = dict(chunk.metadata or {})
+        source_kind = str(metadata.get("source_kind") or metadata.get("source_type") or "")
+        external_id = str(metadata.get("external_id") or metadata.get("source_item_id") or "")
+        title = str(metadata.get("source_title") or metadata.get("title") or "")
+        lines.extend(
+            [
+                "",
+                f"## chunk {index}: {source_kind}:{external_id}",
+                f"title: {title}",
+                _limit_text(chunk.text, 1600),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _event_delta_citation(chunk: Chunk) -> Citation:
+    metadata = dict(chunk.metadata or {})
+    source_item_id = str(
+        metadata.get("source_item_id")
+        or metadata.get("external_id")
+        or chunk.document_id
+        or chunk.id
+    )
+    source_kind = str(metadata.get("source_kind") or metadata.get("source_type") or "")
+    title = str(metadata.get("source_title") or metadata.get("title") or source_kind or "source")
+    label = f"{source_kind}:{title}" if source_kind and title else title
+    return Citation(
+        source_item_id=source_item_id,
+        chunk_id=chunk.id,
+        label=label[:160],
+        quote=_limit_text(chunk.text, 360),
+        access_scope=dict(metadata.get("access_scope") or {}),
+        metadata={
+            "source": "auto_index_update",
+            "source_kind": source_kind,
+            "external_id": str(metadata.get("external_id") or ""),
+            "document_id": chunk.document_id,
+        },
+    )
+
+
+def _limit_text(value: str, limit: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _schedule_skip_reason(config: RuntimeConfig, request: AutoIndexUpdateRequest) -> str:
