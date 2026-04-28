@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import json
 import sys
 import tempfile
@@ -30,7 +31,7 @@ from kumc_agent.features.member_search.service import (
     mask_sensitive_text,
 )
 from kumc_agent.features.workflow import WorkflowService
-from kumc_agent.infra.operations import FileOperationsRepository
+from kumc_agent.infra.operations import FileOperationsRepository, PostgresOperationsRepository
 from kumc_agent.infra.workflow import FileWorkflowRepository
 
 
@@ -99,6 +100,105 @@ class _LLM:
             },
             ensure_ascii=False,
         )
+
+
+class _EvidenceAwareLLM:
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> str:
+        return json.dumps(
+            {
+                "skills": [
+                    {"term": "根拠ありスキル", "evidence_ids": ["ev-1"]},
+                    {"term": "根拠なしスキル", "evidence_ids": ["missing"]},
+                ],
+                "interests": [],
+                "past_assignments": [],
+                "confidence": "medium",
+            },
+            ensure_ascii=False,
+        )
+
+
+class _AssertiveAnswerLLM:
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> str:
+        return "Alice は担当できます。詳しいです。"
+
+
+class _FakePostgresCursor:
+    def __init__(self, connection: "_FakePostgresConnection") -> None:
+        self.connection = connection
+
+    def __enter__(self) -> "_FakePostgresCursor":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def execute(self, sql: str, values: tuple[object, ...] | None = None) -> None:
+        normalized = " ".join(sql.split()).lower()
+        if normalized.startswith("insert into member_profiles") and values is not None:
+            columns = sql.split("(", 1)[1].split(")", 1)[0]
+            payload = {
+                column.strip(): value
+                for column, value in zip(columns.split(","), values)
+            }
+            self.connection.rows = [
+                (
+                    payload.get("id"),
+                    payload.get("display_name"),
+                    payload.get("discord_user_id"),
+                    payload.get("roles"),
+                    payload.get("skills"),
+                    payload.get("interests"),
+                    payload.get("past_assignments"),
+                    payload.get("evidence"),
+                    payload.get("access_scope"),
+                    payload.get("metadata"),
+                    payload.get("created_at"),
+                    payload.get("updated_at"),
+                )
+            ]
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self.connection.rows)
+
+
+class _FakePostgresConnection:
+    def __init__(self) -> None:
+        self.rows: list[tuple[object, ...]] = []
+
+    def __enter__(self) -> "_FakePostgresConnection":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def cursor(self) -> _FakePostgresCursor:
+        return _FakePostgresCursor(self)
+
+    def commit(self) -> None:
+        return None
+
+
+class _FakePostgres:
+    def __init__(self) -> None:
+        self.connection = _FakePostgresConnection()
+
+    def connect(self) -> _FakePostgresConnection:
+        return self.connection
 
 
 class MemberSearchTests(unittest.TestCase):
@@ -192,6 +292,32 @@ class MemberSearchTests(unittest.TestCase):
         self.assertEqual(conditions.role_ids, ("999999",))
         self.assertIn("designer", conditions.role_names)
 
+    def test_extract_exclude_conditions(self) -> None:
+        conditions = extract_conditions("role:designer 除外ロール:event 除外ユーザー:<@222222> -role:<@&999999>")
+
+        self.assertIn("designer", conditions.role_names)
+        self.assertEqual(conditions.exclude_user_ids, ("222222",))
+        self.assertIn("event", conditions.exclude_role_names)
+        self.assertEqual(conditions.exclude_role_ids, ("999999",))
+
+    def test_default_deny_without_allowed_guilds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            repo.save_member_profile(self._profiles()[0])
+            service = MemberSearchService(
+                repository=repo,
+                config=MemberSearchConfig(admin_user_ids=("admin-1",)),
+                embedder=_Embedder(),
+            )
+
+            result = service.search(
+                query="デザイン",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertFalse(result.authorized)
+            self.assertEqual(result.profiles, tuple())
+
     def test_search_authorization_and_access_filtered_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp))
@@ -242,6 +368,152 @@ class MemberSearchTests(unittest.TestCase):
 
             self.assertEqual(result.profiles[0].display_name, "Bob")
             self.assertTrue(result.metadata["degraded"])
+
+    def test_exclude_role_filters_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            alice, _bob = self._profiles()
+            bob = replace(
+                _bob,
+                roles=("designer",),
+                metadata={"profile_status": "generated", "role_ids": ["r-design"]},
+            )
+            repo.save_member_profile(alice)
+            repo.save_member_profile(bob)
+            service = MemberSearchService(
+                repository=repo,
+                config=self._config(),
+                embedder=_Embedder(),
+            )
+
+            result = service.search(
+                query="role:designer 除外ロール:event",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertEqual(tuple(profile.display_name for profile in result.profiles), ("Bob",))
+
+    def test_hidden_evidence_does_not_rank_or_reason_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            repo.save_member_profile(
+                MemberProfile(
+                    id="hidden",
+                    display_name="Hidden",
+                    discord_user_id="333333",
+                    evidence=(
+                        {
+                            "source_type": "docs",
+                            "source_item_id": "admin-doc",
+                            "chunk_id": "hidden",
+                            "label": "管理メモ",
+                            "quote": "Hidden はsecret-designを担当",
+                            "access_scope": {"admin_only": True},
+                        },
+                    ),
+                    access_scope={"guild_ids": ["g1"]},
+                    metadata={"profile_status": "generated", "guild_id": "g1"},
+                )
+            )
+            service = MemberSearchService(
+                repository=repo,
+                config=self._config(),
+                embedder=None,
+            )
+
+            result = service.search(
+                query="secret-design",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertEqual(result.profiles, tuple())
+
+    def test_duplicate_discord_user_keeps_latest_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            old_time = datetime.now(UTC) - timedelta(days=1)
+            new_time = datetime.now(UTC)
+            old_profile = MemberProfile(
+                id="old",
+                display_name="OldName",
+                discord_user_id="111111",
+                roles=("designer",),
+                skills=("デザイン",),
+                access_scope={"guild_ids": ["g1"]},
+                metadata={"profile_status": "generated", "guild_id": "g1", "source_fingerprint": "a"},
+                updated_at=old_time,
+            )
+            new_profile = replace(
+                old_profile,
+                id="new",
+                display_name="NewName",
+                metadata={"profile_status": "generated", "guild_id": "g1", "source_fingerprint": "b"},
+                updated_at=new_time,
+            )
+            repo.save_member_profile(old_profile)
+            repo.save_member_profile(new_profile)
+            service = MemberSearchService(
+                repository=repo,
+                config=self._config(),
+                embedder=_Embedder(),
+            )
+
+            result = service.search(
+                query="デザイン",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertEqual(tuple(profile.display_name for profile in result.profiles), ("NewName",))
+
+    def test_search_uses_saved_indexes_before_memory_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._repo(root)
+            for profile in self._profiles():
+                repo.save_member_profile(profile)
+            indexer = MemberProfileIndexService(
+                index_dir=root / "index",
+                embedder=_Embedder(),
+                config=self._config(),
+            )
+            indexer.rebuild(repo.list_member_profiles())
+            service = MemberSearchService(
+                repository=repo,
+                config=self._config(),
+                embedder=_Embedder(),
+                index_dir=root / "index",
+            )
+
+            result = service.search(
+                query="サーバー運用",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertEqual(result.profiles[0].display_name, "Bob")
+            self.assertFalse(result.metadata["degraded"])
+            self.assertEqual(result.metadata["rank_source_modes"]["normal_sparse"], "index")
+            self.assertEqual(result.metadata["rank_source_modes"]["stemming_sparse"], "index")
+            self.assertEqual(result.metadata["rank_source_modes"]["dense"], "index")
+
+    def test_llm_answer_is_rewritten_to_non_assertive_candidate_language(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            repo.save_member_profile(self._profiles()[0])
+            service = MemberSearchService(
+                repository=repo,
+                config=self._config(),
+                embedder=_Embedder(),
+                llm=_AssertiveAnswerLLM(),
+            )
+
+            result = service.search(
+                query="デザイン",
+                access=AccessContext(user_id="u1", guild_id="g1"),
+            )
+
+            self.assertNotIn("担当できます", result.text)
+            self.assertNotIn("詳しいです", result.text)
+            self.assertIn("本人または運営確認", result.text)
 
     def test_workflow_uses_member_search_service_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -304,6 +576,59 @@ class MemberSearchTests(unittest.TestCase):
             self.assertEqual(run.skipped, 1)
             self.assertEqual(profiles[0].skills, ("イベント告知デザイン",))
             self.assertTrue((root / "index" / "member_profiles" / "keyword" / "member_profiles_sparse.json").exists())
+
+    def test_profile_generation_rejects_terms_without_evidence_id(self) -> None:
+        member = DiscordMemberRecord(
+            guild_id="g1",
+            user_id="111111",
+            display_name="Alice",
+            roles=("designer",),
+        )
+        profile = MemberProfileGenerator(llm=_EvidenceAwareLLM()).generate(
+            member=member,
+            evidence=(
+                {
+                    "evidence_id": "ev-1",
+                    "source_type": "docs",
+                    "source_item_id": "doc-1",
+                    "chunk_id": "c1",
+                    "label": "根拠1",
+                    "quote": "Alice は根拠ありスキルを担当",
+                    "access_scope": {"guild_ids": ["g1"]},
+                },
+                {
+                    "evidence_id": "ev-2",
+                    "source_type": "docs",
+                    "source_item_id": "doc-2",
+                    "chunk_id": "c2",
+                    "label": "根拠2",
+                    "quote": "別根拠",
+                    "access_scope": {"guild_ids": ["g1"]},
+                },
+            ),
+        )
+
+        self.assertEqual(profile.skills, ("根拠ありスキル",))
+        self.assertEqual(
+            profile.metadata["term_evidence"]["skills"],
+            {"根拠ありスキル": ["ev-1"]},
+        )
+
+    def test_postgres_member_profiles_can_be_read_and_searched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            postgres = _FakePostgres()
+            repo = PostgresOperationsRepository(
+                root_dir=Path(tmp) / "operations",
+                postgres=postgres,  # type: ignore[arg-type]
+            )
+            profile = self._profiles()[0]
+
+            repo.save_member_profile(profile)
+            listed = repo.list_member_profiles()
+            searched = repo.search_member_profiles(query="イベント告知")
+
+            self.assertEqual(listed[0].id, profile.id)
+            self.assertEqual(searched[0].id, profile.id)
 
     def test_sensitive_text_masking(self) -> None:
         masked = mask_sensitive_text("mail test@example.com token: abcdefghijklmnopqrstuvwxyz")

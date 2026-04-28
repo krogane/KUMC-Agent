@@ -24,6 +24,8 @@ class ContextPacker:
         packed: list[ScoredChunk] = []
         for item in chunks:
             metadata = dict(item.chunk.metadata or {})
+            access_scope = metadata.get("access_scope")
+            citation_access_scope = dict(access_scope) if isinstance(access_scope, dict) else {}
             policy = str(metadata.get("redaction_policy") or "quote_allowed")
             if policy == "deny":
                 warnings.append(f"deny chunk excluded: {item.chunk.id}")
@@ -61,6 +63,16 @@ class ContextPacker:
                         ),
                         quote=_quote(text, self._config.max_quote_characters),
                         score=item.score,
+                        access_scope=citation_access_scope,
+                        metadata={
+                            "source_type": str(
+                                metadata.get("source_type")
+                                or metadata.get("source_kind")
+                                or ""
+                            ),
+                            "redaction_policy": str(metadata.get("redaction_policy") or ""),
+                            "index_status": str(metadata.get("index_status") or ""),
+                        },
                     )
                 )
         return ContextPack(

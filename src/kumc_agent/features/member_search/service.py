@@ -13,12 +13,17 @@ from typing import Any, Protocol, Sequence
 import unicodedata
 
 import numpy as np
+from langchain_core.documents import Document
 
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.operations import IndexingRun, MemberProfile
 from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.domain.ports.llms import LLMPort
+from kumc_agent.infra.indexing.keyword_inverted_index import (
+    build_and_save_keyword_index,
+    load_keyword_index,
+)
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.utils.hashing import stable_hash
@@ -46,6 +51,16 @@ _ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 _DISPLAY_MENTION_RE = re.compile(r"(?<!\w)@([A-Za-z0-9_.\-\u3040-\u30ff\u3400-\u9fff]+)")
 _LABELED_DISPLAY_RE = re.compile(r"(?:display|name|表示名|名前)[:：]\s*([^\s,，、]+)", re.IGNORECASE)
 _LABELED_ROLE_RE = re.compile(r"(?:role|ロール|役職)[:：]\s*([^\s,，、]+)", re.IGNORECASE)
+_EXCLUDE_USER_RE = re.compile(
+    r"(?:exclude[_ -]?user|not[_ -]?user|除外ユーザー|除外user)[:：]\s*(<@!?(\d+)>|\d{5,})",
+    re.IGNORECASE,
+)
+_EXCLUDE_ROLE_RE = re.compile(
+    r"(?:exclude[_ -]?role|not[_ -]?role|除外ロール|除外role|除外役職)[:：]\s*(<@&(\d+)>|[^\s,，、]+)",
+    re.IGNORECASE,
+)
+_EXCLUDE_TERM_RE = re.compile(r"(?:exclude|without|除外)[:：]\s*([^\s,，、]+)", re.IGNORECASE)
+_NEG_ROLE_RE = re.compile(r"(?<!\w)-role[:：]?\s*(<@&(\d+)>|[^\s,，、]+)", re.IGNORECASE)
 _BARE_ID_RE = re.compile(r"(?<!\d)(\d{5,})(?!\d)")
 _SECRET_RE = re.compile(
     r"(?i)(discord(?:app)?\.com/invite/\S+|[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{20,}|api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+)"
@@ -55,9 +70,17 @@ _PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d\- ]{8,}\d)(?!\d)")
 _PRIVATE_IP_RE = re.compile(r"\b(?:10|127)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b192\.168\.\d{1,3}\.\d{1,3}\b|\b172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b")
 _STUDENT_ID_RE = re.compile(r"(?i)(?:学籍番号|student\s*id)\s*[:：]?\s*[A-Za-z0-9\-]{4,}")
 _TOKEN_RE = re.compile(r"[0-9A-Za-z_\-]+|[ぁ-んァ-ン一-龠々ー]+")
+_ASSERTIVE_REPLACEMENTS = (
+    ("担当できます", "担当候補として確認できます"),
+    ("担当可能です", "担当候補として確認できます"),
+    ("詳しいです", "関連する根拠があります"),
+    ("得意です", "関連する記録があります"),
+    ("参加できます", "参加可否の確認が必要です"),
+)
 _MEMBER_CORPUS_NORMAL = "member_profiles_sparse"
 _MEMBER_CORPUS_STEMMING = "member_profiles_stemming"
 _PROFILE_VERSION = "member-search-v1"
+_MEMBER_INDEX_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -128,6 +151,10 @@ class MemberSearchConditions:
     display_names: tuple[str, ...] = tuple()
     role_ids: tuple[str, ...] = tuple()
     role_names: tuple[str, ...] = tuple()
+    exclude_user_ids: tuple[str, ...] = tuple()
+    exclude_role_ids: tuple[str, ...] = tuple()
+    exclude_role_names: tuple[str, ...] = tuple()
+    exclude_terms: tuple[str, ...] = tuple()
 
     def as_metadata(self) -> dict[str, object]:
         return {
@@ -135,6 +162,10 @@ class MemberSearchConditions:
             "display_names": list(self.display_names),
             "role_ids": list(self.role_ids),
             "role_names": list(self.role_names),
+            "exclude_user_ids": list(self.exclude_user_ids),
+            "exclude_role_ids": list(self.exclude_role_ids),
+            "exclude_role_names": list(self.exclude_role_names),
+            "exclude_terms": list(self.exclude_terms),
         }
 
 
@@ -187,13 +218,13 @@ class AskServiceEvidenceSource:
                 out.append(
                     sanitize_evidence(
                         {
-                            "source_type": "rag",
+                            "source_type": _citation_source_type(citation),
                             "source_item_id": source_item_id,
                             "chunk_id": chunk_id,
                             "label": str(getattr(citation, "label", "") or ""),
                             "url": str(getattr(citation, "url", "") or ""),
                             "quote": str(getattr(citation, "quote", "") or ""),
-                            "access_scope": {"guild_ids": [member.guild_id]},
+                            "access_scope": _citation_access_scope(citation),
                             "score": getattr(citation, "score", None),
                             "metadata": {"query": query},
                         }
@@ -251,9 +282,13 @@ class MemberProfileGenerator:
                 max_output_tokens=self._max_output_tokens,
             )
             payload = _extract_json_object(raw)
-            skills = _clean_terms(payload.get("skills"), require_evidence=bool(evidence))
-            interests = _clean_terms(payload.get("interests"), require_evidence=bool(evidence))
-            assignments = _clean_terms(payload.get("past_assignments"), require_evidence=bool(evidence))
+            evidence_ids = _evidence_ids(evidence)
+            skills, skill_evidence = _clean_evidenced_terms(payload.get("skills"), evidence_ids=evidence_ids)
+            interests, interest_evidence = _clean_evidenced_terms(payload.get("interests"), evidence_ids=evidence_ids)
+            assignments, assignment_evidence = _clean_evidenced_terms(
+                payload.get("past_assignments"),
+                evidence_ids=evidence_ids,
+            )
             return replace(
                 base,
                 skills=tuple(skills),
@@ -265,6 +300,11 @@ class MemberProfileGenerator:
                     "generated_by": "llm",
                     "generation_model": payload.get("model") or "",
                     "generation_confidence": payload.get("confidence") or "",
+                    "term_evidence": {
+                        "skills": skill_evidence,
+                        "interests": interest_evidence,
+                        "past_assignments": assignment_evidence,
+                    },
                 },
             )
         except Exception as exc:
@@ -336,6 +376,7 @@ class MemberProfileBuildService:
                     if self._evidence_source is not None
                     else tuple()
                 )
+                evidence = tuple(sanitize_evidence(item) for item in evidence)
                 profile = self._generator.generate(member=member, evidence=evidence)
                 self._repository.save_member_profile(profile)
                 changed += 1
@@ -403,30 +444,45 @@ class MemberProfileIndexService:
         index_dir: Path | None = None,
     ) -> dict[str, object]:
         target_index_dir = index_dir / "member_profiles" if index_dir is not None else self._index_dir
-        docs = [
+        index_profiles = [
+            _profile_for_index(profile)
+            for profile in profiles
+            if _is_active_profile(profile)
+        ]
+        sparse_docs = [
             _IndexDocument(
                 page_content=build_profile_text(profile, include_user_id=True),
                 metadata={"profile_id": profile.id, "discord_user_id": profile.discord_user_id},
             )
-            for profile in profiles
-            if _is_active_profile(profile)
+            for profile in index_profiles
+        ]
+        dense_docs = [
+            _IndexDocument(
+                page_content=build_profile_text(profile, include_user_id=False),
+                metadata={"profile_id": profile.id, "discord_user_id": profile.discord_user_id},
+            )
+            for profile in index_profiles
         ]
         normal_path = _save_member_sparse_index(
             index_dir=target_index_dir,
             corpus_name=_MEMBER_CORPUS_NORMAL,
-            docs=docs,
+            docs=sparse_docs,
             tokenize=lambda text: _simple_tokens(text),
+            k1=self._config.sparse_bm25_k1,
+            b=self._config.sparse_bm25_b,
         )
         normalizer = _sparse_normalizer(self._config)
         stemming_path = _save_member_sparse_index(
             index_dir=target_index_dir,
             corpus_name=_MEMBER_CORPUS_STEMMING,
-            docs=docs,
+            docs=sparse_docs,
             tokenize=lambda text: _safe_stemming_tokens(normalizer, text),
+            k1=self._config.sparse_bm25_k1,
+            b=self._config.sparse_bm25_b,
         )
         dense_built = False
-        if self._embedder is not None and docs:
-            texts = [doc.page_content for doc in docs]
+        if self._embedder is not None and dense_docs:
+            texts = [doc.page_content for doc in dense_docs]
             embeddings = self._embedder.embed_documents(texts)
             chunks = [
                 Chunk(
@@ -436,7 +492,7 @@ class MemberProfileIndexService:
                     index=index,
                     metadata=dict(doc.metadata) | {"chunk_stage": "member_profile"},
                 )
-                for index, doc in enumerate(docs)
+                for index, doc in enumerate(dense_docs)
             ]
             previous_disable_faiss = os.environ.get("KUMC_DISABLE_FAISS_RUNTIME")
             if importlib.util.find_spec("faiss") is None:
@@ -449,8 +505,10 @@ class MemberProfileIndexService:
                 else:
                     os.environ["KUMC_DISABLE_FAISS_RUNTIME"] = previous_disable_faiss
             dense_built = True
+        _write_member_index_metadata(target_index_dir)
         return {
-            "profiles": len(docs),
+            "profiles": len(index_profiles),
+            "schema_version": _MEMBER_INDEX_SCHEMA_VERSION,
             "normal_sparse_index": str(normal_path),
             "stemming_sparse_index": str(stemming_path),
             "dense_built": dense_built,
@@ -486,7 +544,13 @@ class MemberSearchService:
                 metadata={"route": "member_search", "authorized": False},
             )
         conditions = extract_conditions(query)
-        profiles = [profile for profile in self._repository.list_member_profiles() if self._can_view_profile(profile, access)]
+        profiles = _dedupe_profiles(
+            [
+                _filter_profile_for_response(profile, access, self._config)
+                for profile in self._repository.list_member_profiles()
+                if self._can_view_profile(profile, access)
+            ]
+        )
         filtered = self._apply_conditions(profiles, conditions)
         ranked, metadata = self._rank(query=query, profiles=filtered, conditions=conditions)
         selected = ranked[: max(0, limit or self._config.search_limit)]
@@ -519,26 +583,14 @@ class MemberSearchService:
 
     def _is_authorized(self, access: AccessContext) -> bool:
         guild = str(access.guild_id or "")
-        if guild and (not self._config.allowed_guild_ids or guild in self._config.allowed_guild_ids):
+        if guild and self._config.allowed_guild_ids and guild in self._config.allowed_guild_ids:
             return True
         if not guild and str(access.user_id or "") in self._config.admin_user_ids:
             return True
         return False
 
     def _can_view_profile(self, profile: MemberProfile, access: AccessContext) -> bool:
-        scope = profile.access_scope or {}
-        allowed_users = {str(value) for value in scope.get("allowed_user_ids") or []}
-        if allowed_users and str(access.user_id or "") not in allowed_users:
-            return False
-        if bool(scope.get("admin_only")):
-            return not access.guild_id and str(access.user_id or "") in self._config.admin_user_ids
-        guild_ids = {str(value) for value in scope.get("guild_ids") or []}
-        if guild_ids and str(access.guild_id or "") not in guild_ids:
-            if not _is_admin_dm(access, self._config):
-                return False
-            if self._config.allowed_guild_ids and not (guild_ids & set(self._config.allowed_guild_ids)):
-                return False
-        return _is_active_profile(profile)
+        return _is_active_profile(profile) and _can_view_scope(profile.access_scope or {}, access, self._config)
 
     def _apply_conditions(
         self,
@@ -564,6 +616,32 @@ class MemberSearchService:
                 for profile in out
                 if any(needle and needle in _normalize_key(profile.display_name) for needle in needles)
             ]
+        if conditions.exclude_user_ids:
+            excluded_user_ids = set(conditions.exclude_user_ids)
+            out = [profile for profile in out if profile.discord_user_id not in excluded_user_ids]
+        if conditions.exclude_role_ids or conditions.exclude_role_names:
+            role_needles = {
+                _normalize_key(value)
+                for value in conditions.exclude_role_ids + conditions.exclude_role_names
+            }
+            out = [
+                profile
+                for profile in out
+                if not (
+                    role_needles & {_normalize_key(role) for role in profile.roles}
+                    or role_needles & {_normalize_key(role) for role in profile.metadata.get("role_ids", [])}
+                )
+            ]
+        if conditions.exclude_terms:
+            needles = [_normalize_key(term) for term in conditions.exclude_terms]
+            out = [
+                profile
+                for profile in out
+                if not any(
+                    needle and needle in _normalize_key(build_profile_text(profile, include_user_id=True))
+                    for needle in needles
+                )
+            ]
         return out
 
     def _rank(
@@ -575,14 +653,40 @@ class MemberSearchService:
     ) -> tuple[list[MemberSearchCandidate], dict[str, object]]:
         if not profiles:
             return [], {"degraded": False, "candidate_pool": 0, "rank_sources": []}
-        normal = _keyword_rank(query=query, profiles=profiles, normalize=lambda text: _simple_tokens(text))
-        normalizer = _sparse_normalizer(self._config)
-        stemming = _keyword_rank(
+        normal, normal_degraded, normal_mode = self._sparse_rank(
             query=query,
             profiles=profiles,
+            corpus_name=_MEMBER_CORPUS_NORMAL,
+            normalize=lambda text: _simple_tokens(text),
+        )
+        normalizer = _sparse_normalizer(self._config)
+        stemming, stemming_degraded, stemming_mode = self._sparse_rank(
+            query=query,
+            profiles=profiles,
+            corpus_name=_MEMBER_CORPUS_STEMMING,
             normalize=lambda text: _safe_stemming_tokens(normalizer, text),
         )
-        dense, dense_degraded = self._dense_rank(query=query, profiles=profiles)
+        dense, dense_degraded, dense_mode = self._dense_rank(query=query, profiles=profiles)
+        if not (normal or stemming or dense) and not _has_positive_conditions(conditions):
+            return [], {
+                "degraded": normal_degraded or stemming_degraded or dense_degraded,
+                "degraded_reasons": [
+                    reason
+                    for reason, degraded in (
+                        (f"normal_sparse:{normal_mode}", normal_degraded),
+                        (f"stemming_sparse:{stemming_mode}", stemming_degraded),
+                        (f"dense:{dense_mode}", dense_degraded),
+                    )
+                    if degraded
+                ],
+                "candidate_pool": len(profiles),
+                "rank_sources": ["normal_sparse", "stemming_sparse"] + ([] if dense_mode == "unavailable" else ["dense"]),
+                "rank_source_modes": {
+                    "normal_sparse": normal_mode,
+                    "stemming_sparse": stemming_mode,
+                    "dense": dense_mode,
+                },
+            }
         fused = _rrf(
             profiles=profiles,
             ranked_sources=(normal, stemming, dense),
@@ -608,16 +712,58 @@ class MemberSearchService:
             for index, (profile, score) in enumerate(boosted)
         ]
         return candidates, {
-            "degraded": dense_degraded,
+            "degraded": normal_degraded or stemming_degraded or dense_degraded,
+            "degraded_reasons": [
+                reason
+                for reason, degraded in (
+                    (f"normal_sparse:{normal_mode}", normal_degraded),
+                    (f"stemming_sparse:{stemming_mode}", stemming_degraded),
+                    (f"dense:{dense_mode}", dense_degraded),
+                )
+                if degraded
+            ],
             "candidate_pool": len(profiles),
-            "rank_sources": ["normal_sparse", "stemming_sparse"] + ([] if dense_degraded else ["dense"]),
+            "rank_sources": ["normal_sparse", "stemming_sparse"] + ([] if dense_mode == "unavailable" else ["dense"]),
+            "rank_source_modes": {
+                "normal_sparse": normal_mode,
+                "stemming_sparse": stemming_mode,
+                "dense": dense_mode,
+            },
         }
 
-    def _dense_rank(self, *, query: str, profiles: list[MemberProfile]) -> tuple[list[tuple[str, float]], bool]:
+    def _sparse_rank(
+        self,
+        *,
+        query: str,
+        profiles: list[MemberProfile],
+        corpus_name: str,
+        normalize: Any,
+    ) -> tuple[list[tuple[str, float]], bool, str]:
+        if self._index_dir is not None:
+            ranked = _keyword_index_rank(
+                index_dir=self._index_dir,
+                corpus_name=corpus_name,
+                query=query,
+                profiles=profiles,
+                normalize=normalize,
+            )
+            if ranked is not None:
+                return ranked, False, "index"
+        return _keyword_rank(query=query, profiles=profiles, normalize=normalize), True, "memory_fallback"
+
+    def _dense_rank(self, *, query: str, profiles: list[MemberProfile]) -> tuple[list[tuple[str, float]], bool, str]:
         if not self._config.dense_enabled or self._embedder is None or not query.strip():
-            return [], True
+            return [], True, "unavailable"
         try:
             query_vector = self._embedder.embed_query(query)
+            if self._index_dir is not None:
+                ranked = _dense_index_rank(
+                    index_dir=self._index_dir,
+                    query_vector=query_vector,
+                    profiles=profiles,
+                )
+                if ranked is not None:
+                    return ranked, False, "index"
             texts = [build_profile_text(profile, include_user_id=False) for profile in profiles]
             matrix = self._embedder.embed_documents(texts)
             scores = _cosine_scores(query_vector, matrix)
@@ -627,10 +773,10 @@ class MemberSearchService:
                 if float(score) > 0.0
             ]
             ranked.sort(key=lambda item: item[1], reverse=True)
-            return ranked, False
+            return ranked, True, "memory_fallback"
         except Exception:
             logger.warning("Member dense search failed; sparse fallback is used.")
-            return [], True
+            return [], True, "unavailable"
 
     def _generate_answer(self, *, query: str, candidates: tuple[MemberSearchCandidate, ...]) -> str:
         fallback = _template_answer(candidates)
@@ -648,7 +794,7 @@ class MemberSearchService:
                 temperature=0.0,
                 max_output_tokens=1200,
             ).strip()
-            return mask_sensitive_text(text) if text else fallback
+            return _candidate_safe_answer(text) if text else fallback
         except Exception:
             logger.warning("Member search answer LLM failed; template answer is used.", exc_info=True)
             return fallback
@@ -656,11 +802,49 @@ class MemberSearchService:
 
 def extract_conditions(query: str) -> MemberSearchConditions:
     text = query or ""
-    user_ids = list(dict.fromkeys(_USER_MENTION_RE.findall(text)))
-    role_ids = list(dict.fromkeys(_ROLE_MENTION_RE.findall(text)))
-    display_names = list(dict.fromkeys(_DISPLAY_MENTION_RE.findall(text) + _LABELED_DISPLAY_RE.findall(text)))
-    role_names = list(dict.fromkeys(_LABELED_ROLE_RE.findall(text)))
-    for value in _BARE_ID_RE.findall(text):
+    exclude_user_ids: list[str] = []
+    exclude_role_ids: list[str] = []
+    exclude_role_names: list[str] = []
+    exclude_terms: list[str] = []
+
+    def _exclude_user(match: re.Match[str]) -> str:
+        value = match.group(2) or match.group(1)
+        if value and value not in exclude_user_ids:
+            exclude_user_ids.append(value)
+        return " "
+
+    def _exclude_role(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        role_id = match.group(2)
+        if role_id:
+            if role_id not in exclude_role_ids:
+                exclude_role_ids.append(role_id)
+        else:
+            cleaned = _clean_terms([raw])
+            for value in cleaned:
+                if value not in exclude_role_names:
+                    exclude_role_names.append(value)
+        return " "
+
+    def _exclude_term(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        if raw.lower().startswith(("user", "role")):
+            return match.group(0)
+        for value in _clean_terms([raw]):
+            if value not in exclude_terms:
+                exclude_terms.append(value)
+        return " "
+
+    positive_text = _EXCLUDE_USER_RE.sub(_exclude_user, text)
+    positive_text = _EXCLUDE_ROLE_RE.sub(_exclude_role, positive_text)
+    positive_text = _NEG_ROLE_RE.sub(_exclude_role, positive_text)
+    positive_text = _EXCLUDE_TERM_RE.sub(_exclude_term, positive_text)
+
+    user_ids = list(dict.fromkeys(_USER_MENTION_RE.findall(positive_text)))
+    role_ids = list(dict.fromkeys(_ROLE_MENTION_RE.findall(positive_text)))
+    display_names = list(dict.fromkeys(_DISPLAY_MENTION_RE.findall(positive_text) + _LABELED_DISPLAY_RE.findall(positive_text)))
+    role_names = list(dict.fromkeys(_LABELED_ROLE_RE.findall(positive_text)))
+    for value in _BARE_ID_RE.findall(positive_text):
         if value not in user_ids and value not in role_ids:
             user_ids.append(value)
     return MemberSearchConditions(
@@ -668,6 +852,10 @@ def extract_conditions(query: str) -> MemberSearchConditions:
         display_names=tuple(_clean_terms(display_names)),
         role_ids=tuple(role_ids),
         role_names=tuple(_clean_terms(role_names)),
+        exclude_user_ids=tuple(exclude_user_ids),
+        exclude_role_ids=tuple(exclude_role_ids),
+        exclude_role_names=tuple(exclude_role_names),
+        exclude_terms=tuple(exclude_terms),
     )
 
 
@@ -715,6 +903,7 @@ def format_candidates_markdown(candidates: Sequence[MemberSearchCandidate]) -> s
 
 def sanitize_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "evidence_id",
         "source_type",
         "source_item_id",
         "chunk_id",
@@ -726,10 +915,16 @@ def sanitize_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         "metadata",
     }
     payload = {key: evidence.get(key) for key in allowed if key in evidence}
+    payload["evidence_id"] = str(payload.get("evidence_id") or _evidence_id(payload))
     if "quote" in payload:
         payload["quote"] = mask_sensitive_text(str(payload.get("quote") or ""))[:300]
     if "label" in payload:
         payload["label"] = mask_sensitive_text(str(payload.get("label") or ""))[:120]
+    scope = payload.get("access_scope")
+    if isinstance(scope, dict):
+        payload["access_scope"] = dict(scope)
+    else:
+        payload["access_scope"] = {"admin_only": True, "source_scope_missing": True}
     metadata = dict(payload.get("metadata") or {})
     for key in ("contexts", "context", "raw", "secret", "llm_prompt"):
         metadata.pop(key, None)
@@ -743,6 +938,15 @@ def mask_sensitive_text(text: str) -> str:
     value = _PHONE_RE.sub("[MASKED_PHONE]", value)
     value = _PRIVATE_IP_RE.sub("[MASKED_IP]", value)
     value = _STUDENT_ID_RE.sub("[MASKED_STUDENT_ID]", value)
+    return value
+
+
+def _candidate_safe_answer(text: str) -> str:
+    value = mask_sensitive_text(text)
+    for source, replacement in _ASSERTIVE_REPLACEMENTS:
+        value = value.replace(source, replacement)
+    if "本人または運営確認" not in value and "確認が必要" not in value:
+        value = value.rstrip() + "\n担当決定には本人または運営確認が必要です。"
     return value
 
 
@@ -768,6 +972,11 @@ def _fallback_profile(
             "guild_id": member.guild_id,
             "role_ids": list(member.role_ids),
             "evidence_count": len(evidence),
+            "term_evidence": {
+                "skills": {},
+                "interests": {},
+                "past_assignments": {},
+            },
         },
     )
 
@@ -788,6 +997,27 @@ def _member_evidence_queries(member: DiscordMemberRecord) -> list[str]:
     return list(dict.fromkeys(queries))
 
 
+def _citation_access_scope(citation: object) -> dict[str, Any]:
+    scope = getattr(citation, "access_scope", None)
+    if isinstance(scope, dict) and scope:
+        return dict(scope)
+    metadata = getattr(citation, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata_scope = metadata.get("access_scope")
+        if isinstance(metadata_scope, dict) and metadata_scope:
+            return dict(metadata_scope)
+    return {"admin_only": True, "source_scope_missing": True}
+
+
+def _citation_source_type(citation: object) -> str:
+    metadata = getattr(citation, "metadata", None)
+    if isinstance(metadata, dict):
+        value = metadata.get("source_type") or metadata.get("source_kind")
+        if value:
+            return str(value)
+    return "rag"
+
+
 def _clean_terms(value: object, *, require_evidence: bool = True) -> list[str]:
     if not require_evidence:
         return []
@@ -802,6 +1032,70 @@ def _clean_terms(value: object, *, require_evidence: bool = True) -> list[str]:
         if text not in out:
             out.append(text)
     return out
+
+
+def _clean_evidenced_terms(
+    value: object,
+    *,
+    evidence_ids: tuple[str, ...],
+) -> tuple[list[str], dict[str, list[str]]]:
+    if not evidence_ids or not isinstance(value, (list, tuple)):
+        return [], {}
+    valid_ids = set(evidence_ids)
+    out: list[str] = []
+    mapping: dict[str, list[str]] = {}
+    for item in value:
+        raw_term: object
+        raw_ids: object
+        if isinstance(item, dict):
+            raw_term = item.get("term") or item.get("value") or item.get("name")
+            raw_ids = item.get("evidence_ids") or item.get("evidence_id") or item.get("evidence")
+        else:
+            raw_term = item
+            raw_ids = evidence_ids[0] if len(evidence_ids) == 1 else ()
+        terms = _clean_terms([raw_term])
+        if not terms:
+            continue
+        ids = _normalize_evidence_refs(raw_ids)
+        matched = [evidence_id for evidence_id in ids if evidence_id in valid_ids]
+        if not matched:
+            continue
+        term = terms[0]
+        if term not in out:
+            out.append(term)
+        mapping[term] = matched
+    return out, mapping
+
+
+def _normalize_evidence_refs(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _evidence_ids(evidence: Sequence[dict[str, Any]]) -> tuple[str, ...]:
+    return tuple(str(item.get("evidence_id") or _evidence_id(item)) for item in evidence)
+
+
+def _evidence_id(evidence: dict[str, Any]) -> str:
+    source_item_id = str(evidence.get("source_item_id") or "")
+    chunk_id = str(evidence.get("chunk_id") or "")
+    if source_item_id or chunk_id:
+        return stable_hash(f"member-evidence:{source_item_id}:{chunk_id}")[:32]
+    payload = json.dumps(
+        {
+            "source_type": evidence.get("source_type") or "",
+            "label": evidence.get("label") or "",
+            "quote": evidence.get("quote") or "",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return stable_hash(f"member-evidence:{payload}")[:32]
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
@@ -833,6 +1127,31 @@ def _safe_evidence_for_index(evidence: dict[str, Any]) -> bool:
     return bool(quote and mask_sensitive_text(quote) == quote)
 
 
+def _scope_indexable_without_access(scope: dict[str, Any]) -> bool:
+    if not scope:
+        return False
+    if bool(scope.get("admin_only")) or bool(scope.get("source_scope_missing")):
+        return False
+    visibility = str(scope.get("visibility") or "").strip().lower()
+    if visibility:
+        return visibility in {"public", "guild"}
+    if scope.get("allowed_user_ids") or scope.get("user_ids") or scope.get("role_ids"):
+        return False
+    return bool(scope.get("guild_ids") or scope.get("guild_id"))
+
+
+def _profile_for_index(profile: MemberProfile) -> MemberProfile:
+    return replace(
+        profile,
+        evidence=tuple(
+            item
+            for item in profile.evidence
+            if _safe_evidence_for_index(item)
+            and _scope_indexable_without_access(dict(item.get("access_scope") or {}))
+        ),
+    )
+
+
 def _is_active_profile(profile: MemberProfile) -> bool:
     status = str(profile.metadata.get("profile_status") or "").lower()
     return status not in {"deleted", "inactive", "excluded"}
@@ -856,9 +1175,31 @@ def _visible_evidence(
 
 def _can_view_scope(scope: dict[str, Any], access: AccessContext, config: MemberSearchConfig) -> bool:
     allowed_users = {str(value) for value in scope.get("allowed_user_ids") or []}
+    allowed_users |= {str(value) for value in scope.get("user_ids") or []}
     if allowed_users and str(access.user_id or "") not in allowed_users:
         return False
+    visibility = str(scope.get("visibility") or "").strip().lower()
+    if visibility:
+        if visibility == "public":
+            return True
+        if visibility == "admin":
+            return _is_admin_dm(access, config)
+        if visibility == "private":
+            return bool(allowed_users and str(access.user_id or "") in allowed_users)
+        if visibility == "role":
+            allowed_roles = {str(value) for value in scope.get("role_ids") or []}
+            return bool(allowed_roles and allowed_roles & set(access.role_ids))
+        if visibility == "guild":
+            scope_guild = str(scope.get("guild_id") or "").strip()
+            if not scope_guild:
+                guild_ids = {str(value) for value in scope.get("guild_ids") or []}
+                return bool(access.guild_id and str(access.guild_id) in guild_ids)
+            return bool(access.guild_id and str(access.guild_id) == scope_guild)
+        return False
     guild_ids = {str(value) for value in scope.get("guild_ids") or []}
+    guild_id = str(scope.get("guild_id") or "").strip()
+    if guild_id:
+        guild_ids.add(guild_id)
     if guild_ids and str(access.guild_id or "") not in guild_ids:
         if not _is_admin_dm(access, config):
             return False
@@ -871,6 +1212,119 @@ def _can_view_scope(scope: dict[str, Any], access: AccessContext, config: Member
 
 def _is_admin_dm(access: AccessContext, config: MemberSearchConfig) -> bool:
     return not access.guild_id and str(access.user_id or "") in config.admin_user_ids
+
+
+def _dedupe_profiles(profiles: list[MemberProfile]) -> list[MemberProfile]:
+    latest: dict[tuple[str, str], MemberProfile] = {}
+    passthrough: list[MemberProfile] = []
+    for profile in profiles:
+        guild_id = str(profile.metadata.get("guild_id") or "")
+        user_id = str(profile.discord_user_id or "")
+        if not user_id:
+            passthrough.append(profile)
+            continue
+        key = (guild_id, user_id)
+        current = latest.get(key)
+        if current is None or _profile_sort_key(profile) > _profile_sort_key(current):
+            latest[key] = profile
+    return sorted(
+        [*latest.values(), *passthrough],
+        key=lambda item: item.display_name or item.id,
+    )
+
+
+def _profile_sort_key(profile: MemberProfile) -> tuple[datetime, str]:
+    stamp = profile.updated_at or profile.created_at or datetime.min.replace(tzinfo=UTC)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp, str(profile.metadata.get("source_fingerprint") or "")
+
+
+def _keyword_index_rank(
+    *,
+    index_dir: Path,
+    corpus_name: str,
+    query: str,
+    profiles: list[MemberProfile],
+    normalize: Any,
+) -> list[tuple[str, float]] | None:
+    if not _member_index_metadata_valid(index_dir):
+        return None
+    index = load_keyword_index(index_dir=index_dir, corpus_name=corpus_name)
+    if index is None:
+        return None
+    allowed_ids = {profile.id for profile in profiles}
+    query_tokens = normalize(query)
+    if not query_tokens:
+        return []
+    scores = index.get_scores(query_tokens)
+    ranked: list[tuple[str, float]] = []
+    for doc_index, score in enumerate(scores.tolist()):
+        if float(score) <= 0.0 or doc_index >= len(index.docs):
+            continue
+        metadata = index.docs[doc_index].metadata or {}
+        profile_id = str(metadata.get("profile_id") or "")
+        if profile_id in allowed_ids:
+            ranked.append((profile_id, float(score)))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked
+
+
+def _dense_index_rank(
+    *,
+    index_dir: Path,
+    query_vector: np.ndarray,
+    profiles: list[MemberProfile],
+) -> list[tuple[str, float]] | None:
+    if not _member_index_metadata_valid(index_dir):
+        return None
+    if not (index_dir / "dense_chunks.jsonl").exists() or not (index_dir / "dense_vectors.npy").exists():
+        return None
+    allowed_ids = {profile.id for profile in profiles}
+    results = FaissLikeIndex(index_dir=index_dir).search(
+        query_vector=np.asarray(query_vector, dtype=np.float32),
+        top_k=max(1, len(profiles)),
+    )
+    ranked = [
+        (result.chunk.id, float(result.score))
+        for result in results
+        if result.chunk.id in allowed_ids and float(result.score) > 0.0
+    ]
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked
+
+
+def _write_member_index_metadata(index_dir: Path) -> None:
+    index_dir.mkdir(parents=True, exist_ok=True)
+    path = index_dir / "member_index_metadata.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": _MEMBER_INDEX_SCHEMA_VERSION,
+                "profile_version": _PROFILE_VERSION,
+                "dense_profile_text": "without_discord_user_id",
+                "sparse_profile_text": "with_discord_user_id",
+                "evidence_scope_policy": "index_public_or_guild_only",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def _member_index_metadata_valid(index_dir: Path) -> bool:
+    path = index_dir / "member_index_metadata.json"
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return int(payload.get("schema_version") or 0) == _MEMBER_INDEX_SCHEMA_VERSION
 
 
 def _keyword_rank(
@@ -940,6 +1394,15 @@ def _boost_exact_matches(
     return boosted
 
 
+def _has_positive_conditions(conditions: MemberSearchConditions) -> bool:
+    return bool(
+        conditions.user_ids
+        or conditions.display_names
+        or conditions.role_ids
+        or conditions.role_names
+    )
+
+
 def _rank_of(ranked: list[tuple[str, float]], profile_id: str) -> int | None:
     for index, (candidate_id, _score) in enumerate(ranked, start=1):
         if candidate_id == profile_id:
@@ -980,7 +1443,17 @@ def _template_answer(candidates: Sequence[MemberSearchCandidate]) -> str:
         profile = candidate.profile
         roles = ", ".join(profile.roles[:5]) if profile.roles else "未登録"
         skills = ", ".join(profile.skills[:5]) if profile.skills else "未登録"
-        lines.append(f"- {profile.display_name or profile.discord_user_id}: roles={roles} / skills={skills} / {candidate.reason}")
+        assignments = ", ".join(profile.past_assignments[:5]) if profile.past_assignments else "未登録"
+        evidence_labels = ", ".join(
+            str(item.get("label") or item.get("source_item_id") or item.get("chunk_id") or "")
+            for item in candidate.evidence[:3]
+            if item.get("label") or item.get("source_item_id") or item.get("chunk_id")
+        ) or "表示可能な根拠なし"
+        lines.append(
+            f"- {profile.display_name or profile.discord_user_id}: "
+            f"roles={roles} / skills={skills} / past_assignments={assignments} / "
+            f"reason={candidate.reason} / evidence={evidence_labels}"
+        )
     return "\n".join(lines)
 
 
@@ -1043,23 +1516,20 @@ def _save_member_sparse_index(
     corpus_name: str,
     docs: Sequence[_IndexDocument],
     tokenize: Any,
+    k1: float,
+    b: float,
 ) -> Path:
-    path = index_dir / "keyword" / f"{corpus_name}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": 1,
-        "created_at": datetime.now(UTC).isoformat(),
-        "docs": [
-            {
-                "page_content": doc.page_content,
-                "metadata": doc.metadata,
-                "tokens": tokenize(doc.page_content),
-            }
+    return build_and_save_keyword_index(
+        index_dir=index_dir,
+        corpus_name=corpus_name,
+        docs=[
+            Document(page_content=doc.page_content, metadata=dict(doc.metadata))
             for doc in docs
         ],
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    return path
+        tokenize_doc=lambda doc: tokenize(doc.page_content),
+        k1=k1,
+        b=b,
+    )
 
 
 def _normalize_key(value: object) -> str:

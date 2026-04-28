@@ -536,6 +536,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         sudachi_mode=config.features.retrieval.sudachi_mode,
         sparse_use_normalized_form=config.features.retrieval.sparse_use_normalized_form,
         sparse_remove_symbols=config.features.retrieval.sparse_remove_symbols,
+        exclude_role_names=tuple(config.features.member_search.exclude_role_names),
     )
     retrieval_app = build_retrieval_app_context(base_dir=config.base_dir)
     member_profile_builder = MemberProfileBuildService(

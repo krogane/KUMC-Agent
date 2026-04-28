@@ -24,6 +24,7 @@ from kumc_agent.config.schema import (
     FunctionCallSection,
     ImageSearchFeatureSection,
     InfrastructureSection,
+    MemberSearchFeatureSection,
     RagGenerationProfileSection,
     RagGenerationSection,
     IndexingChunkingSection,
@@ -421,6 +422,11 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     image_search.setdefault("caption_model", "")
     image_search.setdefault("ocr_model", "")
     image_search.setdefault("feature_model", "local_hash")
+    member_search = features.get("member_search")
+    if not isinstance(member_search, dict):
+        member_search = {}
+        features["member_search"] = member_search
+    member_search.setdefault("exclude_role_names", [])
 
     rag = updated.get("rag")
     if not isinstance(rag, dict):
@@ -1049,6 +1055,12 @@ def _to_runtime_config(
                 caption_model=str(image_search_raw.get("caption_model", "")),
                 ocr_model=str(image_search_raw.get("ocr_model", "")),
                 feature_model=str(image_search_raw.get("feature_model", "local_hash")),
+            ),
+            member_search=MemberSearchFeatureSection(
+                exclude_role_names=[
+                    str(value)
+                    for value in features.get("member_search", {}).get("exclude_role_names", [])
+                ],
             ),
         ),
         minecraft_wiki_rag=MinecraftWikiRagSection(

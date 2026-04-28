@@ -55,3 +55,5 @@ features:
     caption_model: "gemini-3.1-flash-lite-preview"
     ocr_model: ""
     feature_model: "local_hash"
+  member_search:
+    exclude_role_names: []

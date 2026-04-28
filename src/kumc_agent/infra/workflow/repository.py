@@ -1875,6 +1875,8 @@ def _citation_from_payload(payload: dict[str, object]) -> Citation:
         url=str(payload.get("url") or ""),
         quote=str(payload.get("quote") or ""),
         score=float(payload["score"]) if payload.get("score") is not None else None,
+        access_scope=dict(_json(payload.get("access_scope") or {})),
+        metadata=dict(_json(payload.get("metadata") or {})),
     )
 
 

@@ -257,6 +257,11 @@ class ImageSearchFeatureSection:
 
 
 @dataclass(frozen=True)
+class MemberSearchFeatureSection:
+    exclude_role_names: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class FeatureSection:
     rag: bool
     indexing: bool
@@ -270,6 +275,7 @@ class FeatureSection:
     retrieval: RetrievalSection
     risk_flags: RiskFeatureFlagsSection
     image_search: ImageSearchFeatureSection = field(default_factory=ImageSearchFeatureSection)
+    member_search: MemberSearchFeatureSection = field(default_factory=MemberSearchFeatureSection)
 
 
 @dataclass(frozen=True)

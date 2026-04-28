@@ -305,6 +305,8 @@ def _citation_from_payload(payload: dict[str, object]) -> Citation:
         url=str(payload.get("url") or ""),
         quote=str(payload.get("quote") or ""),
         score=payload.get("score") if isinstance(payload.get("score"), float) else None,
+        access_scope=dict(payload.get("access_scope") or {}) if isinstance(payload.get("access_scope"), dict) else {},
+        metadata=dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
     )
 
 

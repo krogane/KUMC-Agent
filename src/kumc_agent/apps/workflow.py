@@ -83,6 +83,7 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         sudachi_mode=foundation.config.features.retrieval.sudachi_mode,
         sparse_use_normalized_form=foundation.config.features.retrieval.sparse_use_normalized_form,
         sparse_remove_symbols=foundation.config.features.retrieval.sparse_remove_symbols,
+        exclude_role_names=tuple(foundation.config.features.member_search.exclude_role_names),
     )
     dimensions = foundation.config.providers.embeddings.dimensions
     if (

@@ -189,6 +189,8 @@ def _draft_from_payload(payload: dict[str, object]) -> AnnouncementDraft:
                 url=str(item.get("url") or ""),
                 quote=str(item.get("quote") or ""),
                 score=float(item["score"]) if item.get("score") is not None else None,
+                access_scope=dict(item.get("access_scope") or {}),
+                metadata=dict(item.get("metadata") or {}),
             )
             for item in citations_payload
         ),

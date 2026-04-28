@@ -1232,6 +1232,18 @@ class WorkflowService:
         query = (request.target or request.instruction).strip()
         if self.member_search_service is not None:
             result = self.member_search_service.search(query=query, access=request.access)
+            self._audit(
+                "workflow.member_search",
+                request.access,
+                "succeeded" if result.authorized else "denied",
+                "member_profiles",
+                metadata={
+                    "authorized": result.authorized,
+                    "result_count": len(result.profiles),
+                    "search_conditions": result.metadata.get("search_conditions", {}),
+                    "degraded": result.metadata.get("degraded", False),
+                },
+            )
             return WorkResponse(
                 text=result.text,
                 detail_markdown=result.detail_markdown,
@@ -1239,12 +1251,31 @@ class WorkflowService:
                 metadata=result.metadata,
             )
         if not _can_search_members(request.access):
+            self._audit(
+                "workflow.member_search",
+                request.access,
+                "denied",
+                "member_profiles",
+                metadata={"authorized": False, "result_count": 0},
+            )
             return WorkResponse(
                 text="権限がありません。",
                 detail_markdown="member_search requires configured member search policy. 対象情報の有無は表示しません。",
                 metadata={"route": "member_search", "authorized": False},
             )
         profiles = tuple(self.operations.search_member_profiles(query=query))
+        self._audit(
+            "workflow.member_search",
+            request.access,
+            "succeeded",
+            "member_profiles",
+            metadata={
+                "authorized": True,
+                "result_count": len(profiles),
+                "search_conditions": {"fallback_query_present": bool(query)},
+                "degraded": True,
+            },
+        )
         return WorkResponse(
             text=f"条件に合うメンバー候補は {len(profiles)} 件です。担当決定には本人または運営確認が必要です。",
             detail_markdown=self._format_member_profiles(list(profiles)),
@@ -2859,6 +2890,7 @@ class WorkflowService:
         access: AccessContext,
         outcome: str,
         target: str,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if self.audit_log is None:
             return
@@ -2870,6 +2902,7 @@ class WorkflowService:
                 outcome=outcome,
                 target=target,
                 risk_level="medium",
+                metadata=dict(metadata or {}),
             )
         )
 
@@ -3140,8 +3173,7 @@ def _replace_task_from_payload(
 
 
 def _can_search_members(access: AccessContext) -> bool:
-    roles = {role.lower() for role in access.role_ids}
-    return access.is_admin or "admin" in roles or "organizer" in roles
+    return False
 
 
 def _workflow_response_status(response: WorkResponse) -> str:

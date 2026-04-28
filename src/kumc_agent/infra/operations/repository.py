@@ -212,6 +212,66 @@ class PostgresOperationsRepository(FileOperationsRepository):
         self._insert_payload("member_profiles", _member_profile_payload(stored))
         return stored
 
+    def list_member_profiles(self) -> list[MemberProfile]:
+        profiles = [
+            _member_profile_from_payload(payload)
+            for payload in self._select_member_profile_payloads()
+        ]
+        return sorted(profiles, key=lambda item: item.display_name or item.id)
+
+    def search_member_profiles(self, *, query: str) -> list[MemberProfile]:
+        profiles = self.list_member_profiles()
+        needle = query.strip().lower()
+        if needle:
+            profiles = [
+                profile
+                for profile in profiles
+                if needle
+                in " ".join(
+                    (
+                        profile.display_name,
+                        profile.discord_user_id,
+                        " ".join(profile.roles),
+                        " ".join(profile.skills),
+                        " ".join(profile.interests),
+                        " ".join(profile.past_assignments),
+                        " ".join(_evidence_search_text(item) for item in profile.evidence),
+                    )
+                ).lower()
+            ]
+        return profiles
+
+    def _select_member_profile_payloads(self) -> list[dict[str, object]]:
+        if self.postgres is None:
+            return []
+        sql = """
+            select id, display_name, discord_user_id, roles, skills, interests,
+                   past_assignments, evidence, access_scope, metadata,
+                   created_at, updated_at
+              from member_profiles
+        """
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "display_name": row[1],
+                "discord_user_id": row[2],
+                "roles": row[3],
+                "skills": row[4],
+                "interests": row[5],
+                "past_assignments": row[6],
+                "evidence": row[7],
+                "access_scope": row[8],
+                "metadata": row[9],
+                "created_at": row[10],
+                "updated_at": row[11],
+            }
+            for row in rows
+        ]
+
     def save_action_run(self, run: ActionRun) -> ActionRun:
         stored = _touch(run)
         self._insert_payload("action_runs", _action_run_payload(stored))

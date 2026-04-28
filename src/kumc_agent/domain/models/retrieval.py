@@ -39,6 +39,8 @@ class Citation:
     url: str = ""
     quote: str = ""
     score: float | None = None
+    access_scope: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
