@@ -603,11 +603,18 @@ class ServerManagementExecutionSection:
 
 
 @dataclass(frozen=True)
+class ServerManagementBackupSection:
+    backup_dir: Path
+    max_backups: int
+
+
+@dataclass(frozen=True)
 class ServerManagementSection:
     default_server_name: str
     docker_ps: ServerManagementDockerPsSection
     servers: list[ServerManagementServerSection]
     execution: ServerManagementExecutionSection
+    backup: ServerManagementBackupSection
 
 
 @dataclass(frozen=True)

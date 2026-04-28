@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.docgen import DocGenRequest
+from kumc_agent.domain.models.minecraft import ServerOperation
 from kumc_agent.domain.models.operations import (
     WorkflowCandidate,
     WorkflowRun,
@@ -1504,7 +1505,13 @@ class WorkflowService:
         if self.minecraft is None:
             raise RuntimeError("Minecraft support service is not configured.")
         result = self.minecraft.status(access=request.access)
-        self._audit("workflow.mc_status", request.access, "succeeded", "minecraft")
+        self._audit(
+            "workflow.mc_status",
+            request.access,
+            "succeeded",
+            "minecraft",
+            metadata=result.metadata or {},
+        )
         return WorkResponse(
             text=result.text,
             detail_markdown=result.detail_markdown,
@@ -1526,6 +1533,14 @@ class WorkflowService:
             request.access,
             "dry_run" if result.operation else "denied",
             target,
+            metadata={
+                "server_operations": [
+                    _server_operation_audit_metadata(operation)
+                    for operation in result.operations
+                ],
+                **(result.metadata or {}),
+            },
+            risk_level=result.operation.risk_level if result.operation else "medium",
         )
         return WorkResponse(
             text=result.text,
@@ -1561,6 +1576,10 @@ class WorkflowService:
             request.access,
             result.operation.status if result.operation else "denied",
             operation_id,
+            metadata=_server_operation_audit_metadata(result.operation)
+            if result.operation
+            else {},
+            risk_level=result.operation.risk_level if result.operation else "medium",
         )
         return WorkResponse(
             text=result.text,
@@ -2184,6 +2203,13 @@ class WorkflowService:
                 access,
                 "succeeded" if result.operation or not result.metadata else "denied",
                 "server_operation",
+                metadata={
+                    "server_operations": [
+                        _server_operation_audit_metadata(operation)
+                        for operation in result.operations
+                    ],
+                    **(result.metadata or {}),
+                },
             )
             return WorkResponse(
                 text=result.text,
@@ -2198,6 +2224,10 @@ class WorkflowService:
                 access,
                 "succeeded" if result.operation else "denied",
                 target_id,
+                metadata=_server_operation_audit_metadata(result.operation)
+                if result.operation
+                else {},
+                risk_level=result.operation.risk_level if result.operation else "medium",
             )
             return WorkResponse(
                 text=result.text,
@@ -2220,7 +2250,22 @@ class WorkflowService:
                     after=asdict(result.operation) if result.operation else {},
                 )
             )
-            self._audit("workflow.server_operation.approve", access, "succeeded", target_id)
+            self._audit(
+                "workflow.server_operation.approve",
+                access,
+                "succeeded",
+                target_id,
+                metadata={
+                    **(
+                        _server_operation_audit_metadata(result.operation)
+                        if result.operation
+                        else {}
+                    ),
+                    "approval_record_id": record.id,
+                    "approver_user_id": access.user_id,
+                },
+                risk_level=result.operation.risk_level if result.operation else "medium",
+            )
             return WorkResponse(
                 text=result.text,
                 detail_markdown="\n\n".join([result.detail_markdown, self._format_approvals([record])]),
@@ -2247,7 +2292,22 @@ class WorkflowService:
                     after=asdict(result.operation) if result.operation else {},
                 )
             )
-            self._audit("workflow.server_operation.reject", access, "succeeded", target_id)
+            self._audit(
+                "workflow.server_operation.reject",
+                access,
+                "succeeded",
+                target_id,
+                metadata={
+                    **(
+                        _server_operation_audit_metadata(result.operation)
+                        if result.operation
+                        else {}
+                    ),
+                    "approval_record_id": record.id,
+                    "rejected_by": access.user_id,
+                },
+                risk_level=result.operation.risk_level if result.operation else "medium",
+            )
             return WorkResponse(
                 text=result.text,
                 detail_markdown="\n\n".join([result.detail_markdown, self._format_approvals([record])]),
@@ -3358,6 +3418,7 @@ class WorkflowService:
         outcome: str,
         target: str,
         metadata: dict[str, Any] | None = None,
+        risk_level: str = "medium",
     ) -> None:
         if self.audit_log is None:
             return
@@ -3368,10 +3429,39 @@ class WorkflowService:
                 actor_type="discord_user" if access.user_id else "service",
                 outcome=outcome,
                 target=target,
-                risk_level="medium",
+                risk_level=risk_level,
                 metadata=dict(metadata or {}),
             )
         )
+
+
+def _server_operation_audit_metadata(operation: ServerOperation | None) -> dict[str, Any]:
+    if operation is None:
+        return {}
+    metadata = dict(operation.metadata or {})
+    dry_run = operation.dry_run
+    return {
+        "operation_id": operation.id,
+        "server_name": operation.server_name,
+        "operation": operation.operation,
+        "status": operation.status,
+        "risk_level": operation.risk_level,
+        "requested_by_user_id": operation.requested_by_user_id,
+        "approved_by_user_ids": list(operation.approved_by_user_ids),
+        "action_run_id": operation.action_run_id or "",
+        "approval_policy": dry_run.approval_policy if dry_run else "",
+        "feature_mode": metadata.get("feature_mode", ""),
+        "executor_name": metadata.get("executor_name", ""),
+        "executed_by": metadata.get("executed_by", ""),
+        "stdout_excerpt": metadata.get("stdout_excerpt", ""),
+        "stderr_excerpt": metadata.get("stderr_excerpt", ""),
+        "server_state_before": metadata.get("server_state_before", {}),
+        "server_state_after": metadata.get("server_state_after", {}),
+        "container_state_before": metadata.get("container_state_before", {}),
+        "container_state_after": metadata.get("container_state_after", {}),
+        "executor_result": metadata.get("executor_result", {}),
+        "executor_summary": metadata.get("executor_summary", ""),
+    }
 
 
 def _candidate_lines(text: str) -> list[str]:

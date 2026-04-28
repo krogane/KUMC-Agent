@@ -8,7 +8,7 @@ Minecraft support is dry-run-first. Write operations require approval and should
 
 1. Capture current server status.
 2. Confirm the requested operation, server, service, and operator.
-3. Confirm two approvers for high-risk operations.
+3. Confirm admin approval for high-risk operations and two approvers for critical operations.
 4. Verify backup or snapshot availability.
 
 ## Rollback Checklist
@@ -26,5 +26,6 @@ Minecraft support is dry-run-first. Write operations require approval and should
 - `compose_restart` / `restart`: inspect logs first, then repeat restart only if the service is stuck. Restore the latest known-good backup if data corruption is suspected.
 - `compose_down`: critical. Keep disabled unless two-person approval and an explicit recovery path are available. Roll forward with `compose_up` for the same configured service.
 - `whitelist_update`: rollback is the inverse operation for the same player name and server.
+- `backup_create`: remove the generated archive if it is invalid or causes storage pressure. Do not restore from it until integrity has been verified.
 
 Do not write secrets, internal IP addresses, network keys, PINs, or unlock steps into rollback notes.

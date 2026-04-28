@@ -245,6 +245,8 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
                 executor=ServerOperationExecutorRegistry(
                     config=settings_from_runtime(foundation.config.server_management)
                 ),
+                llm=llm,
+                prompts_dir=prompts_dir,
             ),
             operations=operations_repository,
             member_search_service=member_search,

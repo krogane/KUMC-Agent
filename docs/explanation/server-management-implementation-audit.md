@@ -1,12 +1,12 @@
-# サーバー管理 実装調査結果
+# サーバー管理 実装再調査結果
 
 調査日: 2026-04-28
 
 参照仕様:
 
+- `docs/design/kumc-agent.md` の「9. サーバー管理」
 - `docs/design/server-management.md`
 - `docs/plan/server-management.md`
-- `docs/design/kumc-agent.md` の「9. サーバー管理」
 
 調査対象:
 
@@ -16,153 +16,107 @@
 - `src/kumc_agent/features/workflow/service.py`
 - `src/kumc_agent/apps/workflow.py`
 - `src/kumc_agent/config/*`
+- `configs/main/server_management.yaml`
+- `assets/prompts/server_operation_planner.md`
 - `src/kumc_agent/cli.py`
 - `src/kumc_agent/frontends/discord/app.py`
 - `src/kumc_agent/frontends/http/app.py`
 - `tests/unit/test_minecraft_support.py`
 - `tests/unit/test_server_management.py`
+- `tests/unit/test_server_operation_executor.py`
 - `tests/unit/test_cli_server_management_payload.py`
+- `tests/unit/test_config_loading.py`
 - `tests/unit/test_database_migrations.py`
 
 `src/kumc_agent/infra/legacy` は、プロジェクト方針に従い調査対象から除外した。
 
 ## 結論
 
-現行実装は、初期dry-run実装だけではなく、ActionSpec、admin制御、複数操作planner、JSONL/Postgres repository更新、server_operation専用承認、read-only/compose/whitelist/file_search executor、CLI/Discord/HTTP接続、payload sanitizationまで実装されている。
+サーバー管理は、更新後の仕様に対して完全実装済みと判断する。
 
-ただし、`docs/design/server-management.md` と `docs/plan/server-management.md` の完了条件に照らすと、現時点では「仕様通りの完全実装」とは判断できない。主な未達は、専用LLM Planner未実装、監査ログの情報量、executor失敗時のstatus遷移、schema validationの実行前徹底、unsupported依頼の扱い、`compose_down` の意味の不一致、file_searchのapproval/allow path仕様、実executorのテスト不足である。
+初期ActionSpecには `status`, `docker_ps`, `file_search`, `compose_up`, `compose_restart`, `restart`, `whitelist_update`, `backup_create`, `compose_down` が含まれる。自然言語Plannerは専用LLMを前提とし、LLM出力をJSON validationとActionSpec照合に通す。ラベル付き入力のdeterministic parserはCLI互換とテスト補助に限定される。
 
-安全面では、任意shell文字列をそのまま実行する経路は見当たらず、副作用executorも `shell=False` と固定argvで実行される。一方で、実行時例外やtimeoutが `failed` として保存されない場合があり、運用監査と復旧性の観点で完全仕様には届いていない。
+任意shell文字列を実行する経路はなく、executorは登録済みoperationだけを固定argv、`shell=False`、設定済みserver/service/path allow listで実行する。副作用操作は承認前に実行されず、high riskはadmin approval、criticalは二者承認またはdisabledになる。`file_search` はread-onlyだが `admin_dry_run` としてapprove必須である。
 
-## 実装済みの主な要素
+## 実装済み要素
 
-| 仕様項目 | 状態 | 主な実装箇所 |
+| 項目 | 状態 | 主な実装箇所 |
 | --- | --- | --- |
-| ActionSpec registry | 実装済み。`status`, `docker_ps`, `file_search`, `compose_up`, `compose_restart`, `restart`, `whitelist_update`, `compose_down` を定義 | `features/minecraft/actions.py` |
-| domain model | `ActionSpec`, `MinecraftDryRun`, `ServerOperationPlan`, `ServerOperationExecutionResult`, `ServerOperation` を定義 | `domain/models/minecraft.py` |
-| admin限定受付 | 実装済み。`is_admin` または `maintenance_command_author_ids` 相当のuser idで判定 | `features/minecraft/access.py`, `apps/workflow.py` |
-| 非admin拒否 | 実装済み。候補作成・一覧表示せず、拒否文とmetadataのみ返す | `features/minecraft/service.py` |
-| Planner | 部分実装。現行はdeterministic parserであり、仕様前提の専用LLM Plannerではない | `features/minecraft/planner.py` |
-| shell断片拒否 | 部分実装済み。`rm -rf`, shell metacharacter, `sh -c`, `bash -c` を拒否 | `features/minecraft/service.py` |
-| dry-run保存 | 実装済み。impact、downtime、rollback、command preview、warningsを保存 | `features/minecraft/service.py` |
-| read-only docker_ps | 実装済み。adminであれば `docker ps -a --format {{json .}}` を事前承認なしで実行 | `infra/minecraft/executor.py` |
-| 副作用executor | 部分実装済み。compose、whitelistを固定argv、`shell=False`、timeout指定で実行 | `infra/minecraft/executor.py` |
-| file_search executor | 実装済み。許可root配下だけをPythonで検索し、secret/IPをマスク | `infra/minecraft/executor.py` |
-| repository拡張 | 実装済み。JSONL/Postgres双方にstatus更新、承認者追加、実行結果保存を実装 | `infra/minecraft/repository.py` |
-| server_operation approval | 実装済み。generic approvalから分岐し、`ServerOperation` と `ApprovalRecord` を更新 | `features/workflow/service.py` |
-| critical二者承認 | 部分実装済み。同一userは重複せず、2 userでapproved。server設定でcritical disabledも可能 | `features/minecraft/service.py` |
-| config | 実装済み。`configs/main/server_management.yaml` と `RuntimeConfig.server_management` を追加 | `config/load.py`, `config/schema.py` |
-| CLI/HTTP/Discord | 実装済み。`mc_status`, `mc_request`, `server_operation_execute`, `approval --type server_operation` 経路あり | `cli.py`, `frontends/*` |
-| payload sanitization | 実装済み。metadataのsecret、内部IP、server/container stateなどをpayload出力前に除外・マスク | `features/foundation/payload_sanitizer.py` |
-| runbook | 実装済み。rollbackとincident responseにサーバー管理項目あり | `docs/runbooks/*` |
+| 専用LLM Planner | 実装済み。自然言語はLLM JSONを検証し、unsupportedは候補保存なし | `features/minecraft/planner.py`, `assets/prompts/server_operation_planner.md` |
+| 初期ActionSpec | `backup_create` を含む9操作を登録 | `features/minecraft/actions.py` |
+| dry-run前validation | configured server、compose_dir、service allow list、file search root、player nameを検証 | `features/minecraft/service.py` |
+| 承認ポリシー | `admin_dry_run` はapprove必須。highはadmin approval、criticalは二者承認またはdisabled | `features/minecraft/service.py`, `features/workflow/service.py` |
+| `compose_down` | 設定済み `compose_dir` で `docker compose down` を実行 | `infra/minecraft/executor.py` |
+| backup作成 | tar.gz archive作成、保存先設定、世代管理、path maskを実装 | `infra/minecraft/executor.py`, `features/minecraft/config.py` |
+| executor失敗処理 | 例外/timeoutを `failed` として保存し、`running` 放置を防止 | `features/minecraft/service.py` |
+| 状態snapshot | compose/whitelist実行前後に `docker compose ps --format json` を取得 | `infra/minecraft/executor.py` |
+| docker ps出力 | parse後にmask/truncateし、service labelとsummaryを保持 | `infra/minecraft/executor.py` |
+| 監査ログ | Workflow公開経路でoperation id、risk、approver、stdout/stderr、state snapshotをAuditEvent metadataへ保存 | `features/workflow/service.py` |
+| sanitize | secret、内部IP、network key、PIN、unlock steps、絶対path、backup pathを外部payload/detailから抑止 | `features/foundation/payload_sanitizer.py`, `features/minecraft/service.py`, `infra/minecraft/repository.py` |
+| 設定 | `server_management.backup` を含めconfigs配下で管理 | `configs/main/server_management.yaml`, `config/schema.py`, `config/load.py` |
 
-## 完了条件別の判定
+## 仕様との差分再調査
 
-| 完了条件 | 判定 | 差分 |
+| 旧差分 | 再調査結果 |
+| --- | --- |
+| executor例外やtimeoutが `failed` として保存されない | 解消。`execute()` が例外を捕捉し、failed resultを保存する |
+| 監査ログがstdout/stderr/state/承認者を満たさない | 解消。Workflowのserver_operation各経路がAuditEvent metadataへ保存する |
+| 専用LLM Plannerが未実装 | 解消。自然言語Plannerは専用LLM前提。deterministic parserはラベル付き入力専用 |
+| unsupported自然文が `docker_ps` にfallbackする | 解消。候補を保存せず `対応操作を確認してください。` を返す |
+| schema validationがdry-run保存前に不十分 | 解消。write/file/whitelist/backup操作は保存前に設定とallow listを検証する |
+| `compose_down` の意味とexecutorが不一致 | 解消。`compose_down` は `docker compose down` と定義し、executorも一致 |
+| status表示がdry-run-onlyのまま | 解消。executor接続状態とapproval gated writesを表示する |
+| `file_search` のapproval policyが曖昧 | 解消。`admin_dry_run` はapprove必須として実装 |
+| container/server state snapshotが実状態ではない | 解消。compose state snapshotを実コマンドで取得する |
+| `docker_ps` 出力項目が少ない | 解消。service labelを含め、固定formatter summaryを保存する |
+| `docker_ps` がtruncate後にparseする | 解消。raw stdoutをparseしてからsanitize/truncateする |
+| file_search allow pathの基準が曖昧 | 解消。configs base dir基準または絶対pathを許可し、依頼pathも許可root配下なら相対/絶対の両方を許可 |
+| direct service利用時はApprovalRecord/auditが残らない | 仕様整理済み。外部公開経路は `WorkflowService` 経由に限定し、audit/ApprovalRecordはWorkflowで保存する |
+| 実executorの直接unit testがない | 解消。DockerPs/Compose/FileSearch/Backup executor testを追加 |
+| backup作成ActionSpecが未実装 | 解消。`backup_create` を初期ActionSpecとして実装 |
+
+残差分はない。
+
+## 仕様改善点の反映
+
+| # | 改善点 | 反映内容 |
 | --- | --- | --- |
-| サーバー管理操作はadminだけが受付できる | OK | `MinecraftSupportService` の入口でadmin判定している |
-| 非admin拒否応答に内部情報を含めない | OK | 拒否文は固定で、operation/listは返さない |
-| 自然言語入力から1件以上の操作計画を抽出できる | NG | 現行はdeterministic parserのみ。仕様前提の専用LLM Planner、JSON schema validation、LLM出力のunsupported処理が未実装 |
-| 定義済みActionSpecに限定し、任意shellを実行しない | 部分OK | shell断片拒否とregistry照合はあるが、unsupported自然文の明示拒否が弱い |
-| required args不足時は候補を保存しない | OK | `ValueError` で保存前に止まる |
-| server/compose directory/service/path/playerをschema validationする | 部分NG | server allow list未設定時は任意server/serviceのdry-runが作れる。file_search pathもdry-run時は許可rootとの照合が不十分 |
-| `docker_ps` はadmin限定かつ事前承認不要で実行できる | OK | executor接続済み。ただしservice label出力やLLM要約はない |
-| compose系dry-runで影響、停止時間、rollbackを提示 | OK | 固定文で提示している |
-| 副作用操作は承認前に実行されない | OK | write操作は `approved` でなければexecute不可 |
-| high risk以上はadmin承認必須 | OK | admin以外はapprove不可 |
-| criticalは二者承認またはdisabled | 部分OK | 2 user承認とserver設定disabledはあるが、server未設定時のpolicyが曖昧 |
-| `ServerOperation` のstatus、承認者、実行結果をJSONL/Postgresへ保存 | OK | repository contractは実装済み |
-| 承認後に定義済みexecutorだけが実行される | OK | executor registryでoperation別に固定実装へ分岐 |
-| stdout/stderr、server/container state、実行者、承認者が監査ログへ保存される | NG | `ServerOperation.metadata` には保存されるが、`AuditEvent` はaction/actor/outcome/target/risk程度で、stdout/stderr/state/approverは入らない |
-| payloadからsecret、内部IP、ネットワークキー、PIN、解錠手順を除外・マスク | 部分OK | metadata/payloadは対応。`detail_markdown` やdry-run `command_preview` に対する明示sanitizeは弱い |
-| CLIや外部連携payloadの診断情報がmetadata配下に入る | OK | `server_operations` は主結果、診断系はmetadata配下 |
-| 主要動作をunittest方式で検証できる | 部分OK | サービス・approval・payloadはあるが、実executor、Postgres repository contract、config server allow listの直接テストが不足 |
-
-## 仕様との差分
-
-| 優先度 | 差分 | 影響 | 根拠 |
-| --- | --- | --- | --- |
-| Critical | executor例外やtimeoutが `failed` として保存されない | `execute()` が `running` に更新した後、executorが例外を投げると `save_execution_result()` まで到達せず、operationが `running` のまま残る可能性がある | `MinecraftSupportService.execute()` はexecutor例外をcatchしない |
-| Critical | 監査ログが仕様の保存対象を満たさない | stdout/stderr、server state、container state、承認者、executor resultが `AuditEvent` に残らない。operation metadataには残るが、仕様は監査ログ保存を要求している | `WorkflowService._audit()` はaction/actor/outcome/target/riskのみ |
-| Critical | 専用LLM Plannerが未実装 | 仕様は自然言語依頼を専用LLMで抽出し、JSON schema validationを通す前提だが、現行はキーワード・ラベルベースのdeterministic parserのみ。複雑な依頼、条件付き依頼、曖昧な引数確認、unsupported分類の精度が仕様に届かない | `ServerOperationPlanner` はLLMPortやprompt/schemaを持たない |
-| Critical | unsupported自然文が明示拒否されず `docker_ps` にfallbackする | 「バックアップして」「nginx reload」など未対応依頼がunsupportedではなくread-only container確認として処理され得る。危険な副作用には直結しないが、仕様の「対応しない操作は拒否」と一致しない | `ServerOperationPlanner.plan()` のfallback |
-| High | schema validationがdry-run保存前に徹底されていない | allow list未設定時に任意server/serviceでwrite dry-runを作れる。file_searchもserverにallow pathが1つでもあれば任意相対pathをdry-run保存し、実行時までroot照合しない | `MinecraftSupportService._validated_args()` |
-| High | `compose_down` の仕様とexecutor動作が不一致 | dry-run previewは `docker compose down <service>` 相当だが、executorは `docker compose stop <service>` を実行する。停止範囲、volume/network影響、rollback説明がずれる | `infra/minecraft/executor.py` の `_compose_command()` |
-| High | status表示が実装状態とずれている | `mc_status` が `execution=dry-run-only` / `disabled in Wave 6` と表示するが、実際にはread-only executorと承認後executorが接続済み | `MinecraftSupportService.status()` |
-| High | file_searchのapproval policyが曖昧に実装されている | `file_search` は `read_only=True` かつ `admin_dry_run` だが、`server_operation_execute` ではread_onlyなら `waiting_approval` のまま実行できる。別途admin確認を必須にする仕様なら未達 | `MinecraftSupportService.execute()` |
-| High | container/server state snapshotが実状態ではない | compose/whitelist executorのsnapshotは `compose_dir` の存在とservice名だけで、実container stateやhealth checkではない | `_state_snapshot()` |
-| Medium | `docker_ps` 出力項目が仕様より少ない | service labelが返らず、LLM要約もない。実用上はformatter要約として最低限だが、仕様記述とは差がある | `DockerPsExecutor.execute()` |
-| Medium | `docker_ps` はtruncate後にJSON parseしている | stdout上限でJSONLが途中切れになると、本来あるcontainer行をparseできない可能性がある | `DockerPsExecutor.execute()` |
-| Medium | file_search allow pathの基準が曖昧 | 設定例ではserver配下の相対pathに見えるが、実装ではbase_dir解決済みPathをrootとして扱う。compose_dir配下なのかbase_dir配下なのか仕様に明記が必要 | `config/load.py`, `FileSearchExecutor` |
-| Medium | direct service利用時はApprovalRecord/auditが残らない | 標準経路のWorkflow approvalでは記録されるが、`MinecraftSupportService.approve()` を直接呼ぶとServerOperationだけが更新される | `features/minecraft/service.py` |
-| Medium | 実executorの直接unit testがない | serviceにfake executorを挿すテストはあるが、DockerPs/Compose/Whitelist/FileSearch executor自体のargv、allow list、timeout、maskingは未検証 | `tests/unit` |
-| Medium | backup作成ActionSpecが未実装 | 計画ではbackup追加は条件付きだが、設計の対象範囲にはバックアップ作成が含まれるため、完全実装の範囲が曖昧 | `features/minecraft/actions.py` |
-
-## 仕様改善点
-
-1. 完全実装の範囲をActionSpecごとに固定する。特にbackup作成は「初期ActionSpecに含める」のか「将来拡張」なのかを明確にする。
-2. Planner仕様を専用LLM前提として明文化する。deterministic parserはラベル付き入力やテスト用の補助経路に限定し、通常の自然言語依頼は専用LLM Planner、JSON schema validation、ActionSpec照合、unsupported分類を必須にする。
-3. 承認ポリシー表をoperation別に具体化する。`file_search` の `admin_dry_run` が「approve必須」なのか「adminがexecuteを明示すれば可」なのかを明確にする。
-4. `compose_down` の意味を再定義する。service単位停止ならoperation名を `compose_stop` に変えるか、criticalな `compose_down` はproject全体downとして別executorに分ける。
-5. server allow list未設定時の安全動作を明記する。現実装はdry-run作成を許すが実行時にserver未設定で失敗する。仕様上はwrite候補作成も拒否する方が運用上わかりやすい。
-6. `allow_file_search_paths` の基準を明記する。`compose_dir` からの相対pathなのか、repo `base_dir` からのpathなのか、絶対pathを許可するのかを仕様で固定する。
-7. unsupported/ambiguous入力の応答方針を追加する。未知の自然文は `docker_ps` fallbackではなく、候補を保存せず「対応操作を確認してください」と返す方が仕様に合う。
-8. executor失敗時のtransaction方針を追加する。`running` 更新後の例外、timeout、validation failureを必ず `failed` に遷移し、stderr/rollback/通知payloadを保存することを完了条件に入れる。
-9. 監査ログとServerOperation metadataの責務を分ける。監査ログに保存すべき最小key、metadataにだけ残すkey、payloadで除外するkeyを表で定義する。
-10. dry-run/detailのsanitize方針を追加する。CLI/HTTP payload metadataだけでなく、`detail_markdown`、`command_preview`、warningsにもsecret/internal pathを出さないルールを明記する。
-11. docker output処理をparse前truncate禁止にする。raw stdoutは保存せず、stream/行単位でparseしてからfield単位でmask/limitする仕様が安全。
-12. テスト完了条件を具体化する。executor contract、Postgres/File repository同一遷移、timeout、secret masking、allow list拒否、critical二者承認を個別test名として列挙する。
-13. runbookと設計の承認人数を揃える。現runbookはhigh-riskで二者承認を確認すると書いているが、詳細設計ではhighはadmin承認、criticalが二者承認である。
-
-## 推奨修正順
-
-1. `MinecraftSupportService.execute()` でexecutor例外とtimeoutをcatchし、operationを必ず `failed` に更新する。`running` のまま残らない回帰テストを追加する。
-2. `WorkflowService._audit()` またはserver_operation専用auditで、operation id、risk、executor、actor、approvers、stdout/stderr抜粋、state snapshotをマスク済みで保存する。
-3. 専用LLM Plannerを実装する。Planner promptは `assets/prompts` に置き、出力は1件以上の `ServerOperationPlan` JSONに限定し、JSON schema validation後にActionSpecへ正規化する。
-4. Plannerのfallbackを変更し、未知・未対応自然文はunsupportedとして候補保存しない。backup要求も明示的にunsupportedまたは実装済みActionSpecへ振り分ける。
-5. dry-run前validationを強化する。write操作はconfigured server必須、service/pathはallow list照合必須にする。
-6. `compose_down` を仕様に合わせる。`stop` を使うならoperation名・risk・rollback説明も `compose_stop` に寄せる。
-7. DockerPs/Compose/Whitelist/FileSearch executorのunit testを追加し、argv、cwd、shell=False、allow list、timeout、masking、state snapshotを検証する。
-8. `mc_status` の表示を現行executor状態に更新する。
-9. file_searchのapproval policyを仕様として確定し、実装とテストを合わせる。
+| 1 | backup作成の範囲固定 | `backup_create` を初期ActionSpecに含め、configとexecutorを追加 |
+| 2 | Planner仕様を専用LLM前提に明文化 | 設計/計画/実装を専用LLM前提へ更新 |
+| 3 | `admin_dry_run` の意味を具体化 | approve必須として実装し、`file_search` で検証 |
+| 4 | `compose_down` の意味を定義 | `docker compose down` と定義し、service argをargvへ渡さない |
+| 5 | server allow list未設定時の安全動作 | `status`/`docker_ps` 以外はconfigured server必須 |
+| 6 | file search path基準 | configs base dir基準と絶対path許可を仕様化し実装 |
+| 7 | unsupported/ambiguous応答 | `対応操作を確認してください。` を固定応答にした |
+| 8 | executor失敗時transaction方針 | `running` 後の例外も `failed` resultとして保存 |
+| 9 | auditとmetadataの責務分離 | Workflow公開経路でaudit、ServerOperation metadataで詳細保持、payloadではsanitize |
+| 10 | dry-run/detail sanitize | command previewとdetailで絶対path/secretをマスク |
+| 11 | docker output parse順 | parse前truncateを廃止 |
+| 12 | テスト完了条件の具体化 | executor、approval、unknown自然文、失敗保存、absolute path、payload maskをunit test化 |
+| 13 | runbookと承認人数の整合 | highはadmin approval、criticalは二者承認に統一 |
 
 ## 検証
 
-最初にsystem Pythonで実行したところ、`python` コマンドが存在せず失敗した。
-
 ```bash
-python -m unittest tests.unit.test_minecraft_support tests.unit.test_server_management tests.unit.test_cli_server_management_payload tests.unit.test_database_migrations
+app/.venv/bin/python -m unittest tests.unit.test_minecraft_support tests.unit.test_server_management tests.unit.test_server_operation_executor tests.unit.test_cli_server_management_payload tests.unit.test_database_migrations tests.unit.test_config_loading tests.unit.test_foundation_services tests.unit.test_automation_hardening
 ```
 
 結果:
 
 ```text
-zsh:1: command not found: python
+Ran 53 tests in 0.105s
+OK
 ```
 
-次に `python3` で実行したところ、グローバル環境に `discord` がなく、CLI payload testのimportで失敗した。
+追加でunit全体を実行した。
 
 ```bash
-python3 -m unittest tests.unit.test_minecraft_support tests.unit.test_server_management tests.unit.test_cli_server_management_payload tests.unit.test_database_migrations
+app/.venv/bin/python -m unittest discover tests/unit
 ```
 
 結果:
 
 ```text
-Ran 29 tests
-FAILED (errors=1)
-ModuleNotFoundError: No module named 'discord'
-```
-
-プロジェクトのvenvでは関連テストが成功した。
-
-```bash
-app/.venv/bin/python -m unittest tests.unit.test_minecraft_support tests.unit.test_server_management tests.unit.test_cli_server_management_payload tests.unit.test_database_migrations
-```
-
-結果:
-
-```text
-Ran 29 tests in 0.017s
+Ran 262 tests in 96.923s
 OK
 ```

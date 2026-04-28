@@ -7,3 +7,6 @@ server_management:
     timeout_seconds: 120
     stdout_char_limit: 4000
     stderr_char_limit: 4000
+  backup:
+    backup_dir: "data/minecraft/backups"
+    max_backups: 10

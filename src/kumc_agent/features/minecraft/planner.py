@@ -1,94 +1,97 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 import re
+from typing import Any
 
 from kumc_agent.domain.models.minecraft import ServerOperationPlan
+from kumc_agent.domain.ports.llms import LLMPort
+
+
+class UnsupportedServerOperationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
 class ServerOperationPlanner:
     default_server_name: str = "default"
+    llm: LLMPort | None = None
+    prompts_dir: Path | None = None
+    prompt_name: str = "server_operation_planner.md"
 
     def plan(self, text: str) -> tuple[ServerOperationPlan, ...]:
         source = (text or "").strip()
         if not source:
-            return (
-                ServerOperationPlan(
-                    operation="docker_ps",
-                    server_name=self.default_server_name,
-                    confidence="low",
-                    metadata={"planner": "deterministic", "reason": "empty_input"},
-                ),
-            )
+            raise UnsupportedServerOperationError("対応操作を確認してください。")
         labeled = _parse_labeled(source)
         if labeled.get("operation"):
-            return (self._plan_from_payload(labeled, source, sequence_index=0),)
+            return (self._plan_from_payload(labeled, sequence_index=0, planner="deterministic_labeled"),)
+        if self.llm is None:
+            raise UnsupportedServerOperationError("対応操作を確認してください。")
+        return self._plan_with_llm(source)
 
-        plans: list[ServerOperationPlan] = []
-        lowered = source.lower()
-        if "docker ps" in lowered or "container" in lowered or "コンテナ" in source:
-            plans.append(self._plan_from_payload({"operation": "docker_ps"}, source, len(plans)))
-        if "compose down" in lowered or "停止" in source:
-            plans.append(self._plan_from_payload({"operation": "compose_down"}, source, len(plans)))
-        elif "compose restart" in lowered:
-            plans.append(self._plan_from_payload({"operation": "compose_restart"}, source, len(plans)))
-        elif "restart" in lowered or "再起動" in source:
-            plans.append(self._plan_from_payload({"operation": "restart"}, source, len(plans)))
-        elif "compose up" in lowered or "起動" in source:
-            plans.append(self._plan_from_payload({"operation": "compose_up"}, source, len(plans)))
-        if "whitelist" in lowered or "ホワイトリスト" in source:
-            payload = {
-                "operation": "whitelist_update",
-                "player_name": _infer_player_name(source),
-                "whitelist_action": _infer_whitelist_action(source),
-            }
-            plans.append(self._plan_from_payload(payload, source, len(plans)))
-        if "file" in lowered or "ファイル" in source or "検索" in source:
-            payload = {
-                "operation": "file_search",
-                "path": _extract_labeled_value(source, ("path", "dir", "directory", "パス")),
-                "query": _extract_labeled_value(source, ("query", "検索", "search")),
-            }
-            plans.append(self._plan_from_payload(payload, source, len(plans)))
-        if not plans:
-            plans.append(self._plan_from_payload({"operation": "docker_ps"}, source, 0))
-        return tuple(plans)
+    def _plan_with_llm(self, source: str) -> tuple[ServerOperationPlan, ...]:
+        raw = self.llm.generate(
+            system_prompt=self._system_prompt(),
+            user_prompt=source,
+            temperature=0.0,
+            max_output_tokens=1200,
+        )
+        payload = _extract_json(raw)
+        operations_payload = _operations_payload(payload)
+        if not operations_payload:
+            raise UnsupportedServerOperationError("対応操作を確認してください。")
+        plans = tuple(
+            self._plan_from_payload(
+                item,
+                sequence_index=index,
+                planner="llm",
+            )
+            for index, item in enumerate(operations_payload)
+        )
+        if any(plan.operation == "unsupported" for plan in plans):
+            raise UnsupportedServerOperationError("対応操作を確認してください。")
+        return plans
+
+    def _system_prompt(self) -> str:
+        prompt_path = (self.prompts_dir or Path("assets/prompts")) / self.prompt_name
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8")
+        return _DEFAULT_SYSTEM_PROMPT
 
     def _plan_from_payload(
         self,
-        payload: dict[str, str],
-        source: str,
+        payload: dict[str, Any],
+        *,
         sequence_index: int,
+        planner: str,
     ) -> ServerOperationPlan:
-        operation = payload.get("operation") or _infer_operation(source)
-        server_name = payload.get("server_name") or _extract_labeled_value(
-            source,
-            ("server", "server_name", "サーバー", "対象サーバー"),
-        )
-        service_name = payload.get("service_name") or _extract_labeled_value(
-            source,
-            ("service", "service_name", "サービス"),
-        )
-        depends_on = ""
-        if sequence_index > 0:
+        data = _validate_plan_payload(payload)
+        operation = _normalize_operation(data.get("operation", "unsupported"))
+        depends_on = data.get("depends_on", "")
+        if not depends_on and sequence_index > 0:
             depends_on = "previous"
+        metadata = {
+            "planner": planner,
+            "sequence_index": sequence_index,
+            "depends_on": depends_on,
+        }
+        if data.get("unsupported_reason"):
+            metadata["unsupported_reason"] = data["unsupported_reason"]
         return ServerOperationPlan(
             operation=operation,
-            server_name=server_name or self.default_server_name,
-            service_name=service_name or "",
-            server_dir=payload.get("server_dir", ""),
-            path=payload.get("path", ""),
-            query=payload.get("query", ""),
-            player_name=payload.get("player_name", ""),
-            whitelist_action=payload.get("whitelist_action", ""),
-            reason=payload.get("reason", ""),
-            confidence="high" if payload.get("operation") else "medium",
-            metadata={
-                "planner": "deterministic",
-                "sequence_index": sequence_index,
-                "depends_on": depends_on,
-            },
+            server_name=data.get("server_name") or self.default_server_name,
+            service_name=data.get("service_name", ""),
+            server_dir=data.get("server_dir", ""),
+            path=data.get("path", ""),
+            query=data.get("query", ""),
+            player_name=data.get("player_name", ""),
+            whitelist_action=data.get("whitelist_action", ""),
+            reason=data.get("reason", ""),
+            confidence=data.get("confidence", "medium"),
+            metadata=metadata,
         )
 
 
@@ -98,11 +101,13 @@ def _parse_labeled(text: str) -> dict[str, str]:
         "operation": ("operation", "op", "操作", "action"),
         "server_name": ("server", "server_name", "サーバー", "対象サーバー"),
         "service_name": ("service", "service_name", "サービス"),
+        "server_dir": ("server_dir",),
         "path": ("path", "dir", "directory", "パス", "ディレクトリ"),
         "query": ("query", "検索", "search"),
         "player_name": ("player", "player_name", "mcid", "プレイヤー"),
-        "whitelist_action": ("whitelist_action", "whitelist", "mode"),
+        "whitelist_action": ("whitelist_action", "whitelist_action_mode", "mode"),
         "reason": ("reason", "理由"),
+        "confidence": ("confidence", "信頼度"),
     }
     for key, labels in patterns.items():
         value = _extract_labeled_value(text, labels)
@@ -119,35 +124,96 @@ def _extract_labeled_value(text: str, labels: tuple[str, ...]) -> str:
     return ""
 
 
-def _infer_operation(text: str) -> str:
-    lowered = text.lower()
-    if "compose down" in lowered or "停止" in text:
-        return "compose_down"
-    if "compose restart" in lowered:
-        return "compose_restart"
-    if "restart" in lowered or "再起動" in text:
-        return "restart"
-    if "compose up" in lowered or "起動" in text:
-        return "compose_up"
-    if "file" in lowered or "ファイル" in text or "検索" in text:
-        return "file_search"
-    if "whitelist" in lowered or "ホワイトリスト" in text:
-        return "whitelist_update"
-    return "docker_ps"
+def _extract_json(text: str) -> object:
+    stripped = (text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.I)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    start_obj = stripped.find("{")
+    start_list = stripped.find("[")
+    starts = [index for index in (start_obj, start_list) if index >= 0]
+    if not starts:
+        raise UnsupportedServerOperationError("対応操作を確認してください。")
+    start = min(starts)
+    end = stripped.rfind("}" if stripped[start] == "{" else "]")
+    if end < start:
+        raise UnsupportedServerOperationError("対応操作を確認してください。")
+    try:
+        return json.loads(stripped[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise UnsupportedServerOperationError("対応操作を確認してください。") from exc
 
 
-def _infer_player_name(text: str) -> str:
-    labeled = _extract_labeled_value(text, ("player", "player_name", "mcid", "プレイヤー"))
-    if labeled:
-        return labeled
-    match = re.search(r"(?:whitelist|ホワイトリスト)(?:に|へ| add|追加)?\s*([A-Za-z0-9_]{3,16})", text, re.I)
-    return match.group(1) if match else ""
+def _operations_payload(payload: object) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("operations"), list):
+        items = payload["operations"]
+    elif isinstance(payload, dict) and payload.get("operation"):
+        items = [payload]
+    else:
+        return []
+    return [item for item in items if isinstance(item, dict)]
 
 
-def _infer_whitelist_action(text: str) -> str:
-    lowered = text.lower()
-    if "remove" in lowered or "delete" in lowered or "削除" in text or "外" in text:
-        return "remove"
-    if "add" in lowered or "追加" in text or "入" in text:
-        return "add"
-    return ""
+def _validate_plan_payload(payload: dict[str, Any]) -> dict[str, str]:
+    allowed = {
+        "operation",
+        "server_name",
+        "service_name",
+        "server_dir",
+        "path",
+        "query",
+        "player_name",
+        "whitelist_action",
+        "reason",
+        "confidence",
+        "depends_on",
+        "unsupported_reason",
+    }
+    data: dict[str, str] = {}
+    for key, value in payload.items():
+        if key not in allowed:
+            continue
+        if value is None:
+            data[key] = ""
+        elif isinstance(value, (str, int, float, bool)):
+            data[key] = str(value).strip()
+        else:
+            raise UnsupportedServerOperationError("対応操作を確認してください。")
+    operation = data.get("operation", "").strip()
+    if not operation:
+        raise UnsupportedServerOperationError("対応操作を確認してください。")
+    if data.get("confidence") not in {"", "low", "medium", "high"}:
+        data["confidence"] = "medium"
+    if not data.get("confidence"):
+        data["confidence"] = "medium"
+    return data
+
+
+def _normalize_operation(value: str) -> str:
+    normalized = (value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "mc_status": "status",
+        "docker": "docker_ps",
+        "ps": "docker_ps",
+        "docker_ps_a": "docker_ps",
+        "compose": "compose_up",
+        "up": "compose_up",
+        "down": "compose_down",
+        "restart_mc_server": "restart",
+        "server_restart": "restart",
+        "whitelist": "whitelist_update",
+        "backup": "backup_create",
+        "create_backup": "backup_create",
+    }
+    return aliases.get(normalized, normalized)
+
+
+_DEFAULT_SYSTEM_PROMPT = """\
+You are a server-operation planner for KUMC-Agent.
+Return only JSON. Do not return shell commands.
+Schema:
+{"operations":[{"operation":"docker_ps|file_search|compose_up|compose_restart|restart|whitelist_update|compose_down|backup_create|unsupported","server_name":"","service_name":"","path":"","query":"","player_name":"","whitelist_action":"add|remove","reason":"","confidence":"low|medium|high","depends_on":"","unsupported_reason":""}]}
+Use unsupported when the request is not one of the listed operations or required intent is unclear.
+"""

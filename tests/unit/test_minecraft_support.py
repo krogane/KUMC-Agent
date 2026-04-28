@@ -16,6 +16,7 @@ from kumc_agent.domain.models.workflow import WorkRequest
 from kumc_agent.features.foundation.feature_flags import FeatureFlagService
 from kumc_agent.features.minecraft import MinecraftSupportService
 from kumc_agent.features.minecraft.actions import MinecraftActionSpecRegistry
+from kumc_agent.features.minecraft.config import ServerDefinition, ServerManagementSettings
 from kumc_agent.features.workflow import WorkflowService
 from kumc_agent.infra.minecraft import FileServerOperationRepository
 from kumc_agent.infra.workflow import FileWorkflowRepository
@@ -45,14 +46,27 @@ class MinecraftSupportTests(unittest.TestCase):
         self.assertIn("docker_ps", names)
         self.assertIn("compose_restart", names)
         self.assertIn("compose_down", names)
+        self.assertIn("backup_create", names)
         self.assertFalse(registry.has("rm -rf /"))
 
     def test_mc_request_saves_dry_run_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            compose_dir = root / "compose"
+            compose_dir.mkdir()
             service = MinecraftSupportService(
                 repository=FileServerOperationRepository(root_dir=root / "minecraft"),
                 feature_flags=_flags(),
+                settings=ServerManagementSettings(
+                    default_server_name="survival",
+                    servers=(
+                        ServerDefinition(
+                            name="survival",
+                            compose_dir=compose_dir,
+                            services=("minecraft",),
+                        ),
+                    ),
+                ),
             )
 
             result = service.request(
@@ -106,9 +120,21 @@ class MinecraftSupportTests(unittest.TestCase):
     def test_workflow_mc_status_and_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            compose_dir = root / "compose"
+            compose_dir.mkdir()
             minecraft = MinecraftSupportService(
                 repository=FileServerOperationRepository(root_dir=root / "minecraft"),
                 feature_flags=_flags(),
+                settings=ServerManagementSettings(
+                    default_server_name="survival",
+                    servers=(
+                        ServerDefinition(
+                            name="survival",
+                            compose_dir=compose_dir,
+                            services=("minecraft",),
+                        ),
+                    ),
+                ),
             )
             workflow = WorkflowService(
                 repository=FileWorkflowRepository(root_dir=root / "workflow"),

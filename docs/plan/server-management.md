@@ -10,12 +10,16 @@
 ## 2. 完了条件
 - サーバー管理操作はadminだけが受付できる。
 - 非adminへの拒否応答にserver名、container名、pending件数、operation idなどの内部情報が含まれない。
-- 自然言語入力から1件以上の操作計画を抽出できる。
+- 自然言語入力から専用LLM Plannerで1件以上の操作計画を抽出できる。ラベル付き入力のdeterministic parserはCLI互換とテスト補助に限定する。
 - 操作計画は定義済みActionSpecに限定され、任意shell commandを実行しない。
+- 未知または曖昧な自然文は候補を保存せず `対応操作を確認してください。` と返す。
 - required args不足時は候補を保存せず、不足項目を質問できる。
-- 対象server、compose directory、service name、path、player nameをschema validationできる。
+- 対象server、compose directory、service name、path、player nameをdry-run保存前にschema validationできる。
 - `docker_ps` はadmin限定かつ事前承認不要のread-only操作として実行できる。
+- `file_search` はread-onlyだが `admin_dry_run` としてapproveを必須にできる。
 - `compose_up`、`compose_restart`、`restart`、`compose_down` はdry-runで影響範囲、想定停止時間、rollback方針を提示できる。
+- `compose_down` は設定済みcompose projectで `docker compose down` を実行する。
+- `backup_create` は初期ActionSpecとしてbackup archive作成、保存先設定、世代管理を持つ。
 - 副作用操作は承認前に実行されない。
 - high risk以上はadmin承認必須になる。
 - critical操作は二者承認またはdisabledになる。
@@ -67,13 +71,14 @@
 
 ### Phase 4: Planner導入
 1. `ServerOperationPlan` modelを追加する。
-2. 既存 `_parse_request()` を `ServerOperationPlanner` に移す。
+2. ラベル付き入力parserを `ServerOperationPlanner` に集約する。
 3. ラベル付き入力のdeterministic parserを維持する。
 4. 複数操作を抽出できるようにする。
-5. 専用LLM plannerを任意で追加し、JSON schema validationを必須にする。
+5. 専用LLM plannerを必須経路として追加し、JSON schema validationを必須にする。
 6. LLM出力にshell commandが含まれても直接採用しない。
 7. unsupported operationは候補保存せず拒否する。
 8. required args不足時は不足項目を返し、候補を保存しない。
+9. LLMなしで通常自然言語が来た場合は、候補を保存せず `対応操作を確認してください。` と返す。
 
 検証:
 - `operation: compose_restart server: survival service: minecraft` を抽出できること。
@@ -87,13 +92,14 @@
 3. `docker_ps` をadmin限定read-only、事前承認不要として扱う。
 4. `compose_up`、`compose_restart`、`restart`、`whitelist_update` をhigh riskに維持する。
 5. `compose_down` はcriticalかつ二者承認またはdisabledにする。
-6. backup作成ActionSpecを追加する場合はrisk、approval、rollbackを必須にする。
+6. `backup_create` を初期ActionSpecに含め、risk、approval、rollbackを必須にする。
 
 検証:
 - registryに許可操作だけが含まれること。
 - alias正規化が既存入力を壊さないこと。
 - `docker_ps` の承認要否が設計通りになること。
 - critical操作が一者承認で実行可能にならないこと。
+- `backup_create` がregistryに含まれ、high risk/admin approvalになること。
 
 ### Phase 6: Dry-run強化
 1. `MinecraftDryRun` または汎用 `ServerOperationDryRun` にvalidation結果を保持する。
@@ -175,21 +181,24 @@
 4. rollbackとして逆操作を提示する。
 5. `FileSearchExecutor` を追加し、許可済みpathだけを検索する。
 6. secretらしき行は全文を返さない。
-7. backup作成を追加する場合はbackup保存先、世代管理、容量上限、rollback runbookを設定する。
+7. backup作成を初期実装に含め、backup保存先、世代管理、rollback runbookを設定する。
 
 検証:
 - 不正なplayer_nameを拒否すること。
 - whitelist削除がhigh risk承認を必要とすること。
 - file searchがallow path外を読まないこと。
+- file searchは許可root配下の相対pathと絶対pathを許可し、それ以外を拒否すること。
 - secretを含む行がマスクされること。
+- backup archiveが作成され、古い世代が削除されること。
 
 ### Phase 12: 監査ログと出力整形
 1. `workflow.server_operation.*` のaudit eventを追加する。
 2. stdout/stderr、server state、container state、実行者、承認者を保存する。
-3. 一般回答とCLI payload向けにmetadata sanitizationを強化する。
-4. `server_operations` のitem metadataもsanitizeする。
-5. Discord表示では長いdetailをattachmentまたは短縮表示に逃がす。
-6. 失敗時admin通知payloadを作る。
+3. CLI、Discord、HTTP、agent toolなど外部からのサーバー管理経路は `WorkflowService` を通し、直接 `MinecraftSupportService` を公開しない。
+4. 一般回答とCLI payload向けにmetadata sanitizationを強化する。
+5. `server_operations` のitem metadataもsanitizeする。
+6. Discord表示では長いdetailをattachmentまたは短縮表示に逃がす。
+7. 失敗時admin通知payloadを作る。
 
 検証:
 - audit logにoperation id、actor、approver、statusが残ること。
@@ -276,4 +285,3 @@
 12. 監査ログと出力整形
 13. CLI / Discord / HTTP統合
 14. Runbook整備
-

@@ -25,9 +25,9 @@
 
 現行実装は、自律エージェントの「初期実装に相当する骨格」は存在するが、仕様が求める完全実装には達していない。
 
-実装済みなのは、設定読み込み、domain model、idempotency key生成、`AgentRun` / `AgentStep` trace、タスク・イベント・サーバー運用・Automation runの一部snapshot、決定的Planner、Workflow fallback adapter、Verifier、CLI/workerからの手動run、最低限のunittestである。
+実装済みなのは、設定読み込み、domain model、idempotency key生成、`AgentRun` / `AgentStep` trace、タスク・イベント・サーバー運用・Automation runの一部snapshot、決定的Planner、Workflow fallback adapter、決定的Verifier、CLI/workerからの手動run、最低限のunittestである。
 
-未達の主要点は、1日にn回の自動起動、RAG差分collector、統合入力受付を標準経路にしたTOOL実行、Automation/Retrieval adapter、VERIFYの実再検索ループ、承認申請・通知候補の永続化契約、詳細な権限/secret/副作用検証、監査/monitoring/readinessの完全性である。
+未達の主要点は、1日にn回の自動起動、RAG差分collector、統合入力受付を標準経路にしたTOOL実行、Automation/Retrieval adapter、専用LLM Planner / Verifier、VERIFYの実再検索ループ、承認申請・通知候補の永続化契約、詳細な権限/secret/副作用検証、監査/monitoring/readinessの完全性である。
 
 したがって現状は `M1: Dry-run MVP` と `M3: worker連携の一部` までは進んでいるが、`M2`、`M4`、Phase 14以降の監査・安全性・ドキュメント整備を含む完全実装ではない。
 
@@ -41,9 +41,9 @@
 | duplicate判定 | `AutomationRepository.get_run_by_idempotency_key()` で既存runを確認し、duplicate時はPLAN/TOOLを実行しない | `src/kumc_agent/features/autonomous_agent/service.py:84` |
 | trace保存 | `AgentRun` を開始し、PLAN / TOOL / VERIFYを `AgentStep` として保存 | `src/kumc_agent/features/autonomous_agent/service.py:97`, `src/kumc_agent/features/autonomous_agent/service.py:165`, `src/kumc_agent/features/autonomous_agent/service.py:184`, `src/kumc_agent/features/autonomous_agent/service.py:208` |
 | snapshot収集 | Task、Task候補、Task approval batch、Event、Event候補、Event approval batch、pending ServerOperation、waiting/blocked AutomationRun、recent runを一部収集 | `src/kumc_agent/features/autonomous_agent/snapshot.py:63`, `src/kumc_agent/features/autonomous_agent/snapshot.py:83`, `src/kumc_agent/features/autonomous_agent/snapshot.py:111`, `src/kumc_agent/features/autonomous_agent/snapshot.py:129`, `src/kumc_agent/features/autonomous_agent/snapshot.py:148` |
-| deterministic Planner | 期限接近/超過Task、停滞Task、準備Task不足Event、不足情報Event、RAG差分、ServerOperation、AutomationRunからcheck/queryを作成 | `src/kumc_agent/features/autonomous_agent/planner.py:24` |
+| deterministic Planner | 期限接近/超過Task、停滞Task、準備Task不足Event、不足情報Event、RAG差分、ServerOperation、AutomationRunからcheck/queryを作成。完全実装で必要な専用LLM Plannerは未実装 | `src/kumc_agent/features/autonomous_agent/planner.py:24` |
 | TOOL adapter | dry-run時に候補作成系queryをskipし、通常時は統合入力受付またはWorkflow fallbackを実行 | `src/kumc_agent/features/autonomous_agent/integrated_input.py:44` |
-| VERIFY | forbidden side effect marker、tool result不足、candidate citation不足、通知先未設定、通知候補/承認申請候補の作成を判定 | `src/kumc_agent/features/autonomous_agent/verifier.py:35` |
+| VERIFY | forbidden side effect marker、tool result不足、candidate citation不足、通知先未設定、通知候補/承認申請候補の作成を判定。完全実装で必要な専用LLM Verifierは未実装 | `src/kumc_agent/features/autonomous_agent/verifier.py:35` |
 | CLI | `kumc-agent autonomous` コマンドを追加し、`--dry-run`、`--slot`、`--scope`、`--idempotency-key` を受け取る | `src/kumc_agent/cli.py:382`, `src/kumc_agent/cli.py:668` |
 | worker | `job_type="autonomous_agent_run"` を追加し、payloadからtrigger/slot/scopes/dry_runを受け取る | `src/kumc_agent/apps/worker/app.py:101` |
 | legacy非依存 | `features/autonomous_agent`、`apps/autonomous_agent.py`、domain model、専用testにlegacy importは見つからない | `rg "legacy" src/kumc_agent/features/autonomous_agent src/kumc_agent/apps/autonomous_agent.py src/kumc_agent/domain/models/autonomous_agent.py tests/unit/test_autonomous_agent.py` |
@@ -56,6 +56,7 @@
 | High | 1日にn回の自動起動が未実装 | `schedule_times` に従い1日にn回起動し、scheduler/worker経由で同じserviceを呼ぶ | `schedule_times` は設定にあるが、cron生成・Automation default rule・外部scheduler候補生成はない。worker手動jobのみ実装。`enabled` もservice実行可否には使われていない |
 | High | RAG差分collectorが未実装 | 当日のRAGデータ差分、更新source、重要そうな新規資料をsnapshotへ入れる | `rag_delta_collector_unimplemented` warningを返すだけで、plannerのRAG差分queryは実データから発火しない |
 | High | 統合入力受付が標準経路になっていない | TOOLは統合入力受付へクエリを送り、通常の権限・安全性ルールで処理する | adapterは統合入力受付を呼べるが、app contextでは `integrated_input=None` としてWorkflow fallback固定 |
+| High | 専用LLM Planner / Verifierが未実装 | 完全実装では、決定的ルールを安全な下限として残しつつ、専用LLM Plannerで複合状況から計画を作成し、専用LLM Verifierで根拠・重複・権限・副作用境界を検証する | 現行は決定的Plannerとmarker/条件分岐中心のVerifierのみ。LLM出力schema validation、fallback、監査用reason生成は未実装 |
 | High | 再検索/再計画ループがない | VERIFYで不足時に `max_replans` 以内で再検索し、改善不可ならnoop/低confidence提案 | verifierは `retry_search` を返せるが、serviceは再検索せず `insufficient_evidence` に変換して終了する |
 | High | 承認申請・候補の永続化契約が弱い | Task/Event/Automation候補、ApprovalRequest、通知候補を承認フローに接続する | NotificationProposal/ApprovalRequestProposalは主にresponseとAgentRun metadataに残る。Automation候補作成は未実装。ApprovalRecordやWorkflow approval targetへの明確な接続はない |
 | High | 安全性検証が仕様より浅い | 権限外情報、secret、個人情報、大きなcontext、正本更新済みpayloadを検出する | sanitizerは共通処理を使うが、Verifierの副作用検出はmetadata文字列marker依存。内部IP、招待URL、個人連絡先、権限外情報の明示検査は不足 |
@@ -79,6 +80,7 @@
 | TOOLで統合入力受付へクエリ | Partial | adapterはあるがapp contextはWorkflow fallback固定 |
 | 未完成範囲は限定adapterで安全に呼ぶ | Partial | Workflowのみ。Automation/Retrieval/Server adapterは未実装 |
 | VERIFYで再検索/noop/通知/許可申請/候補を選択 | Partial | decisionは返すが再検索は実行されない。Automation候補なし |
+| 専用LLM Planner / Verifierで高度な判断を行う | No | 現行は決定的ルールのみ。完全実装ではLLM Planner / Verifierを実装し、schema validationと決定的guardを併用する必要がある |
 | 出力が提案・通知候補・承認申請・ログに限定 | Mostly | 外部投稿はしない。worker top-level `side_effects` はpayload方針違反 |
 | 承認前に外部投稿/サーバー操作/正本更新なし | Mostly | planner由来のwork_typeでは正本更新は起きにくい。Verifierはmarker依存で、将来拡張時の防御は弱い |
 | PLAN/TOOL/VERIFY trace保存 | Yes | 専用テストでも確認済み |
@@ -118,34 +120,39 @@ RAG差分は仕様上重要だが、どのrepositoryやindexing runから「当�
 
 設計の `AutonomousAgentResponse` には `run` など内部寄りの項目がtop-levelにある一方、CLI/外部連携payload方針では診断情報をmetadata配下に置く。内部service返却型と外部payload schemaを分け、外部payloadには `run_id` だけを `metadata` に置く方が一貫する。
 
-### 8. 副作用検証をmarkerではなく構造化契約にする
+### 8. 専用LLM Planner / Verifierを完全実装要件として定義する
+
+現行の決定的Planner / Verifierは安全なfallbackとして残しつつ、完全実装では自律エージェント専用のLLM PlannerとLLM Verifierを実装する方針を明記すべきである。LLM Plannerはsnapshot、recent runs、budget、scope、side effect boundaryを入力に、`checks`、`required_queries`、`target_refs`、`success_criteria`、`risk`、`notification_policy` をschema付きで出力する。LLM Verifierはtool result、citation、権限、重複通知履歴、副作用契約を検査し、`retry_search`、`noop`、`notify`、`request_approval`、`create_candidates` をschema付きで選択する。LLM出力は必ずschema validation、決定的guard、監査可能なreason生成、fallback経路を通す必要がある。
+
+### 9. 副作用検証をmarkerではなく構造化契約にする
 
 現在のVerifierはmetadata文字列に `executed` や `sent` が含まれるかを見る。完全実装ではadapter resultに `side_effects: none | candidate_or_approval_only | master_write | external_post | server_execute`、`master_write_count`、`external_delivery_count` などの構造化フィールドを必須化し、禁止値をschema validationで拒否するべきである。
 
-### 9. 再検索/再計画の予算仕様を具体化する
+### 10. 再検索/再計画の予算仕様を具体化する
 
 `max_steps`、`max_search_calls`、`max_replans`、`max_latency_seconds` があるが、現在は主に `max_steps` だけ使われている。TOOL種別ごとのカウント方法、retry時のquery変更規則、citation不足時の再検索条件、elapsed/cost記録を仕様化する必要がある。
 
-### 10. duplicate/idempotencyの競合耐性を仕様化する
+### 11. duplicate/idempotencyの競合耐性を仕様化する
 
 完全実装では、run完了後に履歴を書く方式では同時起動を防げない。run開始時に `idempotency_key` を予約し、Postgresではunique constraint、File fallbackではlock/atomic writeを使う、クラッシュ時は `running` のTTLで扱う、という仕様が必要である。
 
-### 11. 評価・テストマトリクスを完了条件に直結させる
+### 12. 評価・テストマトリクスを完了条件に直結させる
 
-仕様には評価観点があるが、テスト完了条件に直接落ちていない。最低限、scheduler slot、RAG差分、統合入力受付経由、permission denied、secret masking、forbidden side effect、candidate citation不足、notification duplicate suppression、worker payload metadata方針をunittestまたはintegration testで必須化すべきである。
+仕様には評価観点があるが、テスト完了条件に直接落ちていない。最低限、scheduler slot、RAG差分、統合入力受付経由、専用LLM Planner / Verifierのschema validationとfallback、permission denied、secret masking、forbidden side effect、candidate citation不足、notification duplicate suppression、worker payload metadata方針をunittestまたはintegration testで必須化すべきである。
 
 ## 推奨対応順
 
 1. `schedule_times` からAutomation default ruleまたはworker起動候補を生成し、`enabled` と `slot` を実行制御に接続する。
 2. RAG差分collectorの正データソースを決め、当日差分snapshotを実装する。
-3. `build_autonomous_agent_app_context()` で統合入力受付を標準経路に接続し、Workflow fallbackは明示fallbackにする。
-4. `max_replans` に基づく再検索/再計画ループを `AutonomousAgentService` に実装する。
-5. worker payloadの `side_effects` を `metadata.side_effects` へ移動する。
-6. NotificationProposal / ApprovalRequestProposal / Automation proposal の永続化先を確定し、承認フローに接続する。
-7. Verifierを構造化 `side_effects` 契約、secret/内部IP/招待URL/個人連絡先検査、権限外情報検査へ拡張する。
-8. AuditEventにproposal作成、duplicate、blocked/noop理由、elapsed/cost/search countを追加する。
-9. 専用テストをPhase 16の列挙項目まで拡張する。
-10. runbook、CLI説明、評価基盤docs、integrated-input docsを更新する。
+3. 専用LLM Planner / Verifierを実装し、schema validation、決定的guard、fallback、監査用reason生成を組み込む。
+4. `build_autonomous_agent_app_context()` で統合入力受付を標準経路に接続し、Workflow fallbackは明示fallbackにする。
+5. `max_replans` に基づく再検索/再計画ループを `AutonomousAgentService` に実装する。
+6. worker payloadの `side_effects` を `metadata.side_effects` へ移動する。
+7. NotificationProposal / ApprovalRequestProposal / Automation proposal の永続化先を確定し、承認フローに接続する。
+8. Verifierを構造化 `side_effects` 契約、secret/内部IP/招待URL/個人連絡先検査、権限外情報検査へ拡張する。
+9. AuditEventにproposal作成、duplicate、blocked/noop理由、elapsed/cost/search countを追加する。
+10. 専用テストをPhase 16の列挙項目まで拡張する。
+11. runbook、CLI説明、評価基盤docs、integrated-input docsを更新する。
 
 ## 検証
 
@@ -164,4 +171,3 @@ rg "legacy" src/kumc_agent/features/autonomous_agent src/kumc_agent/apps/autonom
 - `python3 -m unittest tests.unit.test_autonomous_agent`: 3 tests / OK。
 - `python3 -m unittest tests.unit.test_autonomous_agent tests.unit.test_config_loading`: 9 tests / OK。
 - legacy import検索: 該当なし。
-

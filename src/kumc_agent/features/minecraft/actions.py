@@ -66,11 +66,18 @@ class MinecraftActionSpecRegistry:
                 executor_name="whitelist",
             ),
             ActionSpec(
+                operation="backup_create",
+                description="Create a configured server backup archive.",
+                risk_level="high",
+                approval_policy="admin_approval",
+                executor_name="backup",
+            ),
+            ActionSpec(
                 operation="compose_down",
                 description="Plan docker compose down.",
                 risk_level="critical",
                 approval_policy="two_person_or_disabled",
-                required_args=("service_name",),
+                optional_args=("service_name",),
                 executor_name="compose",
             ),
         )
@@ -98,5 +105,7 @@ def _normalize_operation(value: str) -> str:
         "restart_mc_server": "restart",
         "server_restart": "restart",
         "whitelist": "whitelist_update",
+        "backup": "backup_create",
+        "backup_create_server": "backup_create",
     }
     return aliases.get(normalized, normalized)

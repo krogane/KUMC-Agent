@@ -447,6 +447,11 @@ def _compact_secret_text(text: str, limit: int) -> str:
         "[internal-ip]",
         value,
     )
+    value = re.sub(
+        r"(?i)(network[_-]?key|unlock(?:ing)?[_ -]?steps?)\s*[:=]\s*[^\n]+",
+        r"\1=[REDACTED]",
+        value,
+    )
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 3)].rstrip() + "..."

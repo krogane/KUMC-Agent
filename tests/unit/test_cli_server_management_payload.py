@@ -27,6 +27,7 @@ class CliServerManagementPayloadTests(unittest.TestCase):
                     dry_run=MinecraftDryRun(
                         operation="docker_ps",
                         server_name="survival",
+                        args={"path": "/srv/private/logs", "query": "token=abc"},
                     ),
                     metadata={
                         "stdout_excerpt": "token=abc 192.168.1.10",
@@ -45,6 +46,8 @@ class CliServerManagementPayloadTests(unittest.TestCase):
         self.assertIn("[REDACTED]", operation["metadata"]["stdout_excerpt"])
         self.assertIn("[internal-ip]", operation["metadata"]["stdout_excerpt"])
         self.assertNotIn("server_state_before", operation["metadata"])
+        self.assertEqual(operation["dry_run"]["args"]["path"], "<configured-path>")
+        self.assertIn("[REDACTED]", operation["dry_run"]["args"]["query"])
         self.assertIsInstance(operation["dry_run"], dict)
 
 

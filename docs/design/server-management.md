@@ -26,23 +26,23 @@
 
 対象外は、Minecraft Wiki RAG、通常RAG、サーバー内アプリケーション固有ロジックの詳細である。ただし現行実装ではMinecraftサーバー運用を主対象にしているため、初期実装ではMinecraft向けActionSpecを中心に扱う。
 
-## 3. 現行実装との差分
-現行実装は、Minecraftサーバー管理候補をdry-runとして保存する最小経路を持つ。
+## 3. 現行実装の基準
+現行実装は、Minecraftサーバー管理候補の作成、承認、固定executorによる実行、監査ログ保存、payload sanitizationまでを持つ。汎用サーバー管理へ拡張できる構成だが、初期ActionSpecはMinecraft運用向けに固定する。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
+| 項目 | 実装基準 | 本設計で必要な状態 |
 | --- | --- | --- |
 | 操作対象 | Minecraft supportとして実装 | 汎用サーバー管理として設計し、初期ActionSpecはMinecraft向けにする |
-| 権限 | `AccessContext` は渡されるが、`mc_request` のadmin限定チェックは未徹底 | サーバー管理はadminのみ受付し、非adminには拒否文だけを返す |
-| 計画抽出 | ラベル付き文字列と簡易推定で単一操作を抽出 | 専用LLMまたはdeterministic parserで複数操作を抽出し、ActionSpecに正規化する |
+| 権限 | `AccessContext` とserver management access policyでadmin限定 | サーバー管理はadminのみ受付し、非adminには拒否文だけを返す |
+| 計画抽出 | 自然言語は専用LLM Planner、ラベル付き入力はdeterministic parserで抽出 | 専用LLMで複数操作を抽出し、ActionSpecに正規化する。deterministic parserはラベル付き入力とテスト補助に限定する |
 | 任意shell拒否 | registry外operationを拒否 | 入力中のshell断片も候補として直接採用せず、ActionSpecに対応しないものは拒否する |
-| docker ps | `docker_ps` はActionSpecにあるが、実コマンドは実行しない | admin限定で事前承認なしに安全なexecutorが実行し、結果を要約できる |
-| 副作用操作 | dry-run保存のみ。実行は常に未実装 | 承認後に定義済みexecutorが起動・停止・再起動などを実行する |
-| dry-run | impact、downtime、rollback、command previewを生成 | 対象ディレクトリ、service name、server_nameをschema validationし、実行前確認として提示する |
-| 承認 | generic approval recordのみでServerOperation状態を更新しない | `ServerOperation` の承認者、status、action_run_idを更新し、risk policyを強制する |
-| high/critical | `risk_level` と `approval_policy` を保持 | high以上はadmin承認必須、criticalは二者承認またはdisabled |
-| 実行ログ | `server_operations` にdry_runとmetadataを保存 | stdout/stderr、server state、container state、実行者、承認者を監査ログとoperation metadataに保存 |
+| docker ps | `docker_ps` executorが `docker ps -a` 相当を固定argvで実行 | admin限定で事前承認なしに安全なexecutorが実行し、結果を要約できる |
+| 副作用操作 | compose、whitelist、backup executorを承認後に実行 | 承認後に定義済みexecutorが起動・停止・再起動などを実行する |
+| dry-run | impact、downtime、rollback、command preview、schema validationを生成前に適用 | 対象ディレクトリ、service name、server_name、pathをschema validationし、実行前確認として提示する |
+| 承認 | server_operation専用approval handlerでServerOperation状態を更新 | `ServerOperation` の承認者、status、action_run_idを更新し、risk policyを強制する |
+| high/critical | highはadmin承認、criticalは二者承認またはdisabled | high以上はadmin承認必須、criticalは二者承認またはdisabled |
+| 実行ログ | `server_operations` と `AuditEvent.metadata` に実行結果と状態を保存 | stdout/stderr、server state、container state、実行者、承認者を監査ログとoperation metadataに保存 |
 | feature flag | `minecraft_server_ops` のmodeを参照 | `disabled` は候補保存のみ、`approval_required` は承認後実行可、`enabled` でもhigh以上は承認必須 |
-| 秘密情報抑止 | CLI payloadのmetadata sanitizationは共通処理あり | executor出力とLLM要約前に秘密情報・内部接続情報を除外・マスクする |
+| 秘密情報抑止 | executor出力、repository保存、payload出力でマスク・除外 | executor出力とLLM要約前に秘密情報・内部接続情報を除外・マスクする |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -132,13 +132,13 @@ adminであっても、操作別risk policyを満たすまでは副作用を実�
 | `server_name` | 対象サーバー名 |
 | `service_name` | docker compose service名 |
 | `server_dir` | 許可済みサーバーディレクトリの識別子 |
-| `path` | ファイル検索などで使う許可済み相対path |
+| `path` | ファイル検索などで使う許可済みroot配下の相対pathまたは絶対path |
 | `query` | ファイル検索query |
 | `player_name` | whitelist更新対象 |
 | `reason` | 操作理由 |
 | `confidence` | 抽出信頼度 |
 
-Plannerは専用LLMを使えるが、LLM出力は必ずJSON schema validationを通す。LLMがshell commandを返した場合も、その文字列を実行候補にはしない。ActionSpecに対応しない操作は `unsupported` として拒否する。
+Plannerは専用LLMを前提とする。ラベル付き入力のdeterministic parserは、CLI互換とテスト補助のためだけに残す。通常の自然言語依頼では、LLM出力を必ずJSON schema validationに通し、ActionSpecに正規化する。LLMがshell commandを返した場合も、その文字列を実行候補にはしない。ActionSpecに対応しない操作は `unsupported` として扱い、候補を保存せず `対応操作を確認してください。` と返す。
 
 ### 6.2 複数操作
 入力クエリに複数のサーバー管理依頼がある場合は、複数件の抽出を許容する。
@@ -154,6 +154,8 @@ Plannerは専用LLMを使えるが、LLM出力は必ずJSON schema validationを
 ActionSpecの `required_args` が不足している場合は候補を作らず、必要情報を質問する。
 
 ただし、現行互換としてCLIの `mc_request` では `ValueError` を返す経路がある。frontendではこれをユーザー向け質問文に変換する。
+
+未知または曖昧な自然文は、`docker_ps` などの安全操作へfallbackしない。候補を保存せず、固定文 `対応操作を確認してください。` を返す。
 
 ## 7. ActionSpec
 ### 7.1 データモデル
@@ -192,12 +194,13 @@ ActionSpecの `required_args` が不足している場合は候補を作らず�
 | `compose_restart` | high | admin_approval | false | 許可済みserviceを再起動 |
 | `restart` | high | admin_approval | false | Minecraftサーバー再起動 |
 | `whitelist_update` | high | admin_approval | false | whitelistの追加・削除 |
-| `compose_down` | critical | two_person_or_disabled | false | 許可済みserviceを停止 |
+| `backup_create` | high | admin_approval | false | 設定済みサーバーディレクトリのbackup archiveを作成 |
+| `compose_down` | critical | two_person_or_disabled | false | 設定済みcompose projectで `docker compose down` を実行 |
 
 `kumc-agent.md` では `docker ps -a` は事前承認不要とされているため、詳細設計ではread-only executorとして扱う。ただしadmin限定は維持する。
 
 ### 7.3 拡張ActionSpec
-バックアップ作成、ファイル検索、whitelist更新などを追加できる。
+初期ActionSpec以外の操作を追加できる。
 
 追加時の必須条件は次の通り。
 
@@ -235,9 +238,11 @@ ActionSpecの `required_args` が不足している場合は候補を作らず�
 - `server_name` が設定済みサーバーに含まれる
 - `server_dir` が許可済みディレクトリに対応する
 - `service_name` が許可済みserviceに含まれる
-- `path` が許可済みroot配下の相対pathである
+- `path` が許可済みroot配下の相対pathまたは絶対pathである
 - `player_name` がMinecraft IDとして妥当である
 - operationに不要な引数があってもexecutorに渡さない
+
+`status` と `docker_ps` 以外の操作は設定済みserverを必須とする。副作用操作は設定済み `compose_dir` を必須とし、server allow listが空または対象serverが未登録の場合はdry-run候補も作成しない。
 
 設定は `.env` ではなく `configs/main/server_management.yaml` などconfigs配下に置く。APIキーやtokenを追加する場合のみ `.env` と `.env.example` の両方に反映する。
 
@@ -353,7 +358,7 @@ indexは `status, created_at desc` と `operation, risk_level` を使う。
 | 条件 | 動作 |
 | --- | --- |
 | feature flag `disabled` | 実行不可。dry-run保存のみ |
-| read-only | adminであれば事前承認不要 |
+| read-onlyかつ `approval_policy=self/admin` | adminであれば事前承認不要 |
 | `approval_policy=self` | admin本人の明示実行で可 |
 | `approval_policy=admin` | admin確認で可 |
 | `approval_policy=admin_dry_run` | dry-run保存とadmin確認を必須 |
@@ -361,6 +366,7 @@ indexは `status, created_at desc` と `operation, risk_level` を使う。
 | `approval_policy=two_person_or_disabled` | 二者承認が揃うまで実行不可。設定でdisabledも可 |
 
 `kumc-agent.md` に従い、high risk以上はadmin承認を必須にする。critical操作は二者承認またはdisabledにする。
+`file_search` は `read_only=True` だが `approval_policy=admin_dry_run` のため、実行にはadmin approvalを必須とする。
 
 ### 11.2 ApprovalRecord
 既存の `WorkflowService._generic_approval()` は `ApprovalRecord` だけを保存し、外部副作用を実行しない。サーバー管理では、承認操作時に `ServerOperation` も更新する専用approval handlerを追加する。
@@ -405,6 +411,7 @@ executorはoperationごとに固定実装とし、shell文字列を外部入力�
 
 ### 12.3 compose操作
 `compose_up`、`compose_restart`、`restart`、`compose_down` は、対象ディレクトリとservice nameをschema validationしたうえで、承認後に実行する。
+`compose_down` は設定済み `compose_dir` で `docker compose down` を実行する操作と定義する。project全体を停止し得るため、service nameは実行argvには渡さず、criticalとして二者承認またはdisabledを必須にする。
 
 実行前に次を保存する。
 
@@ -437,7 +444,7 @@ executorはoperationごとに固定実装とし、shell文字列を外部入力�
 ### 12.5 ファイル検索
 `file_search` はread-onlyだが、内部ファイル名や設定内容を漏らす危険があるためmedium riskとする。
 
-許可済みpath配下のみ検索し、出力はファイル名、行番号、短い抜粋に制限する。secretらしき値を含む行は全文を返さない。
+許可済みpath配下のみ検索し、出力はファイル名、行番号、短い抜粋に制限する。`allow_file_search_paths` はconfigsのbase dir基準で解決したpath、または絶対pathを許可する。依頼時の `path` も、許可済みroot配下であれば相対pathと絶対pathの両方を許可する。secretらしき値を含む行は全文を返さない。
 
 ## 13. 監査ログ
 ### 13.1 保存対象
@@ -458,6 +465,7 @@ executorはoperationごとに固定実装とし、shell文字列を外部入力�
 
 ### 13.2 AuditLog
 既存の `WorkflowService._audit()` と `infra.audit` を使う。
+監査ログ保存は `WorkflowService` の公開受付経路で必ず行う。`MinecraftSupportService` はサーバー操作の低レベルfeature serviceであり、CLI、Discord、HTTP、agent toolなど外部から呼ばれる経路は `WorkflowService` を経由してaudit metadataを付与する。
 
 event名は次の形式にする。
 
@@ -533,6 +541,9 @@ server_management:
     timeout_seconds: 120
     stdout_char_limit: 4000
     stderr_char_limit: 4000
+  backup:
+    backup_dir: "data/minecraft/backups"
+    max_backups: 10
 ```
 
 トークンやAPIキー以外のパラメータを `.env` / `.env.example` へ置かない。
@@ -543,7 +554,7 @@ server_management:
 | エラー | 応答 |
 | --- | --- |
 | 非admin | 拒否文。内部情報は出さない |
-| unsupported operation | 対応していない操作として拒否 |
+| unsupported operation | 候補を保存せず `対応操作を確認してください。` と返す |
 | required arg不足 | 不足項目を質問 |
 | schema validation失敗 | 候補を保存せず、修正可能な入力項目を提示 |
 | feature disabled | dry-run保存のみ。実行不可 |
@@ -568,4 +579,3 @@ server_management:
 - stdout/stderrとmetadataがマスクされる
 - CLI payloadの診断情報が `metadata` 配下に入る
 - JSONL repositoryとPostgres repositoryで同じstatus遷移になる
-

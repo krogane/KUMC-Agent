@@ -61,6 +61,7 @@ from kumc_agent.config.schema import (
     RuntimeConfig,
     SchedulerSection,
     SecuritySection,
+    ServerManagementBackupSection,
     ServerManagementDockerPsSection,
     ServerManagementExecutionSection,
     ServerManagementSection,
@@ -575,6 +576,12 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     execution.setdefault("timeout_seconds", 120)
     execution.setdefault("stdout_char_limit", 4000)
     execution.setdefault("stderr_char_limit", 4000)
+    backup = server_management.get("backup")
+    if not isinstance(backup, dict):
+        backup = {}
+        server_management["backup"] = backup
+    backup.setdefault("backup_dir", "data/minecraft/backups")
+    backup.setdefault("max_backups", 10)
     return updated
 
 
@@ -1918,6 +1925,20 @@ def _to_runtime_config(
                 ),
                 stderr_char_limit=int(
                     server_management.get("execution", {}).get("stderr_char_limit", 4000)
+                ),
+            ),
+            backup=ServerManagementBackupSection(
+                backup_dir=_resolve_path(
+                    base_dir,
+                    str(
+                        server_management.get("backup", {}).get(
+                            "backup_dir",
+                            "data/minecraft/backups",
+                        )
+                    ),
+                ),
+                max_backups=int(
+                    server_management.get("backup", {}).get("max_backups", 10)
                 ),
             ),
         ),

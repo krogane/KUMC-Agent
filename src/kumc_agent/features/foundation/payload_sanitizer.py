@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 import re
 from typing import Any
 
@@ -15,6 +16,8 @@ DROP_KEYS = {
     "server_state_after",
     "container_state_before",
     "container_state_after",
+    "backup_path",
+    "backup_dir",
     "downloaded_image_path",
     "original_image_ref",
     "fallback_image_refs",
@@ -40,6 +43,14 @@ TEXT_LIMITS = {
     "prompt": 1200,
 }
 
+PATH_KEYS = {
+    "path",
+    "server_dir",
+    "compose_dir",
+    "backup_path",
+    "backup_dir",
+}
+
 
 def sanitize_payload(value: object, *, string_limit: int = 4000) -> object:
     if is_dataclass(value):
@@ -50,6 +61,9 @@ def sanitize_payload(value: object, *, string_limit: int = 4000) -> object:
             key_text = str(key)
             key_lower = key_text.lower()
             if key_lower in DROP_KEYS or key_lower in SECRET_KEYS:
+                continue
+            if key_lower in PATH_KEYS and isinstance(item, (str, Path)):
+                sanitized[key_text] = mask_payload_path(str(item))
                 continue
             limit = TEXT_LIMITS.get(key_lower, string_limit)
             sanitized[key_text] = sanitize_payload(item, string_limit=limit)
@@ -91,3 +105,10 @@ def mask_payload_secret(text: str) -> str:
         r"\1=[REDACTED]",
         masked,
     )
+
+
+def mask_payload_path(text: str) -> str:
+    value = mask_payload_secret(text)
+    if value.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", value):
+        return "<configured-path>"
+    return compact_payload_text(value, 4000)

@@ -26,11 +26,18 @@ class ServerExecutionSettings:
 
 
 @dataclass(frozen=True)
+class ServerBackupSettings:
+    backup_dir: Path = Path("data/minecraft/backups")
+    max_backups: int = 10
+
+
+@dataclass(frozen=True)
 class ServerManagementSettings:
     default_server_name: str = "default"
     docker_ps: DockerPsSettings = field(default_factory=DockerPsSettings)
     servers: tuple[ServerDefinition, ...] = tuple()
     execution: ServerExecutionSettings = field(default_factory=ServerExecutionSettings)
+    backup: ServerBackupSettings = field(default_factory=ServerBackupSettings)
 
     def server(self, name: str) -> ServerDefinition | None:
         normalized = (name or self.default_server_name).strip()
