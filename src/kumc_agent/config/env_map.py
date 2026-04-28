@@ -133,6 +133,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         str,
     ),
     EnvBinding(
+        "KUMC_HATENA_BLOG_URL",
+        "integrations.hatenablog.blog_url",
+        str,
+    ),
+    EnvBinding(
         "KUMC_CRAFTERS_COLONY_AUTHOR_URL",
         "integrations.crafters_colony.author_url",
         str,
@@ -770,6 +775,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_DISCORD_GUILD_ALLOW_LIST",
         "security.discord_guild_allow_list",
+        _to_int_csv,
+    ),
+    EnvBinding(
+        "KUMC_DISCORD_MEMBER_PROFILE_GUILD_IDS",
+        "security.discord_member_profile_guild_ids",
         _to_int_csv,
     ),
     EnvBinding("KUMC_MODEL_ROOT_DIR", "model.root_dir", str),

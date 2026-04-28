@@ -1175,6 +1175,40 @@ def _cleanup_missing_drive_files(
             )
 
 
+def _cleanup_missing_drive_image_files(
+    *,
+    out_dir: Path,
+    valid_file_ids: set[str],
+) -> None:
+    if not out_dir.exists():
+        return
+    for path in out_dir.glob("*"):
+        if path.is_dir() or path.name.endswith(".meta.json"):
+            continue
+        file_id = _extract_drive_file_id(path.name)
+        if not file_id or file_id in valid_file_ids:
+            continue
+        try:
+            path.unlink()
+            logger.info("Removed deleted Drive image %s", path.name)
+        except Exception as exc:
+            logger.warning("Failed to remove deleted Drive image %s: %s", path.name, exc)
+            continue
+
+        meta_path = path.with_suffix(path.suffix + ".meta.json")
+        if not meta_path.exists():
+            continue
+        try:
+            meta_path.unlink()
+            logger.info("Removed deleted Drive image metadata %s", meta_path.name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove deleted Drive image metadata %s: %s",
+                meta_path.name,
+                exc,
+            )
+
+
 def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
     metadata = {
         "drive_file_id": drive_file.file_id,
@@ -1231,6 +1265,7 @@ def download_drive_markdown(
     if drive_max_files is not None and drive_max_files > 0:
         logger.info("Limiting Drive downloads to first %d files", drive_max_files)
 
+    images_dir = docs_dir.parent / "images" / "google_drive"
     if sync_deleted:
         valid_doc_ids = {
             drive_file.file_id
@@ -1242,6 +1277,11 @@ def download_drive_markdown(
             for drive_file in drive_files
             if _is_sheet_like_mime(drive_file.mime_type)
         }
+        valid_image_ids = {
+            drive_file.file_id
+            for drive_file in drive_files
+            if _is_drive_image_mime(drive_file.mime_type)
+        }
         _cleanup_missing_drive_files(
             out_dir=docs_dir,
             extension=".md",
@@ -1252,10 +1292,13 @@ def download_drive_markdown(
             extension=".csv",
             valid_file_ids=valid_sheet_ids,
         )
+        _cleanup_missing_drive_image_files(
+            out_dir=images_dir,
+            valid_file_ids=valid_image_ids,
+        )
 
     docs_count = 0
     sheets_count = 0
-    images_dir = docs_dir.parent / "images" / "google_drive"
     ensure_dir(images_dir)
     download_retry_options = {
         "max_retries": drive_download_max_retries,

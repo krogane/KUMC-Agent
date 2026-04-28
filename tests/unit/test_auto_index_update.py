@@ -16,18 +16,21 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.operations import IndexingRun
 from kumc_agent.domain.models.source import AccessScope, SourceRawItem
 from kumc_agent.features.indexing.change_detection import SourceItemState, detect_source_change
 from kumc_agent.features.indexing.lock import FileIndexingLock
 from kumc_agent.features.indexing.quality import IndexQualitySmokeChecker
 from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
+from kumc_agent.features.indexing.task_event import TaskEventIndexBuildService
 from kumc_agent.features.ingestion.service import IngestionResult
 from kumc_agent.infra.ingestion.repository import FileIngestionRepository
 from kumc_agent.usecases.indexing.auto_update import (
     AutoIndexUpdateRequest,
     AutoIndexUpdateUsecase,
 )
+from kumc_agent.domain.models.workflow import Event, Task
 
 
 class _Operations:
@@ -72,6 +75,53 @@ class _Ingestion:
 
     async def backfill_many(self, *, source_kinds, scope):
         return (self.result,)
+
+
+class _ExplodingIngestion:
+    async def backfill_many(self, *, source_kinds, scope):
+        raise AssertionError("ingestion should not run")
+
+
+class _MemberProfileBuilder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Path]] = []
+
+    def rebuild_guild(self, *, guild_id: str, index_dir: Path | None = None) -> IndexingRun:
+        assert index_dir is not None
+        self.calls.append((guild_id, index_dir))
+        marker = index_dir / "member_profiles" / f"{guild_id}.marker"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok", encoding="utf-8")
+        return IndexingRun(
+            id=f"member-{guild_id}",
+            source_kind="member_profiles",
+            status="succeeded",
+            seen=2,
+            changed=2,
+            metadata={"guild_id": guild_id},
+        )
+
+
+class _Embedder:
+    def embed_documents(self, texts):
+        return np.ones((len(texts), 3), dtype=np.float32)
+
+    def embed_query(self, text):
+        return np.ones(3, dtype=np.float32)
+
+
+class _WorkflowRepository:
+    def list_tasks(self, **kwargs):
+        return [
+            Task(id="task-1", title="Active task", status="todo"),
+            Task(id="task-2", title="Deleted task", status="deleted"),
+        ]
+
+    def list_events(self, **kwargs):
+        return [
+            Event(id="event-1", title="Active event", status="planning"),
+            Event(id="event-2", title="Canceled event", status="canceled"),
+        ]
 
 
 def _config(root: Path):
@@ -174,6 +224,36 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertTrue((config.app.index_dir / "dense_chunks.jsonl").exists())
             self.assertEqual(operations.runs[-1].metadata["source_results"][0]["changed"], 1)
 
+    def test_auto_update_refreshes_member_profiles_as_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            operations = _Operations()
+            builder = _MemberProfileBuilder()
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=_Build(),
+                operations=operations,
+                ingestion_service=_ExplodingIngestion(),
+                member_profile_builder=builder,
+                member_profile_guild_ids=("guild-1",),
+            ).execute(
+                AutoIndexUpdateRequest(
+                    trigger="manual",
+                    source_filter=("member_profiles",),
+                    quality_check_enabled=False,
+                )
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(len(builder.calls), 1)
+            self.assertTrue((config.app.index_dir / "member_profiles" / "guild-1.marker").exists())
+            self.assertEqual(result.seen, 2)
+            self.assertEqual(result.changed, 2)
+            self.assertEqual(
+                operations.runs[-1].metadata["stage_results"]["member_profiles"]["guild_ids"],
+                ["guild-1"],
+            )
+
     def test_ingestion_repository_loads_revision_and_acl_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -192,13 +272,69 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertEqual(state.revision, "rev-1")
             self.assertEqual(state.acl_hash, "acl-1")
 
+    def test_file_ingestion_repository_excludes_deleted_chunks_from_active_index_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = SourceRawItem(
+                source_kind="drive",
+                external_id="file-1",
+                title="File",
+                text="body",
+                checksum="abc",
+                metadata={"revision": "rev-1"},
+                access_scope=AccessScope(source_acl_hash="acl-1"),
+            )
+            repo = FileIngestionRepository(root)
+            source_item_id = _source_item_id(raw)
+            repo.save_item(
+                raw=raw,
+                document=_doc(raw),
+                chunks=[
+                    Chunk(
+                        id="chunk-1",
+                        document_id="doc-1",
+                        text="body",
+                        index=0,
+                        metadata={
+                            "source_item_id": source_item_id,
+                            "source_kind": "drive",
+                            "index_status": "active",
+                        },
+                    )
+                ],
+                findings=[],
+                raw_object_key="raw/key",
+            )
+            self.assertEqual(len(repo.load_active_chunks()), 1)
+            repo.mark_deleted(source_kind="drive", external_id="file-1")
+            self.assertEqual(repo.load_active_chunks(), [])
+
+    def test_task_event_index_includes_only_canonical_active_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = TaskEventIndexBuildService(
+                repository=_WorkflowRepository(),
+                embedder=_Embedder(),
+            ).rebuild(index_dir=root)
+
+            docs = (root / "task_event" / "task_event_documents.jsonl").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(run.seen, 4)
+            self.assertEqual(run.changed, 2)
+            self.assertEqual(run.deleted, 2)
+            self.assertIn("task:task-1", docs)
+            self.assertIn("event:event-1", docs)
+            self.assertNotIn("task:task-2", docs)
+            self.assertNotIn("event:event-2", docs)
+
 
 def _doc(raw: SourceRawItem):
     from kumc_agent.domain.models.source import NormalizedDocument
 
     return NormalizedDocument(
         id="doc-1",
-        source_item_id="source-item-1",
+        source_item_id=_source_item_id(raw),
         source_kind=raw.source_kind,
         external_id=raw.external_id,
         version=1,
@@ -210,6 +346,12 @@ def _doc(raw: SourceRawItem):
         checksum=raw.checksum,
         metadata=raw.metadata,
     )
+
+
+def _source_item_id(raw: SourceRawItem) -> str:
+    from kumc_agent.utils.hashing import stable_hash
+
+    return stable_hash(f"{raw.source_kind}:{raw.external_id}")
 
 
 if __name__ == "__main__":

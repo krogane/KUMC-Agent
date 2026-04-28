@@ -290,7 +290,10 @@ def create_bot(
             filename = "kumc-agent-production-readiness.json"
         elif action.value in {"sync", "reindex"}:
             if scope.strip() == "member_profiles":
-                guild_ids = [str(value) for value in foundation_context.config.security.discord_guild_allow_list]
+                guild_ids = [
+                    str(value)
+                    for value in foundation_context.config.security.effective_member_profile_guild_ids()
+                ]
                 results = await asyncio.to_thread(
                     lambda: [
                         workflow_context.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
@@ -324,7 +327,8 @@ def create_bot(
                 filename = "kumc-agent-admin-sync.json"
         elif action.value == "member_profiles":
             guild_ids = [scope.strip()] if scope.strip() else [
-                str(value) for value in foundation_context.config.security.discord_guild_allow_list
+                str(value)
+                for value in foundation_context.config.security.effective_member_profile_guild_ids()
             ]
             results = await asyncio.to_thread(
                 lambda: [
@@ -357,11 +361,20 @@ def create_bot(
             payload = {
                 "maintenance_command_author_ids": foundation_context.config.security.maintenance_command_author_ids,
                 "discord_guild_allow_list": foundation_context.config.security.discord_guild_allow_list,
+                "discord_member_profile_guild_ids": (
+                    foundation_context.config.security.discord_member_profile_guild_ids
+                ),
+                "effective_member_profile_guild_ids": (
+                    foundation_context.config.security.effective_member_profile_guild_ids()
+                ),
                 "admin_configured": bool(
                     foundation_context.config.security.maintenance_command_author_ids
                 ),
                 "guild_allow_list_configured": bool(
                     foundation_context.config.security.discord_guild_allow_list
+                ),
+                "member_profile_guild_ids_configured": bool(
+                    foundation_context.config.security.discord_member_profile_guild_ids
                 ),
             }
             summary = "permissions"

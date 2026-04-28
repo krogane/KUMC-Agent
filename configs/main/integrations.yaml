@@ -2,7 +2,7 @@ integrations:
   discord:
     bot_token: ""
   openclaw:
-    enabled: true
+    enabled: false
     agent: "main"
     model: "openai/gpt-5.4"
     lite_agent: "lite"
@@ -22,6 +22,8 @@ integrations:
     author_url: ""
     max_pages: 100
     max_articles: 0
+  hatenablog:
+    blog_url: ""
   notion:
     api_token: ""
     database_ids: []
@@ -29,11 +31,11 @@ integrations:
     page_titles: []
     api_url: "https://ja.minecraft.wiki/api.php"
     page_url_base: "https://ja.minecraft.wiki/w/"
-    max_pages: 20
-    rate_limit_per_minute: 30
+    max_pages: 0
+    rate_limit_per_minute: 120
     request_interval_seconds: 1.0
     namespaces: [0]
-    full_backfill_enabled: false
+    full_backfill_enabled: true
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000

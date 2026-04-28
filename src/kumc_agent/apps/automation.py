@@ -37,6 +37,8 @@ def build_automation_app_context(
         audit_log=foundation.audit_log,
         operations=operations,
         action_executor=_build_action_executor(base_dir=foundation.config.base_dir),
+        auto_index_cron=_auto_index_cron_from_config(foundation.config.scheduler),
+        auto_index_enabled=foundation.config.scheduler.auto_index_enabled,
     )
     if seed_defaults:
         automation.seed_defaults()
@@ -46,6 +48,14 @@ def build_automation_app_context(
         runbook_dir=foundation.config.base_dir / "docs" / "runbooks",
     )
     return AutomationAppContext(automation=automation, readiness=readiness)
+
+
+def _auto_index_cron_from_config(scheduler) -> str:
+    hour, minute = str(scheduler.auto_index_time or "00:00").split(":", 1)
+    weekdays = sorted({int(value) for value in scheduler.auto_index_weekdays})
+    day_names = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+    day_expr = "*" if weekdays == list(range(7)) else ",".join(day_names[value] for value in weekdays if 0 <= value <= 6)
+    return f"{int(minute)} {int(hour)} * * {day_expr or '*'}"
 
 
 def _build_action_executor(*, base_dir: Path):

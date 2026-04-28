@@ -50,7 +50,10 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
 
     def test_hatenablog_loader_enables_up_to_date_skip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            loader = HatenaBlogLoader(raw_dir=Path(td))
+            loader = HatenaBlogLoader(
+                raw_dir=Path(td),
+                blog_url="https://example.com/",
+            )
             with patch(
                 "kumc_agent.infra.loaders.hatenablog_impl.download_hatenablog_articles",
                 return_value=7,

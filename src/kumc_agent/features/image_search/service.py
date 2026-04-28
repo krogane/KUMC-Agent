@@ -244,18 +244,26 @@ class ImageAssetBuildService:
         self._repository = repository
         self._raw_dir = raw_dir
         self._image_dir = image_dir
+        self._embedder = embedder
         self._index = _ImageSearchIndex(index_dir=index_dir, embedder=embedder, config=config)
         self._config = config
         self._captioner = captioner
         self._ocr = ocr
 
-    def build_from_raw_sources(self) -> IndexingRun:
-        seen = changed = skipped = failed = 0
+    def build_from_raw_sources(self, *, index_dir: Path | None = None) -> IndexingRun:
+        target_index = (
+            _ImageSearchIndex(index_dir=index_dir / "image_search", embedder=self._embedder, config=self._config)
+            if index_dir is not None
+            else self._index
+        )
+        seen = changed = skipped = failed = deleted = 0
         self._image_dir.mkdir(parents=True, exist_ok=True)
+        current_asset_ids: set[str] = set()
         for candidate in self._scan_candidates():
             seen += 1
             try:
                 asset = self._asset_from_candidate(candidate)
+                current_asset_ids.add(asset.id)
                 existing = self._repository.get_asset(asset.id)
                 if existing and existing.metadata.get("source_fingerprint") == asset.metadata.get("source_fingerprint"):
                     skipped += 1
@@ -265,6 +273,26 @@ class ImageAssetBuildService:
             except Exception:
                 failed += 1
                 logger.exception("Failed to build image asset from %s", candidate.image_ref)
+        for asset in self._repository.list_assets(query=""):
+            if _normalize_source_kind(asset.source_kind) not in _all_image_source_kinds():
+                continue
+            if not asset.metadata.get("source_fingerprint") and asset.metadata.get("index_version") != "image-search-v1":
+                continue
+            if asset.id in current_asset_ids:
+                continue
+            if str(asset.metadata.get("index_status") or "active") in _DENIED_INDEX_STATUSES:
+                continue
+            self._repository.save_asset(
+                replace(
+                    asset,
+                    metadata={
+                        **asset.metadata,
+                        "index_status": "deleted",
+                        "deleted_reason": "source_image_missing",
+                    },
+                )
+            )
+            deleted += 1
 
         searchable_assets = [
             asset
@@ -272,7 +300,7 @@ class ImageAssetBuildService:
             if _normalize_source_kind(asset.source_kind) in _all_image_source_kinds()
             and str(asset.metadata.get("index_status") or "active") not in _DENIED_INDEX_STATUSES
         ]
-        self._index.build(searchable_assets)
+        target_index.build(searchable_assets)
         run = IndexingRun(
             id=stable_hash(f"image-search:{datetime.now(UTC).isoformat()}")[:32],
             source_kind="image_search",
@@ -280,11 +308,12 @@ class ImageAssetBuildService:
             seen=seen,
             changed=changed,
             skipped=skipped,
+            deleted=deleted,
             error="" if failed == 0 else f"{failed} image assets failed",
             metadata={
                 "indexed_assets": len(searchable_assets),
                 "failed": failed,
-                "index_dir": str(self._index.index_dir),
+                "index_dir": str(target_index.index_dir),
             },
         )
         return self._repository.save_indexing_run(run)
@@ -357,22 +386,43 @@ class ImageAssetBuildService:
 
     def _materialize_image(self, candidate: _ImageSourceCandidate) -> tuple[Path | None, str, dict[str, Any]]:
         ref = candidate.image_ref.strip()
+        fallback_refs_raw = candidate.metadata.get("fallback_image_refs")
+        fallback_refs = (
+            [str(value).strip() for value in fallback_refs_raw if str(value).strip()]
+            if isinstance(fallback_refs_raw, list)
+            else []
+        )
+        refs = list(dict.fromkeys([ref, *fallback_refs]))
         metadata: dict[str, Any] = {"original_image_ref": ref}
-        if _is_http_url(ref):
-            try:
-                data, content_type = _download_bytes(ref, max_bytes=self._config.max_download_bytes)
+        if any(_is_http_url(item) for item in refs):
+            errors: list[dict[str, str]] = []
+            for image_ref in refs:
+                if not _is_http_url(image_ref):
+                    continue
+                downloaded = self._download_image_ref(
+                    image_ref=image_ref,
+                    source_kind=candidate.source_kind,
+                )
+                if downloaded is None:
+                    errors.append({"ref": image_ref, "error": "download_failed"})
+                    continue
+                data, path = downloaded
                 content_hash = stable_hash(data.hex())
-                suffix = _suffix_from_content_type(content_type) or Path(ref.split("?", 1)[0]).suffix or ".img"
-                path = self._image_dir / _normalize_source_kind(candidate.source_kind) / f"{content_hash[:24]}{suffix}"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    path.write_bytes(data)
-                metadata.update({"download_status": "succeeded", "downloaded_image_path": str(path)})
+                metadata.update(
+                    {
+                        "download_status": "succeeded",
+                        "downloaded_image_path": str(path),
+                        "downloaded_image_ref": image_ref,
+                    }
+                )
+                if image_ref != ref:
+                    metadata["download_fallback_used"] = True
+                if errors:
+                    metadata["download_attempt_errors"] = errors
                 return path, content_hash, metadata
-            except Exception as exc:
-                logger.warning("Failed to download image %s: %s", ref, exc)
-                metadata.update({"download_status": "failed", "download_error": type(exc).__name__})
-                return None, stable_hash(ref), metadata
+            logger.warning("Failed to download image refs %s", refs)
+            metadata.update({"download_status": "failed", "download_attempt_errors": errors})
+            return None, stable_hash(ref), metadata
         path = Path(ref)
         if path.exists():
             data = path.read_bytes()
@@ -380,6 +430,20 @@ class ImageAssetBuildService:
             return path, stable_hash(data.hex()), metadata
         metadata.update({"download_status": "missing"})
         return None, stable_hash(ref), metadata
+
+    def _download_image_ref(self, *, image_ref: str, source_kind: str) -> tuple[bytes, Path] | None:
+        try:
+            data, content_type = _download_bytes(image_ref, max_bytes=self._config.max_download_bytes)
+            content_hash = stable_hash(data.hex())
+            suffix = _suffix_from_content_type(content_type) or Path(image_ref.split("?", 1)[0]).suffix or ".img"
+            path = self._image_dir / _normalize_source_kind(source_kind) / f"{content_hash[:24]}{suffix}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_bytes(data)
+            return data, path
+        except Exception as exc:
+            logger.warning("Failed to download image %s: %s", image_ref, exc)
+            return None
 
     def _scan_candidates(self) -> list[_ImageSourceCandidate]:
         candidates: list[_ImageSourceCandidate] = []
@@ -641,7 +705,9 @@ def _scan_discord_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
             for index, item in enumerate(attachments):
                 if not isinstance(item, dict):
                     continue
-                url = str(item.get("url") or item.get("proxy_url") or "").strip()
+                primary_url = str(item.get("url") or "").strip()
+                proxy_url = str(item.get("proxy_url") or "").strip()
+                url = primary_url or proxy_url
                 content_type = str(item.get("content_type") or "").lower()
                 filename = str(item.get("filename") or "").strip()
                 if not _looks_like_image(url, filename=filename, content_type=content_type):
@@ -673,6 +739,11 @@ def _scan_discord_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
                             "source_type": "discord_message",
                             "source_kind": "discord",
                             "attachment_id": str(item.get("id") or ""),
+                            "fallback_image_refs": [
+                                ref
+                                for ref in (proxy_url, primary_url)
+                                if ref and ref != url
+                            ],
                         },
                     )
                 )

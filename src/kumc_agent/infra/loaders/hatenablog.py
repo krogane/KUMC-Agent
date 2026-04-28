@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 class HatenaBlogLoader:
-    def __init__(self, *, raw_dir: Path, blog_url: str = "https://kumc.hatenablog.com/") -> None:
+    def __init__(self, *, raw_dir: Path, blog_url: str) -> None:
         self._raw_dir = raw_dir
         self._blog_url = blog_url
 

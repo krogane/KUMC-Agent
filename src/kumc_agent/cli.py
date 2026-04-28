@@ -439,49 +439,6 @@ def main() -> None:
             print(json.dumps(report.as_dict(), ensure_ascii=False))
             return
         if args.action in {"sync", "reindex"}:
-            if args.scope == "member_profiles":
-                from kumc_agent.apps.workflow import build_workflow_app_context
-
-                workflow = build_workflow_app_context()
-                guild_ids = [
-                    str(value)
-                    for value in (
-                        foundation.config.security.discord_guild_allow_list
-                        if not args.limit
-                        else foundation.config.security.discord_guild_allow_list[: args.limit]
-                    )
-                ]
-                if not guild_ids:
-                    print(
-                        json.dumps(
-                            {
-                                "action": args.action,
-                                "source_kind": "member_profiles",
-                                "results": [],
-                                "metadata": {"reason": "no_guild_ids_configured"},
-                            },
-                            ensure_ascii=False,
-                        )
-                    )
-                    return
-                results = [
-                    workflow.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
-                    for guild_id in guild_ids
-                    if workflow.member_profile_builder is not None
-                ]
-                print(
-                    json.dumps(
-                        {
-                            "action": args.action,
-                            "source_kind": "member_profiles",
-                            "results": results,
-                            "metadata": {},
-                        },
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                )
-                return
             context = build_runtime_context()
             result = context.auto_index_update.execute(
                 AutoIndexUpdateRequest(
@@ -520,8 +477,13 @@ def main() -> None:
                     {
                         "maintenance_command_author_ids": foundation.config.security.maintenance_command_author_ids,
                         "discord_guild_allow_list": foundation.config.security.discord_guild_allow_list,
+                        "discord_member_profile_guild_ids": foundation.config.security.discord_member_profile_guild_ids,
+                        "effective_member_profile_guild_ids": foundation.config.security.effective_member_profile_guild_ids(),
                         "admin_configured": bool(foundation.config.security.maintenance_command_author_ids),
                         "guild_allow_list_configured": bool(foundation.config.security.discord_guild_allow_list),
+                        "member_profile_guild_ids_configured": bool(
+                            foundation.config.security.discord_member_profile_guild_ids
+                        ),
                     },
                     ensure_ascii=False,
                 )
@@ -538,7 +500,8 @@ def main() -> None:
 
             workflow = build_workflow_app_context()
             configured_guild_ids = [
-                str(value) for value in foundation.config.security.discord_guild_allow_list
+                str(value)
+                for value in foundation.config.security.effective_member_profile_guild_ids()
             ]
             guild_ids = [args.scope] if args.scope else configured_guild_ids
             results = [

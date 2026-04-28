@@ -112,7 +112,12 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         (base / "configs" / "main" / "security.yaml").write_text(
-            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
+            (
+                "security:\n"
+                "  maintenance_command_author_ids: []\n"
+                "  discord_guild_allow_list: []\n"
+                "  discord_member_profile_guild_ids: []\n"
+            ),
             encoding="utf-8",
         )
         (base / "configs" / "main" / "scheduler.yaml").write_text(

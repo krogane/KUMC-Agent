@@ -24,21 +24,25 @@
 
 対象外は、ユーザー承認が必要なTask/Event候補の自動承認、サーバー管理操作、任意shell command実行である。
 
-## 3. 現行実装との差分
-現行実装には、手動index更新と一部の差分取り込みの土台がある。
+## 3. 実装方針
+2026-04時点の実装は、自動更新の正本を `features.ingestion` が保存する `source_items`、`documents`、`chunks`、`sync_cursors` とし、公開indexは `AutoIndexUpdateUsecase` が1 run単位で構築・検査・publishする。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| 起動 | CLI `index build/update`、worker `ingest_backfill`、automation default ruleの一部 | `scheduler.auto_index_*` に従う日次jobと手動/worker/automation経路を統一する |
-| `UpdateIndexUsecase` | `BuildIndexUsecase` を再利用し、index成果物を上書きする | source差分、削除、権限変更、部分再index、品質確認、rollbackを実行単位として扱う |
-| source取得 | `BuildIndexUsecase` がDrive/Discord/Hatena/Crafters/X/Notion loaderを呼ぶ。`IngestionService` はconnector経由でbackfillする | 対象sourceを統一し、Minecraft Wiki、画像、member_profiles、Task/Event正本も同じ更新runへ含める |
-| 差分検出 | `IngestionService` はchecksumでskipできる。loader/chunkingの一部はmtimeや削除同期を使う | cursor、checksum、revision、ACL fingerprintをsource item単位で永続化する |
-| 削除 | loader/chunkingの `sync_deleted`、`IngestionRepository.mark_deleted()` がある | 削除・権限喪失をDense/Sparse/画像/member/task/event indexすべてから除外する |
-| 実行ログ | `IndexingRun` modelと `indexing_runs` tableがあるが、index build/update本体へ未接続 | source別・run全体の件数、差分、再index対象、品質結果、rollback情報を保存する |
-| 品質確認 | RAGAS評価基盤は別設計にあるが、自動更新後のsmoke checkは未統合 | 更新後に小規模検索品質チェックを実行し、重大失敗時は直前indexを維持または復元する |
-| rollback | index成果物のsnapshot/active切替は未実装 | atomic publishと直前index snapshotからのrollbackを実装する |
+| 項目 | 実装方針 |
+| --- | --- |
+| 起動 | CLI `index update`、admin `sync/reindex`、worker `auto_index_update`、automation `auto_index_daily` は `AutoIndexUpdateUsecase` に集約する |
+| スケジュール | `configs/main/scheduler.yaml` の `auto_index_enabled/time/weekdays/timezone` を正とし、automation default cronも同設定から生成する |
+| source取得 | `IngestionService` がconnectorを統一入口として扱い、Drive、Discord、Hatena、X、Crafters Colony、Notion、Minecraft Wikiをbackfillまたはpollする |
+| 差分検出 | `sync_cursors`、checksum、revision、ACL hash、`index_status` をsource item単位で永続化し、skip/update/delete/permission_lostを判定する |
+| index構築 | 自動更新ではingestion repositoryのactive chunkをDense/Sparse構築入力の正本とする。raw/legacy chunk pipelineは互換・fallbackとして残す |
+| 画像 | raw sourceから画像候補をscanし、caption/OCR/feature vectorをstaging snapshot配下の `image_search` indexへ構築する |
+| member_profiles | Guild memberのfingerprint差分で必要なprofileだけ再生成し、退会・除外profileをinactiveとして検索除外する |
+| Task/Event | workflow repositoryのTask/Event正本だけを `task_event` indexへ投影し、削除済みTaskとcanceled Eventは除外する |
+| 削除・権限喪失 | `source_items/chunks.index_status` とFile fallbackの状態ログを検索index構築前に反映し、raw fileが残っていてもactive indexへ入れない |
+| 品質確認 | Dense/Sparse artifact load、chunk急減、smoke query、禁止status混入、画像/member/task_event index loadを検査する |
+| publish/rollback | staging成果物をpublishし、publish失敗時はprevious snapshotへrollbackして `metadata.rollback` に保存する |
+| 通知 | 失敗・rollback時はadmin通知payloadを作り、operations repositoryの `ActionRun(action_type="indexing_notification")` として記録する |
 
-実装では `src/kumc_agent/infra/legacy` を参照・依存しない。既存の `src/kumc_agent/infra/indexing`、`features.indexing`、`features.ingestion`、`infra.connectors` を優先して使う。
+実装では `src/kumc_agent/infra/legacy` を参照・依存しない。互換のために残る既存chunk pipelineは `src/kumc_agent/infra/indexing` の範囲で利用し、自動更新の公開可否は `features.indexing` と `features.ingestion` の状態で判断する。
 
 ## 4. 全体構成
 自動更新は、スケジュール判定、差分収集、index構築、品質確認、公開の5段階で構成する。
@@ -67,8 +71,9 @@ flowchart TD
 | `scheduler.auto_index_enabled` | 自動更新の有効/無効 |
 | `scheduler.auto_index_time` | 実行時刻。`HH:MM` |
 | `scheduler.auto_index_weekdays` | 実行曜日。Python `weekday()` と同じ `0=Mon` |
+| `scheduler.auto_index_timezone` | `auto_index_time` を解釈するtimezone。既定は `Asia/Tokyo` |
 
-`auto_index_time` は運用環境のtimezoneで解釈する。bot/api process内の長寿命loopではなく、workerまたは外部cronから `auto_index_daily` jobを起動する構成を基本とする。
+`auto_index_time` は `auto_index_timezone` で解釈する。bot/api process内の長寿命loopではなく、workerまたは外部cronから `auto_index_daily` jobを起動する構成を基本とする。worker payloadに `trigger` と `scheduled_at` が含まれる場合はそれを尊重し、automation経路では `trigger="automation"` としてschedule gateを通す。
 
 ### 5.2 手動起動
 手動起動は次を維持する。
@@ -200,15 +205,14 @@ sourceごとのcursorは `sync_cursors` に保存する。cursorを持つsource�
 保存するraw snapshotにはsecret検出前の本文が含まれ得るため、外部payloadへ直接出さない。
 
 ### 9.2 正規化とchunking
-本文sourceは次の順で処理する。
+本文sourceは次の順で処理する。自動更新runのDense/Sparse構築入力はingestion repositoryに保存されたactive chunkを正本とする。
 
 1. source固有loader/connectorでraw取得
 2. `NormalizedDocument` へ変換
 3. secret検出と `redaction_policy` / `index_status` 付与
-4. 第1 Recursive Chunk
-5. 第2 Recursive Chunk
-6. Sparse用第2 Recursive Chunk
-7. Summary Chunk
+4. `IngestionChunker` による正規化chunk作成
+5. 互換pipelineでは第1 Recursive Chunk、第2 Recursive Chunk、Sparse用第2 Recursive Chunk、Summary Chunkを作成
+6. 自動更新ではingestion repositoryのactive chunkを優先し、存在しない場合のみ互換pipeline出力へfallback
 
 `index_status in deleted/quarantined/permission_lost` のchunkはDense/Sparse/回答コンテキストから除外する。
 
@@ -218,9 +222,9 @@ Dense indexは第2 Recursive ChunkとSummary Chunkを対象に構築する。Spa
 現行の `FaissLikeIndex.build()` と `SudachiBM25Retriever.build()` は全体上書きであるため、実装初期は「差分で処理対象を絞りつつ、公開indexは全体再構築」でよい。将来的にvector storeが差分upsert/deleteを提供する場合はsource item単位の部分更新へ移行する。
 
 ### 9.4 atomic publish
-更新中の成果物は `data/index/staging/{run_id}` に作成し、品質確認に通った後で `data/index/current` へ切り替える。現行の `data/index` 直接書き込みは互換のため維持できるが、自動更新経路ではstagingを経由する。
+更新中の成果物は `data/index/staging/{run_id}` に作成し、品質確認に通った後で `data/index` rootへpublishする。既存検索runtimeは `data/index` 直下の成果物を読むため、publish時に直前成果物を `data/index/previous/{snapshot_id}` へ退避し、`current.json` と `previous.json` にsnapshot情報を保存する。
 
-切替は同一filesystem内のrenameまたはpointer file更新で行い、検索中のプロセスが壊れた中間状態を読まないようにする。
+publish中に失敗した場合は `previous` snapshotからroot成果物を復元し、`IndexingRun.metadata.rollback` に結果を保存する。
 
 ## 10. 品質確認
 更新後に小規模なsmoke checkを実行する。
@@ -276,6 +280,7 @@ CLIや外部連携payloadのトップレベルは安定フィールドだけに�
 
 | 設定 | 保存先 | 説明 |
 | --- | --- | --- |
+| `auto_index_timezone` | `configs/main/scheduler.yaml` | schedule判定timezone |
 | `auto_index_max_runtime_minutes` | `configs/main/scheduler.yaml` | 1 runの上限 |
 | `auto_index_lock_ttl_minutes` | `configs/main/scheduler.yaml` | lock TTL |
 | `quality_min_chunk_ratio` | `configs/main/scheduler.yaml` | 前回比chunk数の下限 |

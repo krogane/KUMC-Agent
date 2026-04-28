@@ -301,7 +301,7 @@ def create_app(context: object):
             if source == "member_profiles":
                 guild_ids = [
                     str(value)
-                    for value in context.foundation.config.security.discord_guild_allow_list
+                    for value in context.foundation.config.security.effective_member_profile_guild_ids()
                 ]
                 results = [
                     context.workflow.member_profile_builder.rebuild_guild(guild_id=guild_id).__dict__
@@ -328,6 +328,8 @@ def create_app(context: object):
             return {
                 "maintenance_command_author_ids": security.maintenance_command_author_ids,
                 "discord_guild_allow_list": security.discord_guild_allow_list,
+                "discord_member_profile_guild_ids": security.discord_member_profile_guild_ids,
+                "effective_member_profile_guild_ids": security.effective_member_profile_guild_ids(),
                 "metadata": {},
             }
         if action == "cost_report":

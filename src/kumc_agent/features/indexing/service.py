@@ -15,6 +15,7 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.document import Document
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.domain.ports.llms import LLMPort
+from kumc_agent.infra.ingestion.repository import IngestionRepository
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.infra.storage.filesystem import FileSystemStorage
@@ -37,6 +38,7 @@ class IndexBuildResult:
     documents: int
     chunks: int
     index_dir: Path
+    stage_results: dict[str, object] | None = None
 
 
 class IndexingService:
@@ -51,6 +53,7 @@ class IndexingService:
         app_config: RuntimeConfig,
         summary_llm: LLMPort | None = None,
         image_asset_builder: object | None = None,
+        ingestion_repository: IngestionRepository | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -60,6 +63,7 @@ class IndexingService:
         self._runtime = app_config
         self._summary_llm = summary_llm
         self._image_asset_builder = image_asset_builder
+        self._ingestion_repository = ingestion_repository
         self._chunks_root = self._runtime.app.data_dir / "chunks"
         self._first_rec_dir = self._chunks_root / "first_rec_chunk"
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
@@ -127,6 +131,7 @@ class IndexingService:
         allow_cancel: bool = False,
         cancel_event: threading.Event | None = None,
         index_dir: Path | None = None,
+        prefer_ingestion_repository: bool = False,
     ) -> IndexBuildResult:
         if index_dir is not None and index_dir != self._runtime.app.index_dir:
             return self._build_with_index_dir(
@@ -136,6 +141,7 @@ class IndexingService:
                 allow_cancel=allow_cancel,
                 cancel_event=cancel_event,
                 index_dir=index_dir,
+                prefer_ingestion_repository=prefer_ingestion_repository,
             )
         selected = {
             value.strip()
@@ -167,7 +173,16 @@ class IndexingService:
         )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
 
-        index_chunks = self._load_index_chunks_from_legacy_dirs(legacy_cfg=legacy_cfg)
+        repository_chunks = (
+            self._ingestion_repository.load_active_chunks()
+            if prefer_ingestion_repository and self._ingestion_repository is not None
+            else []
+        )
+        index_chunks = (
+            repository_chunks
+            if repository_chunks
+            else self._load_index_chunks_from_legacy_dirs(legacy_cfg=legacy_cfg)
+        )
         self._storage.save_chunks(index_chunks)
 
         dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
@@ -178,6 +193,9 @@ class IndexingService:
         self._build_material_catalog_legacy(legacy_cfg=legacy_cfg)
         self._build_keyword_inverted_indexes(legacy_cfg=legacy_cfg)
         self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
+        stage_results: dict[str, object] = {
+            "source_of_chunks": "ingestion_repository" if repository_chunks else "raw_chunk_pipeline"
+        }
         if self._image_asset_builder is not None:
             build_from_raw_sources = getattr(
                 self._image_asset_builder,
@@ -185,13 +203,15 @@ class IndexingService:
                 None,
             )
             if callable(build_from_raw_sources):
-                build_from_raw_sources()
+                image_run = build_from_raw_sources(index_dir=self._runtime.app.index_dir)
+                stage_results["image"] = getattr(image_run, "__dict__", {"status": "unknown"})
 
         return IndexBuildResult(
             loaded_sources=loaded_sources,
             documents=len(documents),
             chunks=len(index_chunks),
             index_dir=self._faiss_index._index_dir,  # noqa: SLF001
+            stage_results=stage_results,
         )
 
     def update(
@@ -203,6 +223,7 @@ class IndexingService:
         allow_cancel: bool = False,
         cancel_event: threading.Event | None = None,
         index_dir: Path | None = None,
+        prefer_ingestion_repository: bool = False,
     ) -> IndexBuildResult:
         return self.build(
             loaded_sources=loaded_sources,
@@ -211,6 +232,7 @@ class IndexingService:
             allow_cancel=allow_cancel,
             cancel_event=cancel_event,
             index_dir=index_dir,
+            prefer_ingestion_repository=prefer_ingestion_repository,
         )
 
     def _build_with_index_dir(
@@ -222,6 +244,7 @@ class IndexingService:
         allow_cancel: bool,
         cancel_event: threading.Event | None,
         index_dir: Path,
+        prefer_ingestion_repository: bool,
     ) -> IndexBuildResult:
         from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
         from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
@@ -250,6 +273,7 @@ class IndexingService:
                 stage_selection=stage_selection,
                 allow_cancel=allow_cancel,
                 cancel_event=cancel_event,
+                prefer_ingestion_repository=prefer_ingestion_repository,
             )
         finally:
             self._runtime = previous_runtime

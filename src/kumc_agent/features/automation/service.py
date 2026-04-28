@@ -48,17 +48,27 @@ class AutomationService:
         audit_log: AuditLogRepository | None = None,
         operations: OperationsRepository | None = None,
         action_executor: Callable[[ActionSpecRef], dict[str, object]] | None = None,
+        auto_index_cron: str = "0 6 * * MON-FRI",
+        auto_index_enabled: bool = True,
     ) -> None:
         self.repository = repository
         self.feature_flags = feature_flags
         self.audit_log = audit_log
         self.operations = operations
         self.action_executor = action_executor
+        self.auto_index_cron = auto_index_cron
+        self.auto_index_enabled = auto_index_enabled
 
     def seed_defaults(self) -> tuple[AutomationRule, ...]:
         if self.repository.list_rules():
             return tuple(self.repository.list_rules())
-        stored = [self.repository.save_rule(rule) for rule in _default_rules()]
+        stored = [
+            self.repository.save_rule(rule)
+            for rule in _default_rules(
+                auto_index_cron=self.auto_index_cron,
+                auto_index_enabled=self.auto_index_enabled,
+            )
+        ]
         self._audit(
             "automation.seed_defaults",
             AccessContext(user_id="system", is_admin=True),
@@ -388,13 +398,17 @@ class AutomationService:
         )
 
 
-def _default_rules() -> tuple[AutomationRule, ...]:
+def _default_rules(
+    *,
+    auto_index_cron: str = "0 6 * * MON-FRI",
+    auto_index_enabled: bool = True,
+) -> tuple[AutomationRule, ...]:
     return (
         AutomationRule(
             id="auto_index_daily",
             name="自動インデックス日次更新",
-            enabled=True,
-            trigger=TriggerSpec("schedule_cron", {"cron": "0 6 * * MON-FRI"}),
+            enabled=auto_index_enabled,
+            trigger=TriggerSpec("schedule_cron", {"cron": auto_index_cron}),
             actions=(
                 ActionSpecRef(
                     "auto_index_update",

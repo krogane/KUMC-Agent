@@ -298,7 +298,7 @@ class MemberProfileBuildService:
         self._config = config
         self._indexer = indexer
 
-    def rebuild_guild(self, *, guild_id: str) -> IndexingRun:
+    def rebuild_guild(self, *, guild_id: str, index_dir: Path | None = None) -> IndexingRun:
         run = IndexingRun(
             id=stable_hash(f"member-profile-build:{guild_id}:{datetime.now(UTC).isoformat()}")[:32],
             source_kind="member_profiles",
@@ -307,10 +307,27 @@ class MemberProfileBuildService:
         )
         try:
             members = self._directory.list_members(guild_id=guild_id)
+            existing_profiles = {
+                profile.id: profile
+                for profile in self._repository.list_member_profiles()
+                if str(profile.metadata.get("guild_id") or "") == str(guild_id)
+            }
+            active_profile_ids: set[str] = set()
             changed = 0
             skipped = 0
+            deleted = 0
             for member in members:
+                profile_id = stable_hash(f"member_profile:{member.guild_id}:{member.user_id}")[:32]
                 if self._should_skip(member):
+                    skipped += 1
+                    continue
+                active_profile_ids.add(profile_id)
+                existing = existing_profiles.get(profile_id)
+                if (
+                    existing is not None
+                    and existing.metadata.get("source_fingerprint") == member.source_fingerprint
+                    and _is_active_profile(existing)
+                ):
                     skipped += 1
                     continue
                 access = AccessContext(user_id="", guild_id=member.guild_id, is_admin=True)
@@ -322,9 +339,26 @@ class MemberProfileBuildService:
                 profile = self._generator.generate(member=member, evidence=evidence)
                 self._repository.save_member_profile(profile)
                 changed += 1
+            for profile_id, profile in existing_profiles.items():
+                if profile_id in active_profile_ids or not _is_active_profile(profile):
+                    continue
+                self._repository.save_member_profile(
+                    replace(
+                        profile,
+                        metadata={
+                            **profile.metadata,
+                            "profile_status": "inactive",
+                            "inactive_reason": "guild_member_missing_or_excluded",
+                        },
+                    )
+                )
+                deleted += 1
             index_metadata: dict[str, object] = {}
             if self._indexer is not None:
-                index_metadata = self._indexer.rebuild(self._repository.list_member_profiles())
+                index_metadata = self._indexer.rebuild(
+                    self._repository.list_member_profiles(),
+                    index_dir=index_dir,
+                )
             return self._repository.save_indexing_run(
                 replace(
                     run,
@@ -332,6 +366,7 @@ class MemberProfileBuildService:
                     seen=len(members),
                     changed=changed,
                     skipped=skipped,
+                    deleted=deleted,
                     metadata=run.metadata | {"index": index_metadata},
                 )
             )
@@ -361,7 +396,13 @@ class MemberProfileIndexService:
         self._embedder = embedder
         self._config = config
 
-    def rebuild(self, profiles: Sequence[MemberProfile]) -> dict[str, object]:
+    def rebuild(
+        self,
+        profiles: Sequence[MemberProfile],
+        *,
+        index_dir: Path | None = None,
+    ) -> dict[str, object]:
+        target_index_dir = index_dir / "member_profiles" if index_dir is not None else self._index_dir
         docs = [
             _IndexDocument(
                 page_content=build_profile_text(profile, include_user_id=True),
@@ -371,14 +412,14 @@ class MemberProfileIndexService:
             if _is_active_profile(profile)
         ]
         normal_path = _save_member_sparse_index(
-            index_dir=self._index_dir,
+            index_dir=target_index_dir,
             corpus_name=_MEMBER_CORPUS_NORMAL,
             docs=docs,
             tokenize=lambda text: _simple_tokens(text),
         )
         normalizer = _sparse_normalizer(self._config)
         stemming_path = _save_member_sparse_index(
-            index_dir=self._index_dir,
+            index_dir=target_index_dir,
             corpus_name=_MEMBER_CORPUS_STEMMING,
             docs=docs,
             tokenize=lambda text: _safe_stemming_tokens(normalizer, text),
@@ -401,7 +442,7 @@ class MemberProfileIndexService:
             if importlib.util.find_spec("faiss") is None:
                 os.environ["KUMC_DISABLE_FAISS_RUNTIME"] = "1"
             try:
-                FaissLikeIndex(index_dir=self._index_dir).build(chunks=chunks, embeddings=embeddings)
+                FaissLikeIndex(index_dir=target_index_dir).build(chunks=chunks, embeddings=embeddings)
             finally:
                 if previous_disable_faiss is None:
                     os.environ.pop("KUMC_DISABLE_FAISS_RUNTIME", None)

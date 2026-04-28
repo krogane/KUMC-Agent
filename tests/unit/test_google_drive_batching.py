@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import kumc_agent.infra.loaders.google_drive_impl as drive_impl
 from kumc_agent.infra.loaders.google_drive_impl import DriveFile, _split_batches
 
 
@@ -39,6 +43,46 @@ class GoogleDriveBatchingTests(unittest.TestCase):
         batches = _split_batches(files, batch_size=None)
         self.assertEqual(1, len(batches))
         self.assertEqual(3, len(batches[0]))
+
+    def test_download_drive_markdown_saves_image_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs_dir = root / "docs"
+            sheets_dir = root / "sheets"
+            docs_dir.mkdir(parents=True)
+            sheets_dir.mkdir(parents=True)
+            image_file = DriveFile(
+                file_id="image-id",
+                name="poster.png",
+                mime_type="image/png",
+                path="folder/poster.png",
+                modified_time="2026-03-08T00:00:00.000Z",
+            )
+
+            with (
+                patch.object(drive_impl, "_build_google_credentials", return_value=object()),
+                patch.object(drive_impl, "_build_drive_service", return_value=object()),
+                patch.object(drive_impl, "_list_drive_files", return_value=[image_file]),
+                patch.object(drive_impl, "_download_file_bytes", return_value=b"png-bytes"),
+            ):
+                docs_count, sheets_count = drive_impl.download_drive_markdown(
+                    drive_folder_id="folder-id",
+                    docs_dir=docs_dir,
+                    sheets_dir=sheets_dir,
+                    google_application_credentials="",
+                    pdf_ocr_model_path="",
+                    sync_deleted=True,
+                )
+
+            self.assertEqual(1, docs_count)
+            self.assertEqual(0, sheets_count)
+            image_outputs = list((root / "images" / "google_drive").glob("*.png"))
+            self.assertEqual(1, len(image_outputs))
+            self.assertEqual(b"png-bytes", image_outputs[0].read_bytes())
+            metadata = json.loads(
+                image_outputs[0].with_suffix(".png.meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("image-id", metadata["drive_file_id"])
 
 
 if __name__ == "__main__":

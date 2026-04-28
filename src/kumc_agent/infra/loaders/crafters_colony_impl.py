@@ -36,6 +36,11 @@ _SCRIPT_STYLE_RE = re.compile(
     r"<(script|style)\b[^>]*>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
+_IMG_TAG_RE = re.compile(r"<img\b(?P<attrs>[^>]*)>", re.IGNORECASE | re.DOTALL)
+_ATTR_RE = re.compile(
+    r"(?P<key>[A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
+    re.DOTALL,
+)
 _TAG_RE = re.compile(r"<[^>]+>")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 
@@ -306,8 +311,12 @@ def _extract_article_body_html(html_text: str) -> str:
     return html_text
 
 
-def _html_to_markdown(html_fragment: str) -> str:
+def _html_to_markdown(html_fragment: str, *, base_url: str = "") -> str:
     text = _SCRIPT_STYLE_RE.sub("", html_fragment)
+    text = _IMG_TAG_RE.sub(
+        lambda match: _image_markdown_from_attrs(match.group("attrs"), base_url=base_url),
+        text,
+    )
 
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<li\b[^>]*>", "\n- ", text, flags=re.IGNORECASE)
@@ -330,6 +339,21 @@ def _html_to_markdown(html_fragment: str) -> str:
     markdown = "\n".join(line for line in lines if line)
     markdown = _MULTI_NEWLINE_RE.sub("\n\n", markdown)
     return markdown.strip()
+
+
+def _image_markdown_from_attrs(attrs: str, *, base_url: str = "") -> str:
+    values = {
+        match.group("key").lower(): html.unescape(match.group("value").strip())
+        for match in _ATTR_RE.finditer(attrs or "")
+    }
+    src = values.get("src") or values.get("data-src") or values.get("data-original")
+    if not src:
+        srcset = values.get("srcset") or values.get("data-srcset") or ""
+        src = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+    if not src:
+        return ""
+    alt = values.get("alt") or values.get("title") or "image"
+    return f"\n![{alt}]({urljoin(base_url, src)})\n"
 
 
 def _build_markdown(entry: CraftersColonyEntry, *, body_markdown: str) -> str:
@@ -485,7 +509,7 @@ def _fetch_entry(*, article_url: str) -> tuple[CraftersColonyEntry, str]:
     title = _extract_title(article_html)
     published_at = _extract_published_at(article_html)
     body_html = _extract_article_body_html(article_html)
-    body_markdown = _html_to_markdown(body_html)
+    body_markdown = _html_to_markdown(body_html, base_url=article_url)
     entry = CraftersColonyEntry(
         article_url=article_url,
         title=title,

@@ -38,7 +38,12 @@ class IndexSnapshotPublisher:
                 self._index_dir,
                 skip_names={"staging", "previous", "current.json", "previous.json", ".auto_index.lock"},
             )
-        self._copy_root_artifacts(staging_dir)
+        try:
+            self._copy_root_artifacts(staging_dir)
+        except Exception:
+            if previous_snapshot_id:
+                self.rollback(previous_snapshot_id=previous_snapshot_id)
+            raise
         current_pointer = self._index_dir / "current.json"
         previous_pointer = self._index_dir / "previous.json"
         current_pointer.write_text(
@@ -70,6 +75,17 @@ class IndexSnapshotPublisher:
             "status": "succeeded",
             "previous_snapshot_id": previous_snapshot_id,
         }
+
+    def rollback_to_latest_previous(self) -> dict[str, object]:
+        previous_snapshot_id = self._snapshot_id("previous")
+        if not previous_snapshot_id and self._previous_root.exists():
+            snapshots = sorted(
+                (path for path in self._previous_root.iterdir() if path.is_dir()),
+                key=lambda value: value.stat().st_mtime,
+                reverse=True,
+            )
+            previous_snapshot_id = snapshots[0].name if snapshots else ""
+        return self.rollback(previous_snapshot_id=previous_snapshot_id)
 
     def _has_root_artifacts(self) -> bool:
         return any(

@@ -22,8 +22,8 @@ features:
     hatenablog: true
     crafters_colony: true
     x: true
-    notion: false
-    minecraft_wiki: false
+    notion: true
+    minecraft_wiki: true
   retrieval:
     top_k: 8
     dense_top_k: 15
@@ -52,6 +52,6 @@ features:
     rrf_k: 60
     ocr_text_char_limit: 800
     surrounding_text_char_limit: 1200
-    caption_model: ""
+    caption_model: "gemini-3.1-flash-lite-preview"
     ocr_model: ""
     feature_model: "local_hash"

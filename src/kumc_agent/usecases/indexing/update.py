@@ -16,6 +16,7 @@ class UpdateIndexRequest:
     allow_cancel: bool = False
     cancel_event: threading.Event | None = None
     index_dir: Path | None = None
+    prefer_ingestion_repository: bool = False
 
 
 class UpdateIndexUsecase:
@@ -33,5 +34,6 @@ class UpdateIndexUsecase:
                 allow_cancel=request.allow_cancel,
                 cancel_event=request.cancel_event,
                 index_dir=request.index_dir,
+                prefer_ingestion_repository=request.prefer_ingestion_repository,
             )
         )

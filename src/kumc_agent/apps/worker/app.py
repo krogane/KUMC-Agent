@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import asyncio
+from datetime import datetime
 
 from kumc_agent.apps.automation import build_automation_app_context
 from kumc_agent.apps.foundation import build_foundation_app_context
@@ -84,15 +85,18 @@ def _dispatch_job(
             source_filter = tuple()
         result = runtime.auto_index_update.execute(
             AutoIndexUpdateRequest(
-                trigger="worker",
+                trigger=str(payload.get("trigger") or "worker"),
                 source_filter=source_filter,
                 force=bool(payload.get("force", False)),
                 full_rebuild=bool(payload.get("full_rebuild", False)),
                 quality_check_enabled=bool(payload.get("quality_check_enabled", True)),
+                scheduled_at=_parse_datetime(payload.get("scheduled_at")),
             )
         )
         out = result.as_payload()
-        out["side_effects"] = "indexing_snapshot_publish"
+        metadata = dict(out.get("metadata") or {})
+        metadata["side_effects"] = "indexing_snapshot_publish"
+        out["metadata"] = metadata
         return out
     if job_type == "autonomous_agent_run":
         from kumc_agent.apps.autonomous_agent import build_autonomous_agent_app_context
@@ -138,7 +142,10 @@ def _dispatch_job(
             guild_ids = [guild_id]
         else:
             foundation = build_foundation_app_context(base_dir=base_dir)
-            guild_ids = [str(value) for value in foundation.config.security.discord_guild_allow_list]
+            guild_ids = [
+                str(value)
+                for value in foundation.config.security.effective_member_profile_guild_ids()
+            ]
         results = [
             workflow.member_profile_builder.rebuild_guild(guild_id=value).__dict__
             for value in guild_ids
@@ -244,6 +251,18 @@ def _dispatch_job(
         )
         return {"text": response.text, "metadata": response.metadata, "side_effects": "draft_or_candidate_only"}
     return {"status": "skipped", "reason": f"unsupported job_type: {job_type}", "side_effects": "none"}
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def main(*, base_dir: Path | None = None) -> None:

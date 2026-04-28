@@ -111,6 +111,8 @@ class ConfigLoadingTests(unittest.TestCase):
                     author_url: ""
                     max_pages: 100
                     max_articles: 0
+                  hatenablog:
+                    blog_url: ""
                   notion:
                     api_token: ""
                     database_ids: ["db-primary", "db-secondary"]
@@ -153,7 +155,12 @@ class ConfigLoadingTests(unittest.TestCase):
             encoding="utf-8",
         )
         (base / "configs" / "main" / "security.yaml").write_text(
-            "security:\n  maintenance_command_author_ids: []\n  discord_guild_allow_list: []\n",
+            (
+                "security:\n"
+                "  maintenance_command_author_ids: []\n"
+                "  discord_guild_allow_list: []\n"
+                "  discord_member_profile_guild_ids: []\n"
+            ),
             encoding="utf-8",
         )
         (base / "configs" / "main" / "scheduler.yaml").write_text(
@@ -294,6 +301,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_INDEXING_SUMMARY_BATCH_SIZE": "3",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_GOOGLE_APPLICATION_CREDENTIALS": ".secrets/google-sa.json",
+                    "KUMC_HATENA_BLOG_URL": "https://example.hatenablog.com/",
                     "KUMC_NOTION_API_TOKEN": "secret-notion-token",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
                     "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
@@ -317,6 +325,8 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_SOFT": "0.33",
                     "KUMC_RETRIEVAL_RECENCY_WEIGHT_HARD": "0.66",
                     "KUMC_RETRIEVAL_RECENCY_HALF_LIFE_DAYS": "22",
+                    "KUMC_DISCORD_GUILD_ALLOW_LIST": "111,222",
+                    "KUMC_DISCORD_MEMBER_PROFILE_GUILD_IDS": "333,444",
                     "SUDACHI_MODE": "A",
                     "SPARSE_BM25_K1": "1.8",
                     "SPARSE_BM25_B": "0.7",
@@ -332,6 +342,9 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.features.retrieval.recency_weight_soft, 0.33)
             self.assertEqual(config.features.retrieval.recency_weight_hard, 0.66)
             self.assertEqual(config.features.retrieval.recency_half_life_days, 22.0)
+            self.assertEqual(config.security.discord_guild_allow_list, [111, 222])
+            self.assertEqual(config.security.discord_member_profile_guild_ids, [333, 444])
+            self.assertEqual(config.security.effective_member_profile_guild_ids(), [333, 444])
             self.assertEqual(config.features.retrieval.sudachi_mode, "A")
             self.assertEqual(config.features.retrieval.sparse_bm25_k1, 1.8)
             self.assertEqual(config.features.retrieval.sparse_bm25_b, 0.7)
@@ -374,6 +387,10 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(
                 config.integrations.notion.database_ids,
                 ["db-primary", "db-secondary"],
+            )
+            self.assertEqual(
+                config.integrations.hatenablog.blog_url,
+                "https://example.hatenablog.com/",
             )
             self.assertEqual(config.integrations.drive.download_max_retries, 4)
             self.assertEqual(
@@ -430,6 +447,26 @@ class ConfigLoadingTests(unittest.TestCase):
                 config = load_runtime_config(base_dir=base)
 
         self.assertEqual(config.summarization.target_characters, 123)
+
+    def test_member_profile_guild_ids_fall_back_to_discord_allow_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._prepare_base(base)
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_DISCORD_GUILD_ALLOW_LIST": "111,222",
+                    "KUMC_DISCORD_MEMBER_PROFILE_GUILD_IDS": "",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+
+        self.assertEqual(config.security.discord_member_profile_guild_ids, [])
+        self.assertEqual(config.security.effective_member_profile_guild_ids(), [111, 222])
 
     def test_openclaw_default_agent_is_main(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -91,7 +91,10 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
     if config.features.sources.hatenablog:
         connectors["hatenablog"] = LoaderBackedConnector(
             source_kind="hatenablog",
-            loader=HatenaBlogLoader(raw_dir=raw_dir),
+            loader=HatenaBlogLoader(
+                raw_dir=raw_dir,
+                blog_url=config.integrations.hatenablog.blog_url,
+            ),
             raw_items=lambda: iter_raw_files(
                 source_kind="hatenablog",
                 root_dir=raw_dir / "hatenablog",

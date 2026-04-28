@@ -8,7 +8,7 @@ from typing import Protocol
 
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.secret import SecretFinding
-from kumc_agent.domain.models.source import NormalizedDocument, SourceRawItem
+from kumc_agent.domain.models.source import NormalizedDocument, SourceRawItem, SyncCursor
 from kumc_agent.features.indexing.change_detection import (
     SourceItemState,
     state_from_source_item_payload,
@@ -22,6 +22,15 @@ class IngestionRepository(Protocol):
         ...
 
     def load_item_states(self, source_kind: str) -> dict[str, SourceItemState]:
+        ...
+
+    def load_sync_cursor(self, source_kind: str) -> SyncCursor | None:
+        ...
+
+    def save_sync_cursor(self, cursor: SyncCursor) -> SyncCursor:
+        ...
+
+    def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
         ...
 
     def save_item(
@@ -59,7 +68,7 @@ class FileIngestionRepository:
         path = self.root_dir / "source_items.jsonl"
         states: dict[str, SourceItemState] = {}
         if not path.exists():
-            return states
+            return _apply_file_deletes(root_dir=self.root_dir, source_kind=source_kind, states=states)
         with path.open("r", encoding="utf-8") as fr:
             for line in fr:
                 payload = json.loads(line)
@@ -67,7 +76,40 @@ class FileIngestionRepository:
                     continue
                 state = state_from_source_item_payload(payload)
                 states[state.external_id] = state
-        return states
+        return _apply_file_deletes(root_dir=self.root_dir, source_kind=source_kind, states=states)
+
+    def load_sync_cursor(self, source_kind: str) -> SyncCursor | None:
+        latest: SyncCursor | None = None
+        path = self.root_dir / "sync_cursors.jsonl"
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8") as fr:
+            for line in fr:
+                payload = json.loads(line)
+                if payload.get("source_kind") != source_kind:
+                    continue
+                latest = SyncCursor(
+                    source_kind=source_kind,
+                    cursor=str(payload.get("cursor") or ""),
+                    metadata=dict(payload.get("metadata") or {}),
+                )
+        return latest
+
+    def save_sync_cursor(self, cursor: SyncCursor) -> SyncCursor:
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        _append_jsonl(
+            self.root_dir / "sync_cursors.jsonl",
+            {
+                "source_kind": cursor.source_kind,
+                "cursor": cursor.cursor,
+                "metadata": cursor.metadata,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        return cursor
+
+    def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
+        return _load_file_active_chunks(root_dir=self.root_dir, source_kinds=source_kinds)
 
     def save_item(
         self,
@@ -82,6 +124,15 @@ class FileIngestionRepository:
         _append_jsonl(
             self.root_dir / "source_items.jsonl",
             _source_item_payload(raw=raw, raw_object_key=raw_object_key),
+        )
+        _append_jsonl(
+            self.root_dir / "source_deletes.jsonl",
+            {
+                "source_kind": raw.source_kind,
+                "external_id": raw.external_id,
+                "index_status": "active",
+                "deleted_at": "",
+            },
         )
         _append_jsonl(self.root_dir / "documents.jsonl", _document_payload(document))
         for chunk in chunks:
@@ -147,6 +198,85 @@ class PostgresIngestionRepository:
                     states[state.external_id] = state
                 return states
 
+    def load_sync_cursor(self, source_kind: str) -> SyncCursor | None:
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select cursor, metadata
+                    from sync_cursors
+                    where source_kind = %s
+                    """,
+                    (source_kind,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return SyncCursor(
+            source_kind=source_kind,
+            cursor=str(row[0] or ""),
+            metadata=dict(row[1] or {}),
+        )
+
+    def save_sync_cursor(self, cursor: SyncCursor) -> SyncCursor:
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into sync_cursors (source_kind, cursor, metadata)
+                    values (%s, %s, %s::jsonb)
+                    on conflict (source_kind) do update set
+                      cursor = excluded.cursor,
+                      metadata = excluded.metadata,
+                      updated_at = now()
+                    """,
+                    (
+                        cursor.source_kind,
+                        cursor.cursor,
+                        json.dumps(cursor.metadata, ensure_ascii=False, default=str),
+                    ),
+                )
+            conn.commit()
+        return cursor
+
+    def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
+        filters = ["c.index_status = 'active'", "si.index_status = 'active'"]
+        params: list[object] = []
+        if source_kinds:
+            filters.append("si.source_kind = any(%s)")
+            params.append(list(source_kinds))
+        sql = f"""
+            select c.id, c.document_id, c.text, c.chunk_index, c.metadata,
+                   c.index_status, c.access_scope, si.source_kind, si.external_id, si.title
+            from chunks c
+            join source_items si on si.id = c.source_item_id
+            where {' and '.join(filters)}
+            order by si.source_kind, si.external_id, c.chunk_index
+        """
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+        chunks: list[Chunk] = []
+        for row in rows:
+            metadata = dict(row[4] or {})
+            metadata.setdefault("index_status", str(row[5] or "active"))
+            metadata.setdefault("access_scope", dict(row[6] or {}))
+            metadata.setdefault("source_kind", str(row[7] or ""))
+            metadata.setdefault("source_type", str(row[7] or ""))
+            metadata.setdefault("external_id", str(row[8] or ""))
+            metadata.setdefault("source_title", str(row[9] or ""))
+            chunks.append(
+                Chunk(
+                    id=str(row[0]),
+                    document_id=str(row[1]),
+                    text=str(row[2] or ""),
+                    index=int(row[3] or 0),
+                    metadata=metadata,
+                )
+            )
+        return chunks
+
     def save_item(
         self,
         *,
@@ -159,6 +289,14 @@ class PostgresIngestionRepository:
         with self.postgres.connect() as conn:
             with conn.cursor() as cur:
                 source_item = _source_item_payload(raw=raw, raw_object_key=raw_object_key)
+                cur.execute(
+                    """
+                    update chunks
+                    set index_status = 'deleted'
+                    where source_item_id = %s
+                    """,
+                    (source_item["id"],),
+                )
                 cur.execute(
                     """
                     insert into source_accounts (id, kind, display_name, enabled, metadata)
@@ -331,6 +469,117 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fw:
         fw.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def _apply_file_deletes(
+    *,
+    root_dir: Path,
+    source_kind: str,
+    states: dict[str, SourceItemState],
+) -> dict[str, SourceItemState]:
+    for payload in _read_jsonl(root_dir / "source_deletes.jsonl"):
+        if payload.get("source_kind") != source_kind:
+            continue
+        external_id = str(payload.get("external_id") or "")
+        status = str(payload.get("index_status") or "deleted")
+        previous = states.get(external_id)
+        if previous is None:
+            states[external_id] = SourceItemState(
+                source_kind=source_kind,
+                external_id=external_id,
+                index_status=status,
+            )
+        else:
+            states[external_id] = SourceItemState(
+                source_kind=previous.source_kind,
+                external_id=previous.external_id,
+                checksum=previous.checksum,
+                revision=previous.revision,
+                acl_hash=previous.acl_hash,
+                index_status=status,
+                metadata=previous.metadata,
+            )
+    return states
+
+
+def _load_file_active_chunks(
+    *,
+    root_dir: Path,
+    source_kinds: tuple[str, ...],
+) -> list[Chunk]:
+    source_filter = {value for value in source_kinds if value}
+    source_items = _latest_payloads_by_key(
+        root_dir / "source_items.jsonl",
+        lambda payload: f"{payload.get('source_kind')}:{payload.get('external_id')}",
+    )
+    for payload in _read_jsonl(root_dir / "source_deletes.jsonl"):
+        key = f"{payload.get('source_kind')}:{payload.get('external_id')}"
+        existing = source_items.get(key)
+        if existing is not None:
+            existing = dict(existing)
+            existing["index_status"] = str(payload.get("index_status") or "deleted")
+            source_items[key] = existing
+    active_source_item_ids = {
+        str(payload.get("id") or "")
+        for payload in source_items.values()
+        if str(payload.get("index_status") or "active") == "active"
+        and (not source_filter or str(payload.get("source_kind") or "") in source_filter)
+    }
+    latest_documents: dict[str, str] = {}
+    for payload in _read_jsonl(root_dir / "documents.jsonl"):
+        source_item_id = str(payload.get("source_item_id") or "")
+        if source_item_id in active_source_item_ids:
+            latest_documents[source_item_id] = str(payload.get("id") or "")
+    active_document_ids = {value for value in latest_documents.values() if value}
+    latest_chunks = _latest_payloads_by_key(
+        root_dir / "chunks.jsonl",
+        lambda payload: str(payload.get("id") or ""),
+    )
+    chunks: list[Chunk] = []
+    for payload in latest_chunks.values():
+        document_id = str(payload.get("document_id") or "")
+        if document_id not in active_document_ids:
+            continue
+        index_status = str(payload.get("index_status") or "active")
+        if index_status != "active":
+            continue
+        metadata = dict(payload.get("metadata") or {})
+        metadata.setdefault("index_status", index_status)
+        metadata.setdefault("access_scope", payload.get("access_scope") or {})
+        chunks.append(
+            Chunk(
+                id=str(payload.get("id") or ""),
+                document_id=document_id,
+                text=str(payload.get("text") or ""),
+                index=int(payload.get("chunk_index") or 0),
+                metadata=metadata,
+            )
+        )
+    return sorted(chunks, key=lambda chunk: (str(chunk.metadata.get("source_kind") or ""), chunk.document_id, chunk.index))
+
+
+def _latest_payloads_by_key(path: Path, key_fn) -> dict[str, dict[str, object]]:
+    latest: dict[str, dict[str, object]] = {}
+    for payload in _read_jsonl(path):
+        key = key_fn(payload)
+        if key:
+            latest[str(key)] = payload
+    return latest
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    out: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as fr:
+        for line in fr:
+            line = line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                out.append(payload)
+    return out
 
 
 def _source_item_payload(

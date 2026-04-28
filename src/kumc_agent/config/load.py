@@ -33,6 +33,7 @@ from kumc_agent.config.schema import (
     IntegrationCraftersColonySection,
     IntegrationDiscordSection,
     IntegrationDriveSection,
+    IntegrationHatenablogSection,
     IntegrationMinecraftWikiSection,
     IntegrationNotionSection,
     IntegrationOpenClawSection,
@@ -345,9 +346,18 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
         updated["scheduler"] = scheduler
     scheduler.setdefault("auto_index_max_runtime_minutes", 120)
     scheduler.setdefault("auto_index_lock_ttl_minutes", 180)
+    scheduler.setdefault("auto_index_timezone", "Asia/Tokyo")
     scheduler.setdefault("quality_min_chunk_ratio", 0.5)
     scheduler.setdefault("quality_smoke_queries", [])
     scheduler.setdefault("rollback_keep_snapshots", 3)
+
+    security = updated.get("security")
+    if not isinstance(security, dict):
+        security = {}
+        updated["security"] = security
+    security.setdefault("maintenance_command_author_ids", [])
+    security.setdefault("discord_guild_allow_list", [])
+    security.setdefault("discord_member_profile_guild_ids", [])
 
     autonomous_agent = updated.get("autonomous_agent")
     if not isinstance(autonomous_agent, dict):
@@ -824,11 +834,15 @@ def _to_runtime_config(
                 int(v) for v in security["maintenance_command_author_ids"]
             ],
             discord_guild_allow_list=[int(v) for v in security["discord_guild_allow_list"]],
+            discord_member_profile_guild_ids=[
+                int(v) for v in security.get("discord_member_profile_guild_ids", [])
+            ],
         ),
         scheduler=SchedulerSection(
             auto_index_enabled=bool(scheduler["auto_index_enabled"]),
             auto_index_time=str(scheduler["auto_index_time"]),
             auto_index_weekdays=[int(v) for v in scheduler["auto_index_weekdays"]],
+            auto_index_timezone=str(scheduler.get("auto_index_timezone", "Asia/Tokyo")),
             auto_index_max_runtime_minutes=int(
                 scheduler.get("auto_index_max_runtime_minutes", 120)
             ),
@@ -1581,6 +1595,14 @@ def _to_runtime_config(
                     integrations.get("drive", {}).get(
                         "pdf_ocr_model_path",
                         "model/ocr/PaddlePaddle/PP-OCRv5_mobile",
+                    )
+                ),
+            ),
+            hatenablog=IntegrationHatenablogSection(
+                blog_url=str(
+                    integrations.get("hatenablog", {}).get(
+                        "blog_url",
+                        "",
                     )
                 ),
             ),

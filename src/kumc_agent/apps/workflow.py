@@ -60,8 +60,21 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         postgres=foundation.postgres,
         fallback_dir=foundation.config.base_dir / "data" / "operations",
     )
+    member_profile_guild_ids = tuple(
+        str(value)
+        for value in foundation.config.security.effective_member_profile_guild_ids()
+    )
+    member_search_allowed_guild_ids = tuple(
+        dict.fromkeys(
+            str(value)
+            for value in (
+                foundation.config.security.discord_guild_allow_list
+                + foundation.config.security.effective_member_profile_guild_ids()
+            )
+        )
+    )
     member_search_config = MemberSearchConfig(
-        allowed_guild_ids=tuple(str(value) for value in foundation.config.security.discord_guild_allow_list),
+        allowed_guild_ids=member_search_allowed_guild_ids,
         admin_user_ids=tuple(str(value) for value in foundation.config.security.maintenance_command_author_ids),
         search_limit=foundation.config.features.retrieval.top_k,
         rrf_k=foundation.config.features.retrieval.rrf_k,
@@ -129,7 +142,7 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
             ),
         ),
         embedder=embedder,
-        index_dir=foundation.config.base_dir / "data" / "image_search",
+        index_dir=foundation.config.app.index_dir / "image_search",
         allowed_guild_ids=tuple(str(value) for value in foundation.config.security.discord_guild_allow_list),
         admin_user_ids=tuple(str(value) for value in foundation.config.security.maintenance_command_author_ids),
     )
@@ -137,7 +150,7 @@ def build_workflow_app_context(*, base_dir: Path | None = None) -> WorkflowAppCo
         repository=operations_repository,
         directory=DiscordMemberDirectoryConnector(
             bot_token=foundation.config.integrations.discord.bot_token,
-            allowed_guild_ids=tuple(str(value) for value in foundation.config.security.discord_guild_allow_list),
+            allowed_guild_ids=member_profile_guild_ids,
         ),
         evidence_source=AskServiceEvidenceSource(
             ask_service=retrieval.ask,

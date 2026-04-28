@@ -73,6 +73,7 @@ cp .env.example .env
 - `KUMC_DRIVE_FOLDER_ID`: 取り込み対象の Drive folder
 - `KUMC_DATABASE_URL`: PostgreSQL を使う場合の接続先
 - `KUMC_DISCORD_GUILD_ALLOW_LIST`: 許可する Discord guild
+- `KUMC_DISCORD_MEMBER_PROFILE_GUILD_IDS`: `member_profiles` のメンバー情報取得先 Discord guild。未設定時は `KUMC_DISCORD_GUILD_ALLOW_LIST` を使う
 - `KUMC_MAINTENANCE_COMMAND_AUTHOR_IDS`: 管理操作を許可する Discord user
 
 `.env` と `.env.example` は同じキー集合を保ってください。片方に項目を追加・削除した場合は、もう片方にも反映します。
@@ -378,6 +379,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli admin --action cost_report
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli admin --action member_profiles
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli admin --action sync --scope member_profiles
 ```
+
+取得先 Guild は `KUMC_DISCORD_MEMBER_PROFILE_GUILD_IDS` または `configs/main/security.yaml` の `security.discord_member_profile_guild_ids` で指定します。未設定の場合は従来通り `discord_guild_allow_list` を使います。単発で明示する場合は `--action member_profiles --scope <guild_id>` を使います。
 
 PostgreSQL migration を適用します。
 

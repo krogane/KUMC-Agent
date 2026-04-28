@@ -5,6 +5,7 @@ from pathlib import Path
 from kumc_agent.config.load import load_runtime_config
 from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.domain.ports.llms import LLMPort
+from kumc_agent.apps.retrieval import build_retrieval_app_context
 from kumc_agent.infra.embeddings.gemini import GeminiEmbedder
 from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.llm.gemini import GeminiLLM
@@ -21,10 +22,12 @@ from kumc_agent.infra.loaders.x import XPostsLoader
 from kumc_agent.infra.database.postgres import PostgresClient
 from kumc_agent.infra.audit.repository import build_audit_repository
 from kumc_agent.infra.connectors import build_source_connectors
+from kumc_agent.infra.connectors.discord_members import DiscordMemberDirectoryConnector
 from kumc_agent.infra.ingestion import build_ingestion_repository
 from kumc_agent.infra.object_storage.raw_snapshot import RawSnapshotStore
 from kumc_agent.infra.object_storage.s3 import S3ObjectStorageClient
 from kumc_agent.infra.operations import build_operations_repository
+from kumc_agent.infra.workflow import build_workflow_repository
 from kumc_agent.infra.retrieval.cross_encoder import CrossEncoderReranker
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
@@ -35,7 +38,14 @@ from kumc_agent.features.image_search import (
     ImageSearchConfig,
     LocalImageOcrExtractor,
 )
+from kumc_agent.features.member_search import MemberProfileBuildService, MemberSearchConfig
+from kumc_agent.features.member_search.service import (
+    AskServiceEvidenceSource,
+    MemberProfileGenerator,
+    MemberProfileIndexService,
+)
 from kumc_agent.features.indexing.service import IndexingService
+from kumc_agent.features.indexing.task_event import TaskEventIndexBuildService
 from kumc_agent.features.ingestion.chunking import ChunkingSettings, IngestionChunker
 from kumc_agent.features.ingestion.service import IngestionService
 from kumc_agent.features.rag.config import (
@@ -171,6 +181,14 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     audit_log = build_audit_repository(
         postgres=PostgresClient(config.infrastructure.database),
         fallback_path=config.base_dir / "logs" / "audit.jsonl",
+    )
+    ingestion_repository = build_ingestion_repository(
+        postgres=PostgresClient(config.infrastructure.database),
+        fallback_dir=config.base_dir / "data" / "ingestion",
+    )
+    workflow_repository = build_workflow_repository(
+        postgres=PostgresClient(config.infrastructure.database),
+        fallback_dir=config.base_dir / "data" / "workflow",
     )
 
     retrieval_component = RetrievalComponent(
@@ -377,7 +395,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         repository=operations_repository,
         raw_dir=config.app.raw_dir,
         image_dir=config.base_dir / "data" / "image_search" / "images",
-        index_dir=config.base_dir / "data" / "image_search",
+        index_dir=config.app.index_dir / "image_search",
         embedder=embedder,
         config=image_search_config,
         captioner=GeminiImageCaptioner(
@@ -399,6 +417,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         app_config=config,
         summary_llm=summary_chunk_llm,
         image_asset_builder=image_asset_builder,
+        ingestion_repository=ingestion_repository,
     )
 
     drive_loader = GoogleDriveLoader(
@@ -424,7 +443,10 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         raw_dir=config.app.raw_dir,
         allow_guild_ids=config.security.discord_guild_allow_list,
     )
-    hatena_loader = HatenaBlogLoader(raw_dir=config.app.raw_dir)
+    hatena_loader = HatenaBlogLoader(
+        raw_dir=config.app.raw_dir,
+        blog_url=config.integrations.hatenablog.blog_url,
+    )
     crafters_loader = CraftersColonyLoader(
         raw_dir=config.app.raw_dir,
         author_url=config.integrations.crafters_colony.author_url,
@@ -453,10 +475,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
     ingestion_service = IngestionService(
         connectors=build_source_connectors(config),
-        repository=build_ingestion_repository(
-            postgres=PostgresClient(config.infrastructure.database),
-            fallback_dir=config.base_dir / "data" / "ingestion",
-        ),
+        repository=ingestion_repository,
         raw_snapshots=RawSnapshotStore(
             config=config.infrastructure.object_storage,
             local_root=config.base_dir / "data" / "object_storage",
@@ -470,6 +489,53 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         ),
         secret_detector=SecretFindingDetector(),
         audit_log=audit_log,
+    )
+    member_profile_guild_ids = tuple(
+        str(value) for value in config.security.effective_member_profile_guild_ids()
+    )
+    member_search_allowed_guild_ids = tuple(
+        dict.fromkeys(
+            str(value)
+            for value in (
+                config.security.discord_guild_allow_list
+                + config.security.effective_member_profile_guild_ids()
+            )
+        )
+    )
+    member_search_config = MemberSearchConfig(
+        allowed_guild_ids=member_search_allowed_guild_ids,
+        admin_user_ids=tuple(str(value) for value in config.security.maintenance_command_author_ids),
+        search_limit=config.features.retrieval.top_k,
+        rrf_k=config.features.retrieval.rrf_k,
+        sparse_bm25_k1=config.features.retrieval.sparse_bm25_k1,
+        sparse_bm25_b=config.features.retrieval.sparse_bm25_b,
+        sudachi_mode=config.features.retrieval.sudachi_mode,
+        sparse_use_normalized_form=config.features.retrieval.sparse_use_normalized_form,
+        sparse_remove_symbols=config.features.retrieval.sparse_remove_symbols,
+    )
+    retrieval_app = build_retrieval_app_context(base_dir=config.base_dir)
+    member_profile_builder = MemberProfileBuildService(
+        repository=operations_repository,
+        directory=DiscordMemberDirectoryConnector(
+            bot_token=config.integrations.discord.bot_token,
+            allowed_guild_ids=member_profile_guild_ids,
+        ),
+        evidence_source=AskServiceEvidenceSource(
+            ask_service=retrieval_app.ask,
+            max_evidence=member_search_config.max_evidence,
+        ),
+        generator=MemberProfileGenerator(
+            llm=rag_llm,
+            prompts_dir=config.base_dir / "assets" / "prompts",
+            prompt_name=member_search_config.profile_prompt_name,
+            temperature=0.0,
+        ),
+        config=member_search_config,
+        indexer=MemberProfileIndexService(
+            index_dir=config.app.index_dir,
+            embedder=embedder,
+            config=member_search_config,
+        ),
     )
 
     chat_answer_usecase = ChatAnswerUsecase(rag_service=rag_service)
@@ -494,6 +560,12 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             build_usecase=build_index_usecase,
             operations=operations_repository,
             ingestion_service=ingestion_service,
+            member_profile_builder=member_profile_builder,
+            member_profile_guild_ids=member_profile_guild_ids,
+            task_event_indexer=TaskEventIndexBuildService(
+                repository=workflow_repository,
+                embedder=embedder,
+            ),
         ),
         eval_ragas=EvaluateRagasUsecase(
             chat_usecase=chat_answer_usecase,

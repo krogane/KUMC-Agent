@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import logging
 
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.secret import SecretFinding
-from kumc_agent.domain.models.source import BackfillScope, SourceDeleteItem, SourceRawItem
+from kumc_agent.domain.models.source import BackfillScope, SourceDeleteItem, SourceRawItem, SyncCursor
 from kumc_agent.domain.ports.connectors import SourceConnector
 from kumc_agent.features.foundation.tracing import current_trace_id
 from kumc_agent.features.ingestion.chunking import IngestionChunker
@@ -32,6 +33,8 @@ class IngestionResult:
     documents: int
     chunks: int
     secret_findings: int
+    status: str = "succeeded"
+    error: str = ""
 
 
 class IngestionService:
@@ -66,9 +69,15 @@ class IngestionService:
         connector = self._connectors[source_kind]
         resolved_scope = scope or BackfillScope()
         item_states = self._repository.load_item_states(source_kind)
+        cursor = self._repository.load_sync_cursor(source_kind)
         seen = changed = skipped = deleted = documents = chunks = findings_count = 0
 
-        async for item in connector.backfill(resolved_scope):
+        stream = (
+            connector.poll_changes(cursor)
+            if cursor is not None and cursor.cursor and not resolved_scope.force
+            else connector.backfill(resolved_scope)
+        )
+        async for item in stream:
             if isinstance(item, SourceDeleteItem):
                 self._repository.mark_deleted(
                     source_kind=item.source_kind,
@@ -95,6 +104,19 @@ class IngestionService:
             documents += 1
             chunks += outcome.chunks
             findings_count += outcome.secret_findings
+        self._repository.save_sync_cursor(
+            SyncCursor(
+                source_kind=source_kind,
+                cursor=datetime.now(UTC).isoformat(),
+                metadata={
+                    "mode": "poll_changes" if cursor is not None and cursor.cursor and not resolved_scope.force else "backfill",
+                    "seen": seen,
+                    "changed": changed,
+                    "skipped": skipped,
+                    "deleted": deleted,
+                },
+            )
+        )
 
         result = IngestionResult(
             source_kind=source_kind,
@@ -129,7 +151,24 @@ class IngestionService:
         targets = source_kinds or self.available_sources()
         results: list[IngestionResult] = []
         for source_kind in targets:
-            results.append(await self.backfill(source_kind=source_kind, scope=scope))
+            try:
+                results.append(await self.backfill(source_kind=source_kind, scope=scope))
+            except Exception as exc:
+                logger.exception("Ingestion source failed: %s", source_kind)
+                results.append(
+                    IngestionResult(
+                        source_kind=source_kind,
+                        seen=0,
+                        changed=0,
+                        skipped=0,
+                        deleted=0,
+                        documents=0,
+                        chunks=0,
+                        secret_findings=0,
+                        status="failed",
+                        error=str(exc),
+                    )
+                )
         return tuple(results)
 
     async def _ingest_raw_item(

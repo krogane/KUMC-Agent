@@ -12,6 +12,8 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli admin --action reindex --f
 `index update`、worker `auto_index_update`、admin `sync/reindex` は同じ自動更新 usecase を呼ぶ。
 実行結果のトップレベルは `status`、`run_id`、`seen`、`changed`、`skipped`、`deleted` を安定フィールドとし、差分内訳、品質確認、snapshot、skip 理由は `metadata` 配下に出る。
 
+`member_profiles` のメンバー情報取得先 Guild は `security.discord_member_profile_guild_ids` で指定する。未設定時は後方互換として `security.discord_guild_allow_list` を使う。
+
 ## 定期実行
 
 定期実行条件は `configs/main/scheduler.yaml` の次の値で管理する。

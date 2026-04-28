@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -91,6 +92,71 @@ class ImageSearchTests(unittest.TestCase):
             self.assertIn("ocr_text", asset.metadata)
             self.assertIn("surrounding_text", asset.metadata)
             self.assertIn("search", asset.metadata)
+
+    def test_builder_falls_back_to_discord_proxy_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            messages_dir = root / "raw" / "messages" / "guild"
+            messages_dir.mkdir(parents=True)
+            (messages_dir / "channel.jsonl").write_text(
+                json.dumps(
+                    {
+                        "text": "期限切れURLの画像です",
+                        "metadata": {
+                            "guild_id": "guild-1",
+                            "channel_id": "channel-1",
+                            "channel_name": "広報",
+                            "message_id": "message-1",
+                            "message_timestamp": "2026-04-01T00:00:00+00:00",
+                            "attachments": [
+                                {
+                                    "id": "att-1",
+                                    "filename": "poster.png",
+                                    "url": "https://cdn.discordapp.com/expired/poster.png",
+                                    "proxy_url": "https://media.discordapp.net/proxy/poster.png",
+                                    "content_type": "image/png",
+                                }
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            repository = FileOperationsRepository(root_dir=root / "operations")
+            embedder = LocalEmbedder(model_name="", dimensions=32)
+            config = ImageSearchConfig(limit=5, dense_top_k=5, feature_top_k=5)
+            builder = ImageAssetBuildService(
+                repository=repository,
+                raw_dir=root / "raw",
+                image_dir=root / "image_search" / "images",
+                index_dir=root / "image_search",
+                embedder=embedder,
+                config=config,
+            )
+
+            def _fake_download(url: str, *, max_bytes: int) -> tuple[bytes, str]:
+                del max_bytes
+                if "expired" in url:
+                    raise RuntimeError("expired")
+                return _tiny_png(), "image/png"
+
+            with patch(
+                "kumc_agent.features.image_search.service._download_bytes",
+                side_effect=_fake_download,
+            ):
+                run = builder.build_from_raw_sources()
+
+            assets = repository.list_assets(query="")
+            self.assertEqual("succeeded", run.status)
+            self.assertEqual(1, len(assets))
+            self.assertEqual("succeeded", assets[0].metadata["download_status"])
+            self.assertTrue(assets[0].metadata["download_fallback_used"])
+            self.assertEqual(
+                "https://media.discordapp.net/proxy/poster.png",
+                assets[0].metadata["downloaded_image_ref"],
+            )
 
     def test_access_filter_hides_protected_images_and_allows_public_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

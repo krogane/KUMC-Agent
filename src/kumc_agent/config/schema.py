@@ -71,6 +71,10 @@ class ProviderSection:
 class SecuritySection:
     maintenance_command_author_ids: list[int]
     discord_guild_allow_list: list[int]
+    discord_member_profile_guild_ids: list[int]
+
+    def effective_member_profile_guild_ids(self) -> list[int]:
+        return list(self.discord_member_profile_guild_ids or self.discord_guild_allow_list)
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,7 @@ class SchedulerSection:
     auto_index_enabled: bool
     auto_index_time: str
     auto_index_weekdays: list[int]
+    auto_index_timezone: str
     auto_index_max_runtime_minutes: int
     auto_index_lock_ttl_minutes: int
     quality_min_chunk_ratio: float
@@ -462,6 +467,11 @@ class IntegrationCraftersColonySection:
 
 
 @dataclass(frozen=True)
+class IntegrationHatenablogSection:
+    blog_url: str
+
+
+@dataclass(frozen=True)
 class IntegrationNotionSection:
     api_token: str
     database_ids: list[str]
@@ -484,6 +494,7 @@ class IntegrationSection:
     discord: IntegrationDiscordSection
     openclaw: IntegrationOpenClawSection
     drive: IntegrationDriveSection
+    hatenablog: IntegrationHatenablogSection
     crafters_colony: IntegrationCraftersColonySection
     notion: IntegrationNotionSection
     minecraft_wiki: IntegrationMinecraftWikiSection
