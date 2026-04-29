@@ -17,6 +17,9 @@
 - required_featuresが2つ以上の場合に総合エージェントへ昇格できる。
 - 副作用のある依頼を直接実行せず、候補作成または承認待ちに限定できる。
 - 分類失敗時に副作用候補を作成せず、read-only fallbackまたは確認質問を返せる。
+- HTTPでは `maintenance_command_author_ids` に含まれる `user_id` だけをadminにし、CLIの `--admin` はローカル実行として信頼できる。
+- `history_scope` をRAG、workflow metadata、総合エージェントmetadataへ伝播できる。
+- task/event完了と通知依頼が統合入力受付経由で正本を直接変更しないことを検証できる。
 - Discordへの送信責務が統合入力受付adapterに集約される。
 - CLI、HTTP、Discordで同じ出力envelopeを利用できる。
 - secret、巨大context、raw prompt、画像local pathが外部payloadに出ない。
@@ -86,7 +89,7 @@
 5. `source=task` は `task_management` を優先する。
 6. `source=event` は `event_management` を優先する。
 7. サーバー管理語彙を検出した場合は `server_management` にする。
-8. `required_features` が2つ以上の場合は `comprehensive_agent` にする。
+8. 明示sourceは初期featureとして保持し、本文から追加featureが検出されて `required_features` が2つ以上になった場合は `comprehensive_agent` にする。
 9. 副作用語彙があり情報不足の場合は `clarify` にする。
 10. 権限不足が入口で確定する場合は `deny` にする。
 
@@ -94,6 +97,7 @@
 - 明示sourceがLLM分類より優先されること。
 - 複合依頼が総合エージェントへ昇格すること。
 - 分類失敗時に副作用routeへ進まないこと。
+- `source=member` などの明示source付き複合依頼でも追加featureが検出されること。
 
 ### Phase 6: IntegratedInputUsecase追加
 1. `usecases/integrated_input/entry.py` を追加する。
@@ -107,10 +111,12 @@
 9. handler responseを `IntegratedInputResponse` に正規化する。
 10. sanitizerを適用する。
 11. trace用metadataを付与する。
+12. `history_scope` をRAG request、workflow metadata、総合エージェントmetadataへ渡す。
 
 検証:
 - 各routeが期待するservice mockへ1回だけ委譲されること。
 - `AccessContext` が失われないこと。
+- `history_scope` がroute先metadataに残ること。
 - 例外時に利用者向けmessageとmetadata traceが返ること。
 
 ### Phase 7: route handler実装
@@ -123,11 +129,15 @@
 7. `server_management` handlerで状態確認は `mc_status`、操作依頼は `mc_request` を選ぶ。
 8. `comprehensive_agent` handlerで分類結果、AccessContext、source_filters、attribute_filters、riskを渡す。
 9. `clarify` と `deny` は外部serviceを呼ばずresponseを返す。
+10. `task_done` は `task_update(status=done)` 候補、`event_complete` は `event_update(status=done)` 候補へ変換する。
+11. `task_notify_due` / `event_notify` は通知送信やmetadata更新をせず `WorkflowCandidate` として返す。
+12. task/event/schedule/server操作で必要情報が不足する場合はdispatch前に `clarify` を返す。
 
 検証:
 - source、mode、depthがRAGへ渡ること。
 - work_type選択がintentと一致すること。
 - server操作が直接executorへ行かないこと。
+- 完了・通知系work_typeが正本更新serviceへ直接到達しないこと。
 
 ### Phase 8: 副作用境界の検査
 1. `RiskLevel` ごとの許可操作を定義する。
@@ -137,11 +147,13 @@
 5. `admin_only` では `AccessContext.is_admin` がfalseなら `deny` にする。
 6. `WorkResponse` に正本変更済みの `tasks`、`events`、実行済みserver結果が含まれる場合の扱いを検査する。
 7. 境界違反時は出力を停止しwarningを返す。
+8. `direct_mutation` として `task_done`、`task_notify_due`、`event_notify`、`event_complete`、`server_operation_execute` を一覧化し、dispatch前に候補化またはclarifyへ変換する。
 
 検証:
 - read_only routeで `task_add` が呼ばれないこと。
 - server操作依頼が `mc_request` の候補に留まること。
 - admin以外が管理操作を依頼した場合にdenyになること。
+- 実repositoryを使い、統合入力受付経由の完了・通知依頼で正本task/eventが変わらないこと。
 
 ### Phase 9: app context配線
 1. `apps/integrated_input.py` を追加する。
@@ -171,21 +183,23 @@
 ### Phase 11: HTTP配線と旧分岐削除
 1. HTTP `/ask` を `IntegratedInputUsecase` 経由に変更する。
 2. payloadの `question` / `query`、`source`、`mode`、`depth`、権限情報をrequestへ渡す。
-3. `_workflow_payload` とRAG payloadの重複を統合payload builderへ寄せる。
-4. エラー時はHTTP 400/403/500の使い分けを整理する。
-5. 主結果フィールド名は `IntegratedInputResponse` の安定schemaに揃える。
+3. `user_id` が `maintenance_command_author_ids` に含まれる場合だけadminにする。payloadの `admin` / `is_admin` は信頼しない。
+4. `_workflow_payload` とRAG payloadの重複を統合payload builderへ寄せる。
+5. エラー時はHTTP 400/403/500の使い分けを整理する。
+6. 主結果フィールド名は `IntegratedInputResponse` の安定schemaに揃える。
 
 検証:
 - sourceごとのrouteがHTTPでもCLIと一致すること。
 - metadata sanitizerが適用されること。
 - HTTP `/ask` 内に個別route分岐が残っていないこと。
+- HTTP payloadの `is_admin=true` だけではadminにならないこと。
 
 ### Phase 12: Discord配線と旧分岐削除
 1. Discord `/ask` を `IntegratedInputUsecase` 経由に変更する。
 2. `_access_context(interaction)` を統合入力受付へ渡す。
 3. route先のresponseを直接送信せず、`DiscordOutputAdapter` で送信する。
 4. `text` が長い場合または `detail_markdown` が本文より長い場合はattachmentを付ける。
-5. task/event/server候補がある場合は、承認viewを必要に応じて添付する。
+5. task/event/schedule/server/generic候補がある場合は、`approval_target_type` と `approval_target_id` に基づいて承認viewを必要に応じて添付する。
 6. `/work` と `/approval` は明示操作として残すが、通常の依頼は `/ask` へ集約する。
 7. 各ルーティング先serviceにDiscord送信責務を持たせない。
 
@@ -202,6 +216,7 @@
 4. 分類結果のrisk、source_filters、attribute_filtersを総合エージェントへ渡す。
 5. 総合エージェントのrun idは `metadata.trace_id` または `metadata.agent_run_id` に入れる。
 6. 候補や承認待ちがある場合はトップレベル主結果に正規化する。
+7. `candidates`、task/event change候補、schedule候補、approvals、assets、member_profilesを `IntegratedInputResponse` と同じschemaで返す。
 
 検証:
 - 複合依頼が総合エージェントrouteとして識別されること。
@@ -245,10 +260,11 @@
 | `tests/unit/test_integrated_input_router.py` | LLM JSON parse、fallback、metadata格納 |
 | `tests/unit/test_integrated_routing_policy.py` | source優先、複合依頼昇格、副作用fallback |
 | `tests/unit/test_integrated_input_usecase.py` | routeごとのservice委譲、AccessContext伝播 |
+| `tests/unit/test_integrated_input_side_effects.py` | fallback時の副作用遮断、direct mutation変換、正本不変性 |
 | `tests/unit/test_integrated_input_sanitizer.py` | secret、context、画像pathの除外 |
 | `tests/unit/test_cli_integrated_ask.py` | CLI askが統合入力受付だけを呼ぶこと |
-| `tests/unit/test_http_integrated_ask.py` | HTTP /askが統合入力受付だけを呼ぶこと |
-| `tests/unit/test_discord_integrated_ask.py` | Discord送信adapterとattachment判定 |
+| `tests/unit/test_http_integrated_ask.py` | HTTP /askが統合入力受付だけを呼び、admin allowlistだけを信頼すること |
+| `tests/unit/test_discord_integrated_ask.py` | Discord送信adapter、attachment判定、汎用候補承認view |
 | `tests/unit/test_removed_legacy_entrypoints.py` | 旧入口のimport参照が残っていないこと |
 
 pytestは未導入のため、既存と同じunittest形式で追加する。

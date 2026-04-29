@@ -24,16 +24,26 @@ def _source_filter(payload: dict[str, object]) -> tuple[str, ...]:
     return tuple()
 
 
-def _access(payload: dict[str, object] | None = None) -> AccessContext:
+def _access(
+    payload: dict[str, object] | None = None,
+    *,
+    admin_user_ids: tuple[str, ...] = tuple(),
+    trust_payload_admin: bool = False,
+) -> AccessContext:
     payload = payload or {}
     role_ids = payload.get("role_ids") or payload.get("roles") or []
     if isinstance(role_ids, str):
         role_ids = [role_ids]
+    user_id = str(payload.get("user_id") or "")
+    allowed_admins = {str(value) for value in admin_user_ids}
+    is_admin = bool(user_id and user_id in allowed_admins)
+    if trust_payload_admin:
+        is_admin = is_admin or bool(payload.get("admin") or payload.get("is_admin"))
     return AccessContext(
-        user_id=str(payload.get("user_id") or ""),
+        user_id=user_id,
         guild_id=str(payload.get("guild_id") or ""),
         role_ids=tuple(str(role) for role in role_ids),
-        is_admin=bool(payload.get("admin") or payload.get("is_admin")),
+        is_admin=is_admin,
     )
 
 
@@ -153,6 +163,11 @@ def create_app(context: object):
 
     app = FastAPI(title="KUMC-Agent API", version="0.2.0")
 
+    def _http_access(payload: dict[str, object] | None = None) -> AccessContext:
+        security = getattr(getattr(_foundation_context(context), "config", None), "security", None)
+        admin_ids = tuple(str(value) for value in getattr(security, "maintenance_command_author_ids", tuple()))
+        return _access(payload, admin_user_ids=admin_ids)
+
     @app.get("/health")
     def health() -> dict[str, object]:
         return _foundation_context(context).health.check(actor_id="api", actor_type="service").as_dict()
@@ -169,7 +184,7 @@ def create_app(context: object):
         question = str(payload.get("question") or payload.get("query") or "")
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
-        access = _access(payload)
+        access = _http_access(payload)
         response = context.integrated_input.integrated_input.execute(
             IntegratedInputRequest(
                 text=question,
@@ -200,7 +215,7 @@ def create_app(context: object):
                 output_format=str(payload.get("format") or payload.get("output_format") or "markdown"),
                 source_filter=_source_filter(payload),
                 limit=int(payload["limit"]) if payload.get("limit") not in (None, "") else None,
-                access=_access(payload),
+                access=_http_access(payload),
             )
         )
         return _workflow_payload(response)
@@ -265,7 +280,7 @@ def create_app(context: object):
                 target_type=str(payload.get("type") or payload.get("target_type") or "task"),
                 target_id=str(payload.get("target_id") or ""),
                 comment=str(payload.get("comment") or ""),
-                access=_access(payload),
+                access=_http_access(payload),
             )
             return _workflow_payload(response)
         except KeyError:
@@ -281,7 +296,7 @@ def create_app(context: object):
 
     @app.post("/automation")
     def automation(payload: dict[str, object]) -> dict[str, object]:
-        access = _access(payload)
+        access = _http_access(payload)
         action = str(payload.get("action") or "")
         rule_id = str(payload.get("rule_id") or "")
         if action == "list":

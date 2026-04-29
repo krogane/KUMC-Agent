@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,12 +21,15 @@ from kumc_agent.domain.models.integrated_input import (
 )
 from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation, RetrievalQuery
 from kumc_agent.domain.models.source import Source
-from kumc_agent.domain.models.workflow import WorkRequest, WorkResponse
+from kumc_agent.domain.models.workflow import Event, EventChangeCandidate, Task, WorkRequest, WorkResponse
+from kumc_agent.features.event_management import EventExtractionResult
 from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload
 from kumc_agent.features.rag.components.integrated_input_routing import (
     IntegratedInputRouter,
     IntegratedRoutingPolicy,
 )
+from kumc_agent.features.workflow import WorkflowService
+from kumc_agent.infra.workflow import FileWorkflowRepository
 from kumc_agent.usecases.integrated_input import IntegratedInputUsecase
 
 
@@ -90,6 +95,35 @@ class FakeAgent:
         )
 
 
+class FakeEventChangeExtractor:
+    def extract(
+        self,
+        *,
+        text: str,
+        evidence: tuple[Citation, ...],
+        access: AccessContext,
+        metadata: dict[str, object],
+        existing_events: tuple[Event, ...] = tuple(),
+    ) -> EventExtractionResult:
+        event = existing_events[0]
+        return EventExtractionResult(
+            candidates=tuple(),
+            change_candidates=(
+                EventChangeCandidate(
+                    id=f"event-change-{event.id}",
+                    event_id=event.id,
+                    operation="update",
+                    before={"status": event.status},
+                    after={"status": "done"},
+                    reason=text,
+                    evidence=evidence,
+                    confidence="high",
+                ),
+            ),
+            metadata={**metadata, "degraded": False},
+        )
+
+
 class StaticRouter:
     def __init__(self, decision: IntegratedInputDecision) -> None:
         self.decision = decision
@@ -136,6 +170,26 @@ class IntegratedInputTests(unittest.TestCase):
             depth="deep",
         )
         self.assertEqual(deep_rag.route, "comprehensive_agent")
+
+        explicit_composite = policy.apply(
+            IntegratedInputDecision(route="member_search", required_features=("member_search",)),
+            text="担当候補を探してタスク候補を作って",
+            source="member",
+        )
+        self.assertEqual(explicit_composite.route, "comprehensive_agent")
+        self.assertEqual(explicit_composite.required_features, ("member_search", "task_management"))
+
+    def test_classifier_fallback_clarifies_side_effect_requests(self) -> None:
+        router = IntegratedInputRouter(provider="none")
+
+        side_effect = router.decide("タスクを追加して", source="task")
+        self.assertEqual(side_effect.route, "clarify")
+        self.assertEqual(side_effect.risk, "read_only")
+        self.assertTrue(side_effect.needs_clarification)
+
+        read_only = router.decide("タスク一覧", source="task")
+        self.assertEqual(read_only.route, "task_management")
+        self.assertEqual(read_only.risk, "read_only")
 
     def test_usecase_routes_rag_with_same_access_context(self) -> None:
         ask = FakeAskService([])
@@ -250,6 +304,281 @@ class IntegratedInputTests(unittest.TestCase):
 
         self.assertEqual(("drive",), workflow.requests[0].source_filter)
 
+    def test_usecase_passes_history_scope_to_workflow_metadata(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="image_search",
+                    intent="search",
+                    required_features=("image_search",),
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(
+            IntegratedInputRequest(text="写真を探して", source="image", history_scope="discord:g:c:t")
+        )
+
+        self.assertEqual(workflow.requests[0].metadata["history_scope"], "discord:g:c:t")
+        self.assertEqual(response.metadata["history_scope"], "discord:g:c:t")
+
+    def test_usecase_maps_task_done_to_change_candidate_work_type(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="task_management",
+                    intent="complete",
+                    required_features=("task_management",),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        usecase.execute(IntegratedInputRequest(text="task_id: t1 を完了候補にして"))
+
+        self.assertEqual(workflow.requests[0].work_type, "task_update")
+        self.assertIn("status: done", workflow.requests[0].instruction)
+
+    def test_usecase_clarifies_missing_mutation_target_before_workflow(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="task_management",
+                    intent="complete",
+                    required_features=("task_management",),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(IntegratedInputRequest(text="このタスクを完了にして"))
+
+        self.assertEqual(response.metadata["route"], "clarify")
+        self.assertEqual(workflow.requests, [])
+        self.assertIn("Task ID", response.text)
+
+    def test_usecase_clarifies_event_add_missing_title_before_workflow(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="event_management",
+                    intent="create_candidate",
+                    required_features=("event_management",),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(IntegratedInputRequest(text="イベント追加 日時: 2026-05-05 14:00", is_admin=True))
+
+        self.assertEqual(response.metadata["route"], "clarify")
+        self.assertEqual(workflow.requests, [])
+        self.assertIn("タイトル", response.text)
+
+    def test_usecase_maps_event_complete_to_change_candidate_work_type(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="event_management",
+                    intent="complete",
+                    required_features=("event_management",),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        usecase.execute(IntegratedInputRequest(text="event_id: e1 を完了候補にして", is_admin=True))
+
+        self.assertEqual(workflow.requests[0].work_type, "event_update")
+        self.assertIn("status: done", workflow.requests[0].instruction)
+
+    def test_usecase_returns_notification_candidate_without_workflow_mutation(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="event_management",
+                    intent="notify",
+                    required_features=("event_management",),
+                    risk="candidate_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(IntegratedInputRequest(text="イベント通知を作って", is_admin=True))
+
+        self.assertEqual(workflow.requests, [])
+        self.assertEqual(response.workflow_candidates[0]["candidate_type"], "event_notification")
+        self.assertEqual(response.candidates[0]["approval_target_type"], "other")
+
+    def test_read_only_notification_route_clarifies_without_candidate(self) -> None:
+        workflow = FakeWorkflowService([])
+        usecase = IntegratedInputUsecase(
+            ask_service=FakeAskService([]),
+            workflow_service=workflow,
+            comprehensive_agent=None,
+            router=StaticRouter(
+                IntegratedInputDecision(
+                    route="event_management",
+                    intent="notify",
+                    required_features=("event_management",),
+                    risk="read_only",
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        response = usecase.execute(IntegratedInputRequest(text="イベント通知を作って", is_admin=True))
+
+        self.assertEqual(workflow.requests, [])
+        self.assertEqual(response.workflow_candidates, tuple())
+        self.assertIn("read_only route blocked candidate creation", response.warnings)
+
+    def test_task_done_keeps_master_task_unchanged_in_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = FileWorkflowRepository(root_dir=Path(tmp) / "workflow")
+            repository.save_task(
+                Task(
+                    id="task-1",
+                    title="会場予約",
+                    assignee_user_id="alice",
+                    status="todo",
+                )
+            )
+            usecase = IntegratedInputUsecase(
+                ask_service=FakeAskService([]),
+                workflow_service=WorkflowService(repository=repository),
+                comprehensive_agent=None,
+                router=StaticRouter(
+                    IntegratedInputDecision(
+                        route="task_management",
+                        intent="complete",
+                        required_features=("task_management",),
+                        risk="candidate_only",
+                    )
+                ),  # type: ignore[arg-type]
+            )
+
+            response = usecase.execute(
+                IntegratedInputRequest(
+                    text="task_id: task-1 を完了候補にして",
+                    access=AccessContext(user_id="alice"),
+                )
+            )
+
+            stored = repository.get_task("task-1")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.status, "todo")
+            self.assertEqual(response.task_change_candidates[0]["after"]["status"], "done")
+            self.assertEqual(repository.list_task_change_candidates()[0].after["status"], "done")
+
+    def test_event_complete_keeps_master_event_unchanged_in_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = FileWorkflowRepository(root_dir=Path(tmp) / "workflow")
+            repository.save_event(
+                Event(
+                    id="event-1",
+                    title="新歓会",
+                    starts_at=datetime(2026, 5, 5, tzinfo=UTC),
+                    status="planning",
+                )
+            )
+            usecase = IntegratedInputUsecase(
+                ask_service=FakeAskService([]),
+                workflow_service=WorkflowService(
+                    repository=repository,
+                    event_extractor=FakeEventChangeExtractor(),
+                ),
+                comprehensive_agent=None,
+                router=StaticRouter(
+                    IntegratedInputDecision(
+                        route="event_management",
+                        intent="complete",
+                        required_features=("event_management",),
+                        risk="candidate_only",
+                    )
+                ),  # type: ignore[arg-type]
+            )
+
+            response = usecase.execute(
+                IntegratedInputRequest(
+                    text="event_id: event-1 を完了候補にして",
+                    is_admin=True,
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            stored = repository.get_event("event-1")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.status, "planning")
+            self.assertEqual(response.event_change_candidates[0]["after"]["status"], "done")
+            self.assertEqual(repository.list_event_change_candidates()[0].after["status"], "done")
+
+    def test_notification_requests_keep_master_metadata_unchanged_in_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = FileWorkflowRepository(root_dir=Path(tmp) / "workflow")
+            due_at = datetime.now(UTC) + timedelta(days=1)
+            repository.save_task(
+                Task(
+                    id="task-1",
+                    title="期限確認",
+                    due_at=due_at,
+                    status="todo",
+                    metadata={},
+                )
+            )
+            usecase = IntegratedInputUsecase(
+                ask_service=FakeAskService([]),
+                workflow_service=WorkflowService(repository=repository),
+                comprehensive_agent=None,
+                router=StaticRouter(
+                    IntegratedInputDecision(
+                        route="task_management",
+                        intent="notify",
+                        required_features=("task_management",),
+                        risk="candidate_only",
+                    )
+                ),  # type: ignore[arg-type]
+            )
+
+            response = usecase.execute(
+                IntegratedInputRequest(
+                    text="task_id: task-1 の期限通知候補を作って",
+                    is_admin=True,
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            stored = repository.get_task("task-1")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.metadata, {})
+            self.assertEqual(response.workflow_candidates[0]["candidate_type"], "task_notification")
+
     def test_usecase_escalates_to_comprehensive_agent(self) -> None:
         agent = FakeAgent([])
         usecase = IntegratedInputUsecase(
@@ -309,6 +638,15 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(payload["metadata"]["message"], "api_key=[REDACTED] token=[REDACTED]")
         self.assertNotIn("context", payload["metadata"])
         self.assertNotIn("downloaded_image_path", payload["metadata"])
+
+    def test_http_access_resolves_admin_from_allowlist_only(self) -> None:
+        from kumc_agent.frontends.http.app import _access
+
+        spoofed = _access({"user_id": "user", "is_admin": True}, admin_user_ids=("admin",))
+        allowed = _access({"user_id": "admin"}, admin_user_ids=("admin",))
+
+        self.assertFalse(spoofed.is_admin)
+        self.assertTrue(allowed.is_admin)
 
     def test_removed_legacy_entrypoints_are_not_importable(self) -> None:
         self.assertIsNone(importlib.util.find_spec("kumc_agent.usecases.chat.entry"))

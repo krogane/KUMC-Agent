@@ -108,6 +108,8 @@ flowchart TD
 
 本文が空の場合はrouteを実行せず、空または入力不足responseを返す。副作用を含む可能性があるのに必要情報が不足している場合は、候補作成や承認申請を行わず、確認質問を返す。
 
+`history_scope` は会話履歴の検索範囲として扱い、RAG、workflow、総合エージェントへ `metadata` または対応request fieldで伝播する。統合入力受付が履歴を直接検索しない場合でも、route先が同じ範囲を参照できるように保持する。
+
 ## 6. 権限解決
 統合入力受付はルーティング前に `AccessContext` を構築する。
 
@@ -117,6 +119,12 @@ flowchart TD
 | `guild_id` | Discord `interaction.guild_id`、CLI/HTTP payload |
 | `role_ids` | Discord member roles、CLI/HTTP payload |
 | `is_admin` | `maintenance_command_author_ids` とGuild allow listに基づき判定 |
+
+admin判定のtrust boundaryはfrontendごとに固定する。
+
+- Discord: Discord user id、guild id、role idをもとに設定から判定する。payloadのadmin文字列は使わない。
+- HTTP: `user_id` が `maintenance_command_author_ids` に含まれる場合だけadminにする。HTTP payloadの `admin` / `is_admin` は信頼しない。
+- CLI: ローカル実行者の明示指定として `--admin` を信頼してよい。
 
 権限確認は次の2段階で行う。
 
@@ -171,9 +179,10 @@ LLM分類結果に加えて、次の決定的規則を適用する。
 - `source == image` の明示指定がある場合は、分類が曖昧でも `image_search` を優先する。
 - `source == task` またはタスク作成・更新・完了・削除の意図が明確な場合は `task_management` とする。
 - `source == event` またはイベント作成・更新・通知の意図が明確な場合は `event_management` とする。
+- 明示sourceは初期featureとして扱う。本文から別機能も検出され、`required_features` が2つ以上になった場合は明示sourceより総合エージェント昇格を優先する。
 - サーバー状態確認、起動、停止、再起動、バックアップなどは `server_management` とする。
 - 副作用がある依頼は、route先で直接実行せず、候補作成または承認待ちに限定する。
-- 分類失敗時は `risk=read_only` としてRAG fallbackまたは確認質問にする。副作用候補は作らない。
+- 分類失敗時は `risk=read_only` としてread-only routeへfallbackするか確認質問にする。作成、更新、削除、通知、完了、承認などの副作用語彙を含む場合は必ず確認質問にし、副作用候補は作らない。
 
 ## 8. ルーティング先
 ### 8.1 サークル情報RAG
@@ -210,7 +219,9 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 | 期限通知候補 | `task_notify_due` |
 | 承認batch作成 | `task_batch_approval` |
 
-副作用境界はタスク管理側の設計に従う。統合入力受付は、承認前に正本変更が起きたかどうかをresponseの主結果とstatusで確認し、最終出力では候補と実行済みを明確に区別する。
+統合入力受付経由では、`task_done` は直接呼ばず、`task_update` の `status=done` 変更候補へ変換する。`task_notify_due` は通知送信やtask metadata更新を行わず、通知候補の `WorkflowCandidate` として返す。
+
+副作用境界はタスク管理側の設計に従う。統合入力受付はdispatch前に直接正本更新work_typeを遮断し、承認前に正本変更が起きたかどうかをresponseの主結果とstatusで確認し、最終出力では候補と実行済みを明確に区別する。
 
 ### 8.6 イベント管理
 イベント管理routeでは、分類されたintentに応じて `WorkRequest.work_type` を選ぶ。
@@ -229,17 +240,32 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 | 日程候補追加 | `schedule_add` |
 | 日程一覧 | `schedule_list` |
 
-日時や場所が不足する場合は、候補作成前に確認質問を返す。freshnessが必要な依頼では、現行のイベント一覧または関連scheduleを確認してから回答する。
+統合入力受付経由では、`event_complete` は直接呼ばず、`event_update` の `status=done` 変更候補へ変換する。`event_notify` は通知送信やevent metadata更新を行わず、通知候補の `WorkflowCandidate` として返す。
+
+日時や場所が不足する場合は、候補作成前に確認質問を返す。event追加にはtitleと日時、event更新・削除・完了にはevent id、schedule追加には日時をdispatch前に要求する。freshnessが必要な依頼では、現行のイベント一覧または関連scheduleを確認してから回答する。
 
 ### 8.7 サーバー管理
 サーバー状態確認は `mc_status`、操作依頼は `mc_request` へ委譲する。
 
 サーバー操作は副作用が大きいため、統合入力受付は `risk=approval_required` として扱う。承認前にサーバー操作を直接実行してはならない。出力は `server_operations` を候補として提示する。
 
-### 8.8 総合エージェント
+### 8.8 副作用境界
+統合入力受付はworkflow dispatch前にwork_typeを次の境界で扱う。
+
+| 境界 | work_type例 | 統合入力受付での扱い |
+| --- | --- | --- |
+| `read_only` | `task_list`、`event_list`、`event_brief`、`schedule_list`、`mc_status` | そのまま委譲できる |
+| `candidate_only` | `task_add`、`task_update`、`task_delete`、`event_add`、`event_update`、`event_delete`、`schedule_add`、`mc_request` | 必要情報が揃う場合のみ候補作成へ委譲する |
+| `direct_mutation` | `task_done`、`task_notify_due`、`event_notify`、`event_complete`、`server_operation_execute` | 統合入力受付から直接呼ばない。候補work_typeへ変換するか、確認質問にする |
+
+不足情報の最小条件は、task更新・完了・削除ではtask id、event更新・削除・完了ではevent id、event追加ではtitleと日時、schedule追加では日時、server操作では操作内容である。不足している場合はroute先を呼ばず `clarify` を返す。
+
+### 8.9 総合エージェント
 `required_features` が2つ以上、または単一機能では成功条件を満たせない場合は総合エージェントへ渡す。
 
 総合エージェントには、本文、分類結果、AccessContext、source_filters、attribute_filters、risk、depthを渡す。副作用のある依頼は `candidate_only` または `approval_required` として扱い、直接実行を許可しない。
+
+総合エージェントの出力schemaは `IntegratedInputResponse` と揃える。`candidates`、`task_candidates`、`task_change_candidates`、`event_candidates`、`event_change_candidates`、`schedule_candidates`、`server_operations`、`approvals`、`assets`、`member_profiles` を落とさず統合出力へ戻す。
 
 ## 9. 出力設計
 統合入力受付は、ルーティング先の結果を `IntegratedInputResponse` に正規化する。
@@ -250,10 +276,13 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 | `detail_markdown` | 長文詳細。Discordではattachment候補 |
 | `citations` | 引用根拠 |
 | `confidence` | `high`、`medium`、`low` |
+| `candidates` | 種別横断の汎用候補 |
 | `task_candidates` | タスク候補 |
 | `task_change_candidates` | タスク変更候補 |
 | `event_candidates` | イベント候補 |
 | `event_change_candidates` | イベント変更候補 |
+| `schedule_candidates` | 日程候補 |
+| `workflow_candidates` | workflow横断の候補 |
 | `assets` | 画像検索結果 |
 | `member_profiles` | メンバー検索結果 |
 | `server_operations` | サーバー操作候補 |
@@ -262,6 +291,8 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 | `metadata` | route、intent、trace id、分類model、fallback、内部診断 |
 
 トップレベルには利用者・連携先が主結果として扱う安定フィールドのみを置く。`routing_decision`、`selected_handler`、`policy_decision`、`trace_id`、`fast_mode` などは `metadata` 配下に置く。
+
+候補・承認UIの契約として、汎用候補は `approval_target_type` と `approval_target_id` をpayloadまたはmetadataに持つ。Discord adapterはtask、event、schedule、server_operation、generic candidateを同じ契約で承認viewへ変換する。
 
 Discord出力では、`text` が長すぎる場合や `detail_markdown` が本文より長い場合はMarkdown attachmentにする。Discord送信機能は統合入力受付のDiscord adapterだけが持つ。
 
@@ -321,6 +352,8 @@ pytestは未導入の前提で、既存のunittest方式に合わせる。
 | access | Discord/CLI/HTTPから同じAccessContextが作られる |
 | route direct | 単一RAG、Minecraft Wiki、member、imageが正しいserviceへ委譲される |
 | route workflow | task/event/serverのwork_type選択が正しい |
+| side effect boundary | read-onlyでは候補を作らず、direct mutation work_typeは候補化またはclarifyになる |
+| master invariance | 統合入力受付経由の完了・通知依頼で正本task/eventが直接変更されない |
 | comprehensive escalation | required_featuresが2つ以上で総合エージェントへ昇格する |
 | payload | 診断情報が `metadata` 配下に入る |
 | sanitizer | raw prompt、context、secret、画像local pathが外部payloadに出ない |

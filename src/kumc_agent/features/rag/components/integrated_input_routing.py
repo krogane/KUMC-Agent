@@ -103,7 +103,7 @@ class IntegratedInputRouter:
                     errors.append("invalid_payload")
                 except Exception as exc:  # pragma: no cover - provider dependent
                     errors.append(str(exc))
-            return self._heuristic_decision(
+            return self._safe_fallback_decision(
                 text,
                 source=source,
                 metadata={
@@ -112,7 +112,7 @@ class IntegratedInputRouter:
                     "classifier_errors": errors[-3:],
                 },
             )
-        return self._heuristic_decision(
+        return self._safe_fallback_decision(
             text,
             source=source,
             metadata={"fallback": True, "fallback_reason": "classifier_unavailable"},
@@ -231,10 +231,10 @@ class IntegratedInputRouter:
             route = "event_management"
         elif source == "server":
             route = "server_management"
-            risk = "approval_required"
+            risk = "approval_required" if _has_server_operation_request(text) else "read_only"
         elif "server_management" in features:
             route = "server_management"
-            risk = "approval_required"
+            risk = "approval_required" if _has_server_operation_request(text) else risk
         elif "minecraft_wiki" in features:
             route = "minecraft_wiki_rag"
         if len(features) >= 2:
@@ -250,6 +250,34 @@ class IntegratedInputRouter:
             metadata=metadata,
         )
 
+    def _safe_fallback_decision(
+        self,
+        text: str,
+        *,
+        source: str,
+        metadata: dict[str, Any],
+    ) -> IntegratedInputDecision:
+        decision = self._heuristic_decision(text, source=source, metadata=metadata)
+        if decision.risk == "read_only" and not _has_candidate_side_effect_request(text):
+            return decision
+        return IntegratedInputDecision(
+            route="clarify",
+            intent=decision.intent,
+            required_features=decision.required_features,
+            source_filters=decision.source_filters,
+            attribute_filters=decision.attribute_filters,
+            risk="read_only",
+            freshness_required=decision.freshness_required,
+            needs_clarification=True,
+            clarification_question="候補作成や変更を含む依頼として解釈されました。実行内容を確認できるよう、対象と変更内容を明示してください。",
+            reason="fallback_blocks_side_effect",
+            metadata={
+                **metadata,
+                "blocked_fallback_route": decision.route,
+                "blocked_fallback_risk": decision.risk,
+            },
+        )
+
 
 class IntegratedRoutingPolicy:
     def apply(
@@ -263,29 +291,32 @@ class IntegratedRoutingPolicy:
     ) -> IntegratedInputDecision:
         route = decision.route
         risk = decision.risk
-        required = tuple(dict.fromkeys(decision.required_features or _detect_required_features(text, source)))
+        detected = _detect_features_without_default_circle(text)
+        required = tuple(dict.fromkeys([*(decision.required_features or tuple()), *detected]))
+        if not required:
+            required = _detect_required_features(text, source)
         if source == "minecraft_wiki":
             route = "minecraft_wiki_rag"
-            required = ("minecraft_wiki",)
+            required = tuple(dict.fromkeys(["minecraft_wiki", *(item for item in detected if item != "minecraft_wiki")]))
         elif source == "member":
             route = "member_search"
-            required = ("member_search",)
+            required = tuple(dict.fromkeys(["member_search", *(item for item in detected if item != "member_search")]))
         elif source == "image":
             route = "image_search"
-            required = ("image_search",)
+            required = tuple(dict.fromkeys(["image_search", *(item for item in detected if item != "image_search")]))
         elif source == "task":
             route = "task_management"
-            required = ("task_management",)
+            required = tuple(dict.fromkeys(["task_management", *(item for item in detected if item != "task_management")]))
         elif source == "event":
             route = "event_management"
-            required = ("event_management",)
+            required = tuple(dict.fromkeys(["event_management", *(item for item in detected if item != "event_management")]))
         elif source == "server":
             route = "server_management"
-            risk = "approval_required"
-            required = ("server_management",)
+            risk = "approval_required" if _has_server_operation_request(text) else risk
+            required = tuple(dict.fromkeys(["server_management", *(item for item in detected if item != "server_management")]))
         if _has_server_management(text):
             route = "server_management"
-            risk = "approval_required"
+            risk = "approval_required" if _has_server_operation_request(text) else risk
             required = _merge_required(required, "server_management")
         if depth == "deep" and route in {"circle_rag", "minecraft_wiki_rag"} and len(required) == 1:
             route = "comprehensive_agent"
@@ -336,6 +367,17 @@ def _detect_required_features(query: str, source_filter: str = "all") -> tuple[s
     return tuple(dict.fromkeys(features))
 
 
+def _detect_features_without_default_circle(query: str) -> tuple[str, ...]:
+    detected = _detect_required_features(query, "all")
+    if detected == ("circle_rag",) and not _has_circle_rag_hint(query):
+        return tuple()
+    return detected
+
+
+def _has_circle_rag_hint(query: str) -> bool:
+    return any(token in query for token in ("資料", "過去", "根拠", "確認", "調べ", "KUMC", "サークル"))
+
+
 def _detect_intent(text: str) -> str:
     lowered = text.lower()
     if any(token in text for token in ("一覧", "リスト", "list")):
@@ -358,7 +400,7 @@ def _detect_intent(text: str) -> str:
 
 
 def _risk_for_intent(intent: str, text: str) -> str:
-    if _has_server_management(text):
+    if _has_server_operation_request(text):
         return "approval_required"
     if intent in {"create_candidate", "update_candidate", "delete_candidate", "extract", "notify", "complete"}:
         return "candidate_only"
@@ -372,6 +414,21 @@ def _has_server_management(text: str) -> bool:
         token in text
         for token in ("再起動", "停止", "起動", "バックアップ", "ホワイトリスト", "サーバー操作", "server")
     )
+
+
+def _has_server_operation_request(text: str) -> bool:
+    return any(
+        token in text
+        for token in ("再起動", "停止", "起動", "バックアップ", "ホワイトリスト", "サーバー操作", "追加", "削除", "request")
+    )
+
+
+def _has_candidate_side_effect_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in text
+        for token in ("追加", "作成", "候補", "申請", "更新", "変更", "削除", "抽出", "通知", "完了")
+    ) or any(token in lowered for token in ("add", "create", "update", "delete", "extract", "notify", "complete", "approve", "reject"))
 
 
 def _merge_required(required: tuple[str, ...], feature: str) -> tuple[str, ...]:

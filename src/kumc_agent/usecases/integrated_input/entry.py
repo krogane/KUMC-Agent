@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from time import monotonic
 from typing import Any
+import re
 from uuid import uuid4
 
 from kumc_agent.domain.models.agentic import AgentBudget, ComprehensiveAgentRequest
@@ -14,6 +15,7 @@ from kumc_agent.domain.models.integrated_input import (
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.retrieval import AccessContext, AskResponse, Citation, RetrievalQuery
 from kumc_agent.domain.models.workflow import WorkRequest, WorkResponse
+from kumc_agent.domain.models.operations import WorkflowCandidate
 from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload, sanitize_payload_metadata
 from kumc_agent.features.rag.components.integrated_input_routing import (
     IntegratedInputRouter,
@@ -211,6 +213,7 @@ class IntegratedInputUsecase:
                     metadata={
                         "depth": request.depth,
                         "frontend": request.frontend,
+                        "history_scope": request.history_scope or self._history_scope(request, access),
                         "routing": self._decision_payload(decision),
                     },
                 )
@@ -239,16 +242,146 @@ class IntegratedInputUsecase:
                 warnings=("read_only route blocked candidate creation",),
                 metadata=self._decision_metadata(decision, handler="side_effect_guard"),
             )
+        preflight = self._preflight_workflow_route(request, decision, access, work_type)
+        if isinstance(preflight, IntegratedInputResponse):
+            return preflight
+        work_type, instruction = preflight
+        if decision.risk == "read_only" and work_type in _CANDIDATE_WORK_TYPES:
+            return IntegratedInputResponse(
+                text="候補作成が必要な依頼として解釈されました。作成内容をもう少し具体的に指定してください。",
+                confidence="low",
+                warnings=("read_only route blocked candidate creation",),
+                metadata=self._decision_metadata(decision, handler="side_effect_guard"),
+            )
         response = self.workflow_service.run(
             WorkRequest(
                 work_type=work_type,
-                instruction=request.text,
+                instruction=instruction,
+                target=_workflow_target(work_type, instruction),
                 source_filter=self._workflow_source_filters(request, decision, work_type),
                 access=access,
+                metadata={
+                    "history_scope": request.history_scope or self._history_scope(request, access),
+                    "frontend": request.frontend,
+                    "integrated_route": decision.route,
+                },
             )
         )
         integrated = self._from_work_response(response, decision, handler=work_type)
         return self._guard_workflow_response(integrated, decision, work_type)
+
+    def _preflight_workflow_route(
+        self,
+        request: IntegratedInputRequest,
+        decision: IntegratedInputDecision,
+        access: AccessContext,
+        work_type: str,
+    ) -> IntegratedInputResponse | tuple[str, str]:
+        missing = _missing_required_fields(work_type, request.text)
+        if missing:
+            clarify = replace(
+                decision,
+                route="clarify",
+                needs_clarification=True,
+                clarification_question=_clarification_question(work_type, missing),
+            )
+            return IntegratedInputResponse(
+                text=clarify.clarification_question,
+                confidence="low",
+                warnings=("missing required fields",),
+                metadata=self._decision_metadata(clarify, handler="clarify"),
+            )
+        if work_type == "task_done":
+            return "task_update", _ensure_task_done_instruction(request.text)
+        if work_type == "event_complete":
+            return "event_update", _ensure_event_done_instruction(request.text)
+        if work_type == "task_notify_due":
+            return self._notification_candidate_response(
+                request=request,
+                decision=decision,
+                access=access,
+                candidate_type="task_notification",
+                title="Task期限通知候補",
+                handler="task_notify_due_candidate",
+            )
+        if work_type == "event_notify":
+            return self._notification_candidate_response(
+                request=request,
+                decision=decision,
+                access=access,
+                candidate_type="event_notification",
+                title="Event通知候補",
+                handler="event_notify_candidate",
+            )
+        if work_type in _DIRECT_MUTATION_WORK_TYPES:
+            blocked = replace(
+                decision,
+                route="clarify",
+                needs_clarification=True,
+                clarification_question="この依頼は正本更新を直接実行する可能性があります。候補作成として扱える内容を明示してください。",
+            )
+            return IntegratedInputResponse(
+                text=blocked.clarification_question,
+                confidence="low",
+                warnings=("direct mutation blocked",),
+                metadata=self._decision_metadata(blocked, handler="side_effect_guard"),
+            )
+        return work_type, request.text
+
+    def _notification_candidate_response(
+        self,
+        *,
+        request: IntegratedInputRequest,
+        decision: IntegratedInputDecision,
+        access: AccessContext,
+        candidate_type: str,
+        title: str,
+        handler: str,
+    ) -> IntegratedInputResponse:
+        candidate = WorkflowCandidate(
+            id=f"{candidate_type}:{uuid4().hex[:16]}",
+            candidate_type=candidate_type,
+            title=title,
+            payload={
+                "instruction": request.text,
+                "history_scope": request.history_scope or self._history_scope(request, access),
+            },
+            confidence="medium",
+            status="proposed",
+            created_by="user",
+            metadata={
+                "created_by_user_id": access.user_id,
+                "approval_target_type": "other",
+                "approval_target_id": "",
+                "side_effect_boundary": "candidate_only",
+            },
+        )
+        detail = "\n".join(
+            [
+                "# WorkflowCandidate",
+                "",
+                f"- `{candidate.id}` {candidate.title}",
+                "- 正本更新や通知送信は行っていません。",
+                "- 実送信する場合は承認済みの明示操作を使ってください。",
+            ]
+        )
+        return IntegratedInputResponse(
+            text=f"{title}を作成しました。承認前のため正本更新や通知送信はしていません。",
+            detail_markdown=detail,
+            candidates=(
+                {
+                    "id": candidate.id,
+                    "type": candidate_type,
+                    "title": candidate.title,
+                    "status": candidate.status,
+                    "approval_target_type": "other",
+                    "approval_target_id": candidate.id,
+                },
+            ),
+            workflow_candidates=(candidate,),
+            confidence="medium",
+            metadata=self._decision_metadata(decision, handler=handler),
+        )
 
     def _work_type(self, request: IntegratedInputRequest, decision: IntegratedInputDecision) -> str:
         if decision.route == "member_search":
@@ -436,6 +569,7 @@ class IntegratedInputUsecase:
             metadata.setdefault("source", request.source)
             metadata.setdefault("mode", request.mode)
             metadata.setdefault("depth", request.depth)
+            metadata.setdefault("history_scope", request.history_scope or self._history_scope(request, request.normalized_access()))
         if decision is not None:
             for key, value in self._decision_metadata(
                 decision,
@@ -517,6 +651,7 @@ _CANDIDATE_WORK_TYPES = {
     "schedule_add",
     "mc_request",
 }
+_DIRECT_MUTATION_WORK_TYPES = {"task_done", "task_notify_due", "event_notify", "event_complete", "server_operation_execute"}
 
 
 def _task_work_type(intent: str, text: str) -> str:
@@ -558,7 +693,7 @@ def _event_work_type(intent: str, text: str) -> str:
         return "event_delete"
     if intent == "update_candidate" or any(token in text for token in ("更新", "変更", "update")):
         return "event_update"
-    if intent == "create_candidate" or any(token in text for token in ("追加", "作成", "候補", "開催", "add", "create")):
+    if intent == "create_candidate" or any(token in text for token in ("追加", "作成", "候補", "add", "create")):
         return "event_add"
     if any(token in text for token in ("概要", "brief", "要約")):
         return "event_brief"
@@ -567,3 +702,105 @@ def _event_work_type(intent: str, text: str) -> str:
 
 def _server_operation_requested(text: str) -> bool:
     return any(token in text for token in ("再起動", "停止", "起動", "バックアップ", "ホワイトリスト", "追加", "削除", "request"))
+
+
+def _missing_required_fields(work_type: str, text: str) -> tuple[str, ...]:
+    missing: list[str] = []
+    if work_type in {"task_update", "task_delete", "task_done"} and not _has_labeled_target(
+        text,
+        ("task_id", "タスクID", "id"),
+    ):
+        missing.append("task_id")
+    if work_type in {"event_update", "event_delete", "event_complete"} and not _has_labeled_target(
+        text,
+        ("event_id", "イベントID", "id"),
+    ):
+        missing.append("event_id")
+    if work_type == "event_add":
+        if not _has_event_title(text):
+            missing.append("title")
+        if not _has_datetime_hint(text):
+            missing.append("starts_at")
+    if work_type == "schedule_add":
+        if not _has_datetime_hint(text):
+            missing.append("starts_at")
+    if work_type == "mc_request" and not _server_operation_requested(text):
+        missing.append("server_operation")
+    return tuple(dict.fromkeys(missing))
+
+
+def _clarification_question(work_type: str, missing: tuple[str, ...]) -> str:
+    labels = {
+        "task_id": "対象Task ID",
+        "event_id": "対象Event ID",
+        "title": "タイトル",
+        "starts_at": "日時",
+        "server_operation": "サーバー操作内容",
+    }
+    needed = "、".join(labels.get(field, field) for field in missing)
+    examples = {
+        "task_update": "例: task_id: <id> status: doing",
+        "task_delete": "例: task_id: <id> を削除候補にする",
+        "task_done": "例: task_id: <id> を完了候補にする",
+        "event_update": "例: event_id: <id> status: done",
+        "event_delete": "例: event_id: <id> を削除候補にする",
+        "event_complete": "例: event_id: <id> を完了候補にする",
+        "event_add": "例: イベント: 新歓会 日時: 2026-05-05 14:00 場所: 部室",
+        "schedule_add": "例: 日程: 打ち合わせ 日時: 2026-05-05 14:00",
+        "mc_request": "例: サーバーを再起動する候補を作る",
+    }
+    suffix = examples.get(work_type, "")
+    return f"実行前に {needed} を指定してください。" + (f" {suffix}" if suffix else "")
+
+
+def _has_labeled_target(text: str, labels: tuple[str, ...]) -> bool:
+    return _extract_labeled_target(text, labels) is not None
+
+
+def _workflow_target(work_type: str, text: str) -> str:
+    if work_type.startswith("task_"):
+        return _extract_labeled_target(text, ("task_id", "タスクID", "id")) or ""
+    if work_type.startswith("event_"):
+        return _extract_labeled_target(text, ("event_id", "イベントID", "id")) or ""
+    return ""
+
+
+def _extract_labeled_target(text: str, labels: tuple[str, ...]) -> str | None:
+    escaped = "|".join(re.escape(label) for label in labels)
+    match = re.search(rf"(?<![A-Za-z_])(?:{escaped})(?![A-Za-z_])\s*[:：]\s*([^\s、。]+)", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def _has_datetime_hint(text: str) -> bool:
+    return bool(
+        re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", text)
+        or re.search(r"\d{1,2}月\d{1,2}日", text)
+        or re.search(r"(日時|日付|開催日|開始)[:：]\s*\S+", text)
+    )
+
+
+def _has_event_title(text: str) -> bool:
+    match = re.search(r"(?:イベント|event|title|件名|名前)\s*[:：]\s*([^\n]+)", text, flags=re.IGNORECASE)
+    if match:
+        value = re.split(r"(?:日時|日付|場所|会場|starts_at|date|time)\s*[:：]", match.group(1), maxsplit=1)[0]
+        value = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}.*", "", value).strip()
+        if len(value) >= 2:
+            return True
+    cleaned = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2})?", " ", text)
+    cleaned = re.sub(r"\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?", " ", cleaned)
+    cleaned = re.sub(r"(イベント|追加|作成|候補|日時|日付|場所|会場|開催|event|title|date|time)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[:：]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return len(cleaned) >= 2
+
+
+def _ensure_task_done_instruction(text: str) -> str:
+    if re.search(r"(?:status|状態)\s*[:：]", text, flags=re.IGNORECASE):
+        return text
+    return f"{text}\nstatus: done"
+
+
+def _ensure_event_done_instruction(text: str) -> str:
+    if re.search(r"(?:status|状態)\s*[:：]", text, flags=re.IGNORECASE):
+        return text
+    return f"{text}\nstatus: done"

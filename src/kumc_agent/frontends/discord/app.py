@@ -358,6 +358,10 @@ def create_bot(
         return str(getattr(first, "id", "") or getattr(first, "operation_id", ""))
 
     def _approval_view_for_integrated_response(response: IntegratedInputResponse):
+        generic = _first_generic_candidate_target(response)
+        if generic:
+            target_type, target_id = generic
+            return _generic_approval_view(target_type, target_id)
         task_id = _first_candidate_id(response)
         if task_id:
             return _task_approval_view(task_id)
@@ -373,6 +377,20 @@ def create_bot(
         server_operation_id = _first_item_id(response.server_operations)
         if server_operation_id:
             return _generic_approval_view("server_operation", server_operation_id)
+        return None
+
+    def _first_generic_candidate_target(response: IntegratedInputResponse) -> tuple[str, str] | None:
+        for item in tuple(response.candidates or tuple()) + tuple(response.workflow_candidates or tuple()):
+            if isinstance(item, dict):
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                target_type = str(item.get("approval_target_type") or metadata.get("approval_target_type") or "")
+                target_id = str(item.get("approval_target_id") or metadata.get("approval_target_id") or item.get("id") or "")
+            else:
+                metadata = getattr(item, "metadata", {}) or {}
+                target_type = str(metadata.get("approval_target_type") or "")
+                target_id = str(metadata.get("approval_target_id") or getattr(item, "id", "") or "")
+            if target_type and target_id:
+                return target_type, target_id
         return None
 
     async def _send_integrated_response(
