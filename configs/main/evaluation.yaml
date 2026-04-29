@@ -16,3 +16,29 @@ ops:
     context_recall_enabled: true
   answer_record_log_enabled: true
   answer_record_log_path: "logs/answer_records.jsonl"
+
+evaluation:
+  eval_sets_dir: "data/eval/sets"
+  eval_results_dir: "data/eval/results"
+  default_suite: "smoke"
+  smoke_targets: [rag_circle, rag_minecraft, task_management, event_management, integrated_input, server_management, agentic]
+  full_targets: [rag_circle, rag_minecraft, member_search, image_search, task_management, event_management, message_posting, automation, server_management, integrated_input, agentic, autonomous_agent]
+  safety_targets: [rag_circle, rag_minecraft, member_search, image_search, task_management, event_management, message_posting, automation, server_management, integrated_input, agentic, autonomous_agent]
+  acl_targets: [rag_circle, rag_minecraft, member_search, image_search, task_management, event_management, server_management, integrated_input, agentic, autonomous_agent]
+  safety_zero_tolerance: true
+  fixture_mode: "deterministic"
+  fake_executor: true
+  llm_enabled: false
+  suite_min_cases:
+    smoke: 1
+    full: 1
+    safety: 1
+    acl: 1
+  missing_eval_set_policy:
+    deterministic: "succeed"
+    sampled: "fail"
+    full: "fail"
+    safety: "fail"
+  thresholds:
+    default:
+      min_pass_rate: 1.0

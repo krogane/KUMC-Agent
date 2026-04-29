@@ -512,6 +512,24 @@ class OpsSection:
 
 
 @dataclass(frozen=True)
+class EvaluationSection:
+    eval_sets_dir: Path
+    eval_results_dir: Path
+    default_suite: str
+    smoke_targets: list[str]
+    full_targets: list[str]
+    safety_targets: list[str]
+    acl_targets: list[str]
+    thresholds: dict[str, dict[str, object]]
+    safety_zero_tolerance: bool
+    fixture_mode: str
+    fake_executor: bool
+    llm_enabled: bool
+    suite_min_cases: dict[str, int]
+    missing_eval_set_policy: dict[str, str]
+
+
+@dataclass(frozen=True)
 class SummarizationSection:
     target_characters: int
 
@@ -688,6 +706,7 @@ class RuntimeConfig:
     rag: RagSection
     indexing: IndexingSection
     ops: OpsSection
+    evaluation: EvaluationSection
     summarization: SummarizationSection
     integrations: IntegrationSection
     model: ModelSection

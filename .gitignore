@@ -8,6 +8,13 @@ docker/
 app/.venv/
 app/data/*
 data/*
+!data/eval/
+data/eval/*
+!data/eval/README.md
+!data/eval/sets/
+!data/eval/sets/**/
+!data/eval/sets/**/*.jsonl
+!data/eval/ragas.jsonl
 model/*
 logs/
 prompt.txt

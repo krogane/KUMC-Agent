@@ -44,6 +44,7 @@ class RagasResult:
     token_overlap: float
     ragas_metrics: dict[str, float] = field(default_factory=dict)
     ragas_metadata: dict[str, object] = field(default_factory=dict)
+    records: tuple[dict[str, object], ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ class _GeneratedAnswer:
     task: _AnswerGenerationTask
     answer: str
     contexts: list[str]
+    sources: list[dict[str, object]] = field(default_factory=list)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 class EvaluateRagasUsecase:
@@ -176,6 +179,7 @@ class EvaluateRagasUsecase:
         cache_misses = 0
         canceled = False
         records: list[dict[str, object]] = []
+        answer_records: list[dict[str, object]] = []
         exact_count = 0
         overlap_scores: list[float] = []
 
@@ -258,6 +262,8 @@ class EvaluateRagasUsecase:
                         ),
                         answer=str(cached.get("answer") or "").strip(),
                         contexts=_normalize_contexts(cached.get("contexts")),
+                        sources=_normalize_sources(cached.get("sources")),
+                        metadata=_normalize_metadata(cached.get("metadata")),
                     )
                     continue
 
@@ -291,6 +297,8 @@ class EvaluateRagasUsecase:
                             "question": generated.task.question,
                             "answer": generated.answer,
                             "contexts": generated.contexts,
+                            "sources": generated.sources,
+                            "metadata": generated.metadata,
                         }
                         answer_cache[generated.task.cache_key] = cache_record
                         batch_cache_entries.append(cache_record)
@@ -316,6 +324,21 @@ class EvaluateRagasUsecase:
                         "contexts": contexts,
                         "ground_truths": truths,
                         "ground_truth": truths[0] if truths else "",
+                    }
+                )
+                answer_records.append(
+                    {
+                        "question": question,
+                        "answer": answer,
+                        "context_texts": contexts,
+                        "contexts": _context_payloads(contexts, generated.sources),
+                        "citations": generated.sources,
+                        "sources": generated.sources,
+                        "retrieval_trace": _retrieval_trace_from_metadata(
+                            generated.metadata,
+                            generated.sources,
+                        ),
+                        "metadata": generated.metadata,
                     }
                 )
 
@@ -357,6 +380,7 @@ class EvaluateRagasUsecase:
             token_overlap=token_overlap,
             ragas_metrics=ragas_outcome.metrics,
             ragas_metadata=ragas_metadata,
+            records=tuple(answer_records),
         )
 
         if request.result_path is not None:
@@ -482,6 +506,8 @@ class EvaluateRagasUsecase:
             task=task,
             answer=str(answer_obj.text or "").strip(),
             contexts=self._contexts_from_metadata(answer_obj.metadata),
+            sources=_sources_to_payload(answer_obj.sources),
+            metadata={str(key): value for key, value in answer_obj.metadata.items()},
         )
 
     def _generate_answers_for_tasks(
@@ -1302,10 +1328,107 @@ def _normalize_contexts(raw_contexts: object) -> list[str]:
         return []
     contexts: list[str] = []
     for value in raw_contexts:
-        text = str(value or "").strip()
+        if isinstance(value, dict):
+            text = str(value.get("text") or value.get("quote") or "").strip()
+        else:
+            text = str(value or "").strip()
         if text:
             contexts.append(text)
     return contexts
+
+
+def _normalize_sources(raw_sources: object) -> list[dict[str, object]]:
+    if not isinstance(raw_sources, list):
+        return []
+    sources: list[dict[str, object]] = []
+    for value in raw_sources:
+        if isinstance(value, dict):
+            source_id = str(
+                value.get("source_id")
+                or value.get("id")
+                or value.get("source_item_id")
+                or value.get("chunk_id")
+                or ""
+            ).strip()
+            if not source_id:
+                continue
+            sources.append(
+                {
+                    "source_id": source_id,
+                    "id": source_id,
+                    "label": str(value.get("label") or value.get("title") or source_id),
+                    "uri": str(value.get("uri") or value.get("url") or ""),
+                    "source_kind": str(value.get("source_kind") or value.get("kind") or ""),
+                }
+            )
+            continue
+        source_id = str(value or "").strip()
+        if source_id:
+            sources.append({"source_id": source_id, "id": source_id, "label": source_id})
+    return sources
+
+
+def _normalize_metadata(raw_metadata: object) -> dict[str, object]:
+    if not isinstance(raw_metadata, dict):
+        return {}
+    return {str(key): value for key, value in raw_metadata.items()}
+
+
+def _sources_to_payload(sources: object) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    if not isinstance(sources, list):
+        sources = list(sources) if isinstance(sources, tuple) else []
+    for source in sources:
+        source_id = str(getattr(source, "id", "") or "").strip()
+        if not source_id:
+            continue
+        label = str(getattr(source, "label", "") or source_id)
+        uri = str(getattr(source, "uri", "") or "")
+        out.append(
+            {
+                "source_id": source_id,
+                "id": source_id,
+                "label": label,
+                "uri": uri,
+                "source_kind": _source_kind_from_id(source_id),
+            }
+        )
+    return out
+
+
+def _context_payloads(
+    contexts: list[str],
+    sources: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for index, text in enumerate(contexts):
+        source = sources[index] if index < len(sources) else {}
+        source_id = str(source.get("source_id") or source.get("id") or f"context:{index}")
+        payloads.append(
+            {
+                "source_id": source_id,
+                "id": source_id,
+                "source_kind": str(source.get("source_kind") or _source_kind_from_id(source_id)),
+                "text": text,
+            }
+        )
+    return payloads
+
+
+def _retrieval_trace_from_metadata(
+    metadata: dict[str, object],
+    sources: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    raw_trace = metadata.get("retrieval_trace")
+    if isinstance(raw_trace, list):
+        return _normalize_sources(raw_trace)
+    return list(sources)
+
+
+def _source_kind_from_id(source_id: str) -> str:
+    if ":" in source_id:
+        return source_id.split(":", 1)[0]
+    return ""
 
 
 def _is_cancel_requested(cancel_event: threading.Event | None) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from kumc_agent.config.schema import RuntimeConfig
+from kumc_agent.infra.operations.repository import OperationsRepository
 from kumc_agent.usecases.integrated_input import IntegratedInputUsecase
 from kumc_agent.usecases.chat.answer import ChatAnswerUsecase
 from kumc_agent.usecases.chat.route import ChatRouteUsecase
@@ -26,3 +27,4 @@ class RuntimeContext:
     eval_ragas: EvaluateRagasUsecase
     summarize: SummarizationUsecase
     vc: VCUsecase
+    operations: OperationsRepository | None = None

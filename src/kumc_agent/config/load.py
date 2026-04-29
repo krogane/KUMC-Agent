@@ -26,6 +26,7 @@ from kumc_agent.config.schema import (
     DatabaseSection,
     EmbeddingSection,
     EventManagementSection,
+    EvaluationSection,
     FeatureSection,
     FunctionCallSection,
     ImageSearchFeatureSection,
@@ -649,6 +650,93 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
         server_management["backup"] = backup
     backup.setdefault("backup_dir", "data/minecraft/backups")
     backup.setdefault("max_backups", 10)
+
+    evaluation = updated.get("evaluation")
+    if not isinstance(evaluation, dict):
+        evaluation = {}
+        updated["evaluation"] = evaluation
+    evaluation.setdefault("eval_sets_dir", "data/eval/sets")
+    evaluation.setdefault("eval_results_dir", "data/eval/results")
+    evaluation.setdefault("default_suite", "smoke")
+    evaluation.setdefault(
+        "smoke_targets",
+        [
+            "rag_circle",
+            "rag_minecraft",
+            "task_management",
+            "event_management",
+            "integrated_input",
+            "server_management",
+            "agentic",
+        ],
+    )
+    evaluation.setdefault(
+        "full_targets",
+        [
+            "rag_circle",
+            "rag_minecraft",
+            "member_search",
+            "image_search",
+            "task_management",
+            "event_management",
+            "message_posting",
+            "automation",
+            "server_management",
+            "integrated_input",
+            "agentic",
+            "autonomous_agent",
+        ],
+    )
+    evaluation.setdefault(
+        "safety_targets",
+        [
+            "rag_circle",
+            "rag_minecraft",
+            "member_search",
+            "image_search",
+            "task_management",
+            "event_management",
+            "message_posting",
+            "automation",
+            "server_management",
+            "integrated_input",
+            "agentic",
+            "autonomous_agent",
+        ],
+    )
+    evaluation.setdefault(
+        "acl_targets",
+        [
+            "rag_circle",
+            "rag_minecraft",
+            "member_search",
+            "image_search",
+            "task_management",
+            "event_management",
+            "server_management",
+            "integrated_input",
+            "agentic",
+            "autonomous_agent",
+        ],
+    )
+    evaluation.setdefault("thresholds", {"default": {"min_pass_rate": 1.0}})
+    evaluation.setdefault("safety_zero_tolerance", True)
+    evaluation.setdefault("fixture_mode", "deterministic")
+    evaluation.setdefault("fake_executor", True)
+    evaluation.setdefault("llm_enabled", False)
+    evaluation.setdefault(
+        "suite_min_cases",
+        {"smoke": 1, "full": 1, "safety": 1, "acl": 1},
+    )
+    evaluation.setdefault(
+        "missing_eval_set_policy",
+        {
+            "deterministic": "succeed",
+            "sampled": "fail",
+            "full": "fail",
+            "safety": "fail",
+        },
+    )
     return updated
 
 
@@ -726,6 +814,9 @@ def _to_runtime_config(
     rag = merged.get("rag", {})
     indexing = merged.get("indexing", {})
     ops = merged.get("ops", {})
+    evaluation = merged.get("evaluation", {})
+    if not isinstance(evaluation, dict):
+        evaluation = {}
     summarization = merged.get("summarization", {})
     integrations = merged.get("integrations", {})
     model = merged.get("model", {})
@@ -1759,6 +1850,57 @@ def _to_runtime_config(
                     )
                 ),
             ),
+        ),
+        evaluation=EvaluationSection(
+            eval_sets_dir=_resolve_path(
+                base_dir,
+                str(evaluation.get("eval_sets_dir", "data/eval/sets")),
+            ),
+            eval_results_dir=_resolve_path(
+                base_dir,
+                str(evaluation.get("eval_results_dir", "data/eval/results")),
+            ),
+            default_suite=str(evaluation.get("default_suite", "smoke")),
+            smoke_targets=[
+                str(value)
+                for value in (evaluation.get("smoke_targets", []) or [])
+                if str(value)
+            ],
+            full_targets=[
+                str(value)
+                for value in (evaluation.get("full_targets", []) or [])
+                if str(value)
+            ],
+            safety_targets=[
+                str(value)
+                for value in (evaluation.get("safety_targets", []) or [])
+                if str(value)
+            ],
+            acl_targets=[
+                str(value)
+                for value in (evaluation.get("acl_targets", []) or [])
+                if str(value)
+            ],
+            thresholds={
+                str(key): dict(value)
+                for key, value in (evaluation.get("thresholds", {}) or {}).items()
+                if isinstance(value, dict)
+            },
+            safety_zero_tolerance=bool(
+                evaluation.get("safety_zero_tolerance", True)
+            ),
+            fixture_mode=str(evaluation.get("fixture_mode", "deterministic")),
+            fake_executor=bool(evaluation.get("fake_executor", True)),
+            llm_enabled=bool(evaluation.get("llm_enabled", False)),
+            suite_min_cases={
+                str(key): max(0, int(value))
+                for key, value in (evaluation.get("suite_min_cases", {}) or {}).items()
+                if isinstance(value, (int, float))
+            },
+            missing_eval_set_policy={
+                str(key): str(value)
+                for key, value in (evaluation.get("missing_eval_set_policy", {}) or {}).items()
+            },
         ),
         summarization=SummarizationSection(
             target_characters=max(

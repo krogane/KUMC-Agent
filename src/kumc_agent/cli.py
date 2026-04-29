@@ -19,6 +19,11 @@ from kumc_agent.features.foundation.payload_sanitizer import (
 from kumc_agent.runtime.container import build_runtime_context
 from kumc_agent.usecases.chat.answer import ChatRequest
 from kumc_agent.usecases.eval.ragas import EvaluateRagasRequest
+from kumc_agent.usecases.eval.runner import (
+    EvaluateBatchRequest,
+    EvaluateRequest as EvalRunRequest,
+    EvalRunner,
+)
 from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateRequest
 from kumc_agent.usecases.indexing.build import BuildIndexRequest
 from kumc_agent.utils.logging import configure_logging, default_execution_log_path
@@ -221,6 +226,24 @@ def _build_parser() -> argparse.ArgumentParser:
     ragas_parser.add_argument("--disable-answer-cache", action="store_true")
     ragas_parser.add_argument("--refresh-answer-cache", action="store_true")
     ragas_parser.add_argument("--disable-history-for-eval", action="store_true")
+    run_parser = eval_sub.add_parser("run")
+    run_parser.add_argument("--target", required=False)
+    run_parser.add_argument("--suite", default=None)
+    run_parser.add_argument("--eval-set", type=Path, default=None)
+    run_parser.add_argument("--mode", default="deterministic", choices=("deterministic", "sampled", "full", "safety"))
+    run_parser.add_argument("--limit", type=int, default=None)
+    run_parser.add_argument("--result-path", type=Path, default=None)
+    run_parser.add_argument("--fail-on-critical", action="store_true")
+    run_parser.add_argument("--targets-from-config", choices=("smoke", "full", "safety", "acl"), default=None)
+    run_parser.add_argument("--missing-eval-set-policy", choices=("succeed", "skip", "fail"), default=None)
+    run_parser.add_argument("--min-cases", type=int, default=None)
+    run_parser.add_argument("--json", action="store_true")
+    for name in ("smoke", "full", "safety", "acl"):
+        batch_parser = eval_sub.add_parser(name)
+        batch_parser.add_argument("--limit", type=int, default=None)
+        batch_parser.add_argument("--result-path", type=Path, default=None)
+        batch_parser.add_argument("--fail-on-critical", action="store_true")
+        batch_parser.add_argument("--json", action="store_true")
 
     subparsers.add_parser("bot", help="Run Wave 1 Discord slash-command bot")
 
@@ -397,6 +420,39 @@ def _build_parser() -> argparse.ArgumentParser:
     autonomous_parser.add_argument("--admin", action="store_true")
 
     return parser
+
+
+def _build_eval_runner(context) -> EvalRunner:  # type: ignore[no-untyped-def]
+    return EvalRunner(
+        eval_sets_dir=context.config.evaluation.eval_sets_dir,
+        results_dir=context.config.evaluation.eval_results_dir,
+        operations_repository=context.operations,
+        ragas_usecase=context.eval_ragas,
+        thresholds=context.config.evaluation.thresholds,
+        safety_zero_tolerance=context.config.evaluation.safety_zero_tolerance,
+    )
+
+
+def _eval_targets_from_config(context, suite_name: str) -> list[str]:  # type: ignore[no-untyped-def]
+    if suite_name == "full":
+        return list(context.config.evaluation.full_targets)
+    if suite_name == "safety":
+        return list(context.config.evaluation.safety_targets)
+    if suite_name == "acl":
+        return list(context.config.evaluation.acl_targets)
+    return list(context.config.evaluation.smoke_targets)
+
+
+def _missing_eval_set_policy(context, mode: str, explicit: str | None = None) -> str:  # type: ignore[no-untyped-def]
+    if explicit:
+        return explicit
+    return str(context.config.evaluation.missing_eval_set_policy.get(mode, "fail"))
+
+
+def _suite_min_cases(context, suite: str, explicit: int | None = None) -> int:  # type: ignore[no-untyped-def]
+    if explicit is not None:
+        return max(0, int(explicit))
+    return int(context.config.evaluation.suite_min_cases.get(suite, 1))
 
 
 def main() -> None:
@@ -836,6 +892,103 @@ def main() -> None:
                 ensure_ascii=False,
             )
         )
+        return
+
+    if args.command == "eval" and args.eval_command == "run":
+        suite = args.suite or context.config.evaluation.default_suite
+        runner = _build_eval_runner(context)
+        if args.targets_from_config:
+            targets = _eval_targets_from_config(context, args.targets_from_config)
+            batch_suite = args.targets_from_config if args.targets_from_config != "smoke" else suite
+            batch_mode = args.mode
+            if args.targets_from_config in {"full", "safety"}:
+                batch_mode = args.targets_from_config
+            elif args.targets_from_config == "acl":
+                batch_mode = "safety"
+            logger.info(
+                "Running eval batch. suite=%s mode=%s targets=%s",
+                batch_suite,
+                batch_mode,
+                ",".join(targets),
+            )
+            result = runner.execute_batch(
+                EvaluateBatchRequest(
+                    suite=batch_suite,
+                    mode=batch_mode,
+                    targets=tuple(targets),
+                    result_path=args.result_path,
+                    limit=args.limit,
+                    fail_on_critical=bool(args.fail_on_critical),
+                    missing_eval_set_policy=_missing_eval_set_policy(
+                        context,
+                        batch_mode,
+                        args.missing_eval_set_policy,
+                    ),
+                    min_cases=_suite_min_cases(context, batch_suite, args.min_cases),
+                )
+            )
+            print(json.dumps(result.to_payload(), ensure_ascii=False, default=str))
+            if result.status == "failed":
+                raise SystemExit(1)
+            return
+        if not args.target:
+            raise SystemExit("--target is required unless --targets-from-config is used")
+        logger.info(
+            "Running eval. target=%s suite=%s mode=%s",
+            args.target,
+            suite,
+            args.mode,
+        )
+        result = runner.execute(
+            EvalRunRequest(
+                target=args.target,
+                suite=suite,
+                eval_set_path=args.eval_set,
+                limit=args.limit,
+                mode=args.mode,
+                result_path=args.result_path,
+                fail_on_critical=bool(args.fail_on_critical),
+                missing_eval_set_policy=args.missing_eval_set_policy,
+                min_cases=_suite_min_cases(context, suite, args.min_cases),
+            )
+        )
+        print(json.dumps(result.to_payload(), ensure_ascii=False, default=str))
+        if result.status == "failed":
+            raise SystemExit(1)
+        return
+
+    if args.command == "eval" and args.eval_command in {"smoke", "full", "safety", "acl"}:
+        command = args.eval_command
+        suite = command
+        mode = command
+        if command == "smoke":
+            suite = context.config.evaluation.default_suite
+            mode = "deterministic"
+        elif command == "acl":
+            mode = "safety"
+        targets = _eval_targets_from_config(context, command)
+        runner = _build_eval_runner(context)
+        logger.info(
+            "Running eval batch. suite=%s mode=%s targets=%s",
+            suite,
+            mode,
+            ",".join(targets),
+        )
+        result = runner.execute_batch(
+            EvaluateBatchRequest(
+                suite=suite,
+                mode=mode,
+                targets=tuple(targets),
+                result_path=args.result_path,
+                limit=args.limit,
+                fail_on_critical=bool(args.fail_on_critical),
+                missing_eval_set_policy=_missing_eval_set_policy(context, mode),
+                min_cases=_suite_min_cases(context, suite),
+            )
+        )
+        print(json.dumps(result.to_payload(), ensure_ascii=False, default=str))
+        if result.status == "failed":
+            raise SystemExit(1)
         return
 
     if args.command == "eval" and args.eval_command == "ragas":

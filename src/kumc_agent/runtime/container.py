@@ -612,6 +612,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
 
     return RuntimeContext(
         config=config,
+        operations=operations_repository,
         integrated_input=integrated_input,
         chat_answer=chat_answer_usecase,
         chat_route=chat_route_usecase,
