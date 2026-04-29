@@ -221,7 +221,11 @@ class IngestionService:
 
 def _with_secret_metadata(*, chunk: Chunk, findings: list[SecretFinding]) -> Chunk:
     policy = strictest_redaction_policy(findings)
-    index_status = "quarantined" if policy == "deny" else "active"
+    existing_status = str(chunk.metadata.get("index_status") or "active").strip().lower()
+    if existing_status in {"deleted", "permission_lost", "quarantined"}:
+        index_status = existing_status
+    else:
+        index_status = "quarantined" if policy == "deny" else "active"
     metadata = {
         **chunk.metadata,
         "redaction_policy": policy,

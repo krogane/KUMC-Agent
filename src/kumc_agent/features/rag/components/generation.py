@@ -395,6 +395,37 @@ class GenerationComponent:
                 header = "\n".join(lines)
                 return f"{header}\n{annotated_content}"
             return annotated_content
+        if source_type == "docs":
+            lines = []
+            drive_path = str(
+                metadata.get("drive_file_path")
+                or metadata.get("path")
+                or metadata.get("source_name")
+                or ""
+            ).strip()
+            if drive_path:
+                lines.append(f"drive_file_path: {drive_path}")
+            source_date = str(metadata.get("source_date") or "").strip()
+            if source_date:
+                lines.append(f"source_date: {source_date}")
+            page_number = metadata.get("page_number")
+            slide_number = metadata.get("slide_number")
+            if page_number:
+                lines.append(f"page_number: {page_number}")
+            if slide_number:
+                lines.append(f"slide_number: {slide_number}")
+            heading_path = metadata.get("heading_path")
+            if isinstance(heading_path, list):
+                heading = " > ".join(
+                    str(value).strip()
+                    for value in heading_path
+                    if str(value).strip()
+                )
+                if heading:
+                    lines.append(f"heading_path: {heading}")
+            if lines:
+                return "\n".join(lines) + "\n" + annotated_content
+            return annotated_content
         first_message_date = str(metadata.get("first_message_date") or "").strip()
         guild_name = str(metadata.get("guild_name") or "").strip()
         category_name = str(metadata.get("category_name") or "").strip()
@@ -677,6 +708,10 @@ class GenerationComponent:
         source_type = str(metadata.get("source_type") or "").strip().lower()
         if source_type == "minecraft_wiki":
             return _minecraft_wiki_label_uri_from_metadata(metadata)
+        if source_type == "docs":
+            label = _docs_label_from_metadata(metadata)
+            uri = _drive_url_from_metadata(metadata) or label
+            return label, uri
         ref = self._source_ref_for_selection(chunk=chunk, sub_index=sub_index)
         if not ref:
             return "", ""
@@ -1048,6 +1083,9 @@ class GenerationComponent:
 def _drive_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     if not metadata:
         return None
+    explicit_url = str(metadata.get("drive_url") or "").strip()
+    if explicit_url.lower().startswith(("http://", "https://")):
+        return explicit_url
     file_id = metadata.get("drive_file_id")
     if not file_id:
         return None
@@ -1056,9 +1094,35 @@ def _drive_url_from_metadata(metadata: dict[str, object] | None) -> str | None:
     mime_type = str(metadata.get("drive_mime_type") or "").strip().lower()
     if source_type == "sheets" or "spreadsheet" in mime_type:
         base = "https://docs.google.com/spreadsheets/d/"
+    elif "presentation" in mime_type:
+        base = "https://docs.google.com/presentation/d/"
+    elif mime_type == "application/pdf":
+        base = "https://drive.google.com/file/d/"
     else:
         base = "https://docs.google.com/document/d/"
-    return f"{base}{file_id}/"
+    suffix = "/view" if base.startswith("https://drive.google.com/file/") else "/"
+    return f"{base}{file_id}{suffix}"
+
+
+def _docs_label_from_metadata(metadata: dict[str, object] | None) -> str:
+    if not metadata:
+        return ""
+    name = str(
+        metadata.get("drive_file_name")
+        or metadata.get("drive_file_path")
+        or metadata.get("source_file_name")
+        or ""
+    ).strip()
+    if not name:
+        name = str(metadata.get("drive_file_id") or "").strip()
+    suffix = ""
+    page_number = metadata.get("page_number")
+    slide_number = metadata.get("slide_number")
+    if page_number:
+        suffix = f" p.{page_number}"
+    elif slide_number:
+        suffix = f" slide {slide_number}"
+    return f"{name}{suffix}".strip()
 
 
 def _hatenablog_url_from_metadata(metadata: dict[str, object] | None) -> str | None:

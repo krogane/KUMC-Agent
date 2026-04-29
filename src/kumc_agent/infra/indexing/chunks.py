@@ -46,6 +46,22 @@ def chunk_embedding_text(chunk: Chunk) -> str:
         source_date = str(chunk.metadata.get("source_date") or "").strip()
         if source_date:
             metadata_lines.append(f"source_date: {source_date}")
+        if source_type == "docs":
+            page_number = str(chunk.metadata.get("page_number") or "").strip()
+            slide_number = str(chunk.metadata.get("slide_number") or "").strip()
+            if page_number:
+                metadata_lines.append(f"page_number: {page_number}")
+            if slide_number:
+                metadata_lines.append(f"slide_number: {slide_number}")
+            heading_path = chunk.metadata.get("heading_path")
+            if isinstance(heading_path, list):
+                heading = " > ".join(
+                    str(value).strip()
+                    for value in heading_path
+                    if str(value).strip()
+                )
+                if heading:
+                    metadata_lines.append(f"heading_path: {heading}")
     if source_type == "vc_transcript":
         meeting_label = str(chunk.metadata.get("meeting_label") or "").strip()
         if meeting_label:

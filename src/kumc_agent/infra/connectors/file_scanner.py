@@ -99,6 +99,100 @@ def iter_raw_files(
     return out
 
 
+def iter_structured_jsonl_records(
+    *,
+    source_kind: str,
+    root_dir: Path,
+    default_visibility: str = "admin",
+) -> list[SourceRawItem]:
+    if not root_dir.exists():
+        return []
+    out: list[SourceRawItem] = []
+    for path in sorted(root_dir.rglob("*.jsonl"), key=lambda value: str(value)):
+        if not path.is_file() or path.name.endswith((".meta.json", ".mtime.json")):
+            continue
+        file_metadata = read_sidecar_metadata(path)
+        rel = str(path.relative_to(root_dir)).replace("\\", "/")
+        with path.open("r", encoding="utf-8") as fr:
+            for line_no, line in enumerate(fr, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                text = str(payload.get("text") or "").strip()
+                if not text:
+                    continue
+                record_metadata = payload.get("metadata")
+                if not isinstance(record_metadata, dict):
+                    record_metadata = {}
+                metadata = {
+                    **file_metadata,
+                    **{str(key): value for key, value in record_metadata.items()},
+                    "raw_relative_path": rel,
+                    "structured_record_line": line_no,
+                }
+                record_id = str(
+                    metadata.get("normalized_record_id")
+                    or metadata.get("page_number")
+                    or metadata.get("slide_number")
+                    or line_no
+                )
+                drive_file_id = str(metadata.get("drive_file_id") or path.stem).strip()
+                external_id = f"{drive_file_id}:{record_id}"
+                title = _title_for(
+                    source_kind=source_kind,
+                    path=path,
+                    metadata=metadata,
+                )
+                out.append(
+                    SourceRawItem(
+                        source_kind=source_kind,
+                        external_id=external_id,
+                        title=title,
+                        text=text,
+                        canonical_url=_canonical_url(
+                            source_kind=source_kind,
+                            external_id=external_id,
+                            metadata=metadata,
+                            page_url_base="",
+                        ),
+                        updated_at=_parse_datetime(
+                            str(
+                                metadata.get("updated_at")
+                                or metadata.get("drive_modified_time")
+                                or metadata.get("source_date")
+                                or ""
+                            )
+                        )
+                        or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                        access_scope=_access_scope(
+                            source_kind=source_kind,
+                            metadata=metadata,
+                            default_visibility=default_visibility,
+                        ),
+                        raw_path=f"{path}#{line_no}",
+                        checksum=stable_hash(
+                            json.dumps(
+                                {
+                                    "text": text,
+                                    "metadata": metadata,
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                default=str,
+                            )
+                        ),
+                        metadata=metadata,
+                    )
+                )
+    return out
+
+
 def _read_text(path: Path) -> str:
     if path.suffix.lower() == ".jsonl":
         texts: list[str] = []
@@ -180,13 +274,31 @@ def _access_scope(
     metadata: dict[str, object],
     default_visibility: str,
 ) -> AccessScope:
-    visibility = str(metadata.get("visibility") or default_visibility).strip().lower()
+    scope = metadata.get("access_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    visibility = str(
+        scope.get("visibility") or metadata.get("visibility") or default_visibility
+    ).strip().lower()
     if visibility not in {"public", "guild", "role", "private", "admin"}:
         visibility = default_visibility
-    guild_id = str(metadata.get("guild_id") or "").strip() or None
+    guild_id = str(scope.get("guild_id") or metadata.get("guild_id") or "").strip() or None
+    role_ids_raw = scope.get("role_ids") or metadata.get("role_ids") or []
+    role_ids = (
+        tuple(str(item) for item in role_ids_raw if str(item).strip())
+        if isinstance(role_ids_raw, list)
+        else tuple()
+    )
+    user_ids_raw = scope.get("user_ids") or metadata.get("user_ids") or []
+    user_ids = (
+        tuple(str(item) for item in user_ids_raw if str(item).strip())
+        if isinstance(user_ids_raw, list)
+        else tuple()
+    )
     return AccessScope(
         visibility=visibility,  # type: ignore[arg-type]
         guild_id=guild_id,
+        role_ids=role_ids,
+        user_ids=user_ids,
         source_acl_hash=stable_hash(json.dumps(metadata, ensure_ascii=False, sort_keys=True)),
     )
 

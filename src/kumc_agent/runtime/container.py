@@ -493,6 +493,12 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             config.integrations.drive.download_retry_backoff_multiplier
         ),
         pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
+        docs_quality_min_nonempty_characters=(
+            config.indexing.docs_quality.min_nonempty_characters
+        ),
+        docs_quality_quarantine_low_information=(
+            config.indexing.docs_quality.quarantine_low_information
+        ),
     )
     discord_loader = DiscordLoader(
         bot_token=config.integrations.discord.bot_token,

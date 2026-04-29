@@ -495,11 +495,23 @@ class IndexingSheetsQualitySection:
 
 
 @dataclass(frozen=True)
+class IndexingDocsQualitySection:
+    enabled: bool
+    fail_fast: bool
+    min_text_bytes: int
+    min_nonempty_characters: int
+    max_short_document_ratio: float
+    max_source_date_unknown_ratio: float
+    quarantine_low_information: bool
+
+
+@dataclass(frozen=True)
 class IndexingSection:
     chunking: IndexingChunkingSection
     stages: IndexingStagesSection
     refresh: IndexingRefreshSection
     embedding_cache: IndexingEmbeddingCacheSection
+    docs_quality: IndexingDocsQualitySection
     sheets_quality: IndexingSheetsQualitySection
 
 

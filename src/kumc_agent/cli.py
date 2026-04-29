@@ -289,7 +289,7 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument(
         "--source",
         default="minecraft_wiki",
-        choices=("minecraft_wiki",),
+        choices=("minecraft_wiki", "docs"),
     )
     audit_parser.add_argument("--raw-dir", type=Path, default=None)
     audit_parser.add_argument(
@@ -491,6 +491,36 @@ def _minecraft_wiki_audit_payload(context, raw_dir: Path | None = None):  # type
     )
 
 
+def _docs_quality_thresholds(context):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.google_drive_docs_audit import (
+        GoogleDriveDocsQualityThresholds,
+    )
+
+    cfg = context.config.indexing.docs_quality
+    return GoogleDriveDocsQualityThresholds(
+        enabled=cfg.enabled,
+        policy="fail" if cfg.fail_fast else "warn",
+        min_text_bytes=cfg.min_text_bytes,
+        min_nonempty_characters=cfg.min_nonempty_characters,
+        max_short_document_ratio=cfg.max_short_document_ratio,
+        max_source_date_unknown_ratio=cfg.max_source_date_unknown_ratio,
+    )
+
+
+def _docs_audit_payload(context, raw_dir: Path | None = None):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.google_drive_docs_audit import (
+        audit_google_drive_docs_raw_dir,
+    )
+
+    target_dir = raw_dir or context.config.app.ingestion_dir / "docs"
+    return audit_google_drive_docs_raw_dir(
+        raw_dir=target_dir,
+        normalized_dir=target_dir.parent / "docs_normalized",
+        image_dir=target_dir.parent / "images" / "google_drive",
+        thresholds=_docs_quality_thresholds(context),
+    )
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -670,7 +700,10 @@ def main() -> None:
             )
             return
         if args.ingest_command == "audit":
-            audit = _minecraft_wiki_audit_payload(ingestion, raw_dir=args.raw_dir)
+            if args.source == "docs":
+                audit = _docs_audit_payload(ingestion, raw_dir=args.raw_dir)
+            else:
+                audit = _minecraft_wiki_audit_payload(ingestion, raw_dir=args.raw_dir)
             if args.format == "markdown":
                 print(audit.to_markdown())
             else:

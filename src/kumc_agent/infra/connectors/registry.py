@@ -5,7 +5,10 @@ from pathlib import Path
 from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.domain.ports.connectors import SourceConnector
 from kumc_agent.infra.connectors.base import LoaderBackedConnector
-from kumc_agent.infra.connectors.file_scanner import iter_raw_files
+from kumc_agent.infra.connectors.file_scanner import (
+    iter_raw_files,
+    iter_structured_jsonl_records,
+)
 from kumc_agent.infra.connectors.minecraft_wiki import MinecraftWikiConnector
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
@@ -36,17 +39,18 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
                 config.integrations.drive.download_retry_backoff_multiplier
             ),
             pdf_ocr_model_path=config.integrations.drive.pdf_ocr_model_path,
+            docs_quality_min_nonempty_characters=(
+                config.indexing.docs_quality.min_nonempty_characters
+            ),
+            docs_quality_quarantine_low_information=(
+                config.indexing.docs_quality.quarantine_low_information
+            ),
         )
         connectors["google_drive"] = LoaderBackedConnector(
             source_kind="google_drive",
             loader=drive_loader,
             raw_items=lambda: [
-                *iter_raw_files(
-                    source_kind="google_drive",
-                    root_dir=ingestion_dir / "docs",
-                    extensions={".md"},
-                    default_visibility="admin",
-                ),
+                *_google_drive_doc_raw_items(ingestion_dir),
                 *iter_raw_files(
                     source_kind="google_drive",
                     root_dir=ingestion_dir / "sheets",
@@ -158,3 +162,28 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             ),
         )
     return connectors
+
+
+def _google_drive_doc_raw_items(ingestion_dir: Path):
+    structured = iter_structured_jsonl_records(
+        source_kind="google_drive",
+        root_dir=ingestion_dir / "docs_normalized",
+        default_visibility="admin",
+    )
+    structured_drive_ids = {
+        str(item.metadata.get("drive_file_id") or "").strip()
+        for item in structured
+        if str(item.metadata.get("drive_file_id") or "").strip()
+    }
+    fallback = [
+        item
+        for item in iter_raw_files(
+            source_kind="google_drive",
+            root_dir=ingestion_dir / "docs",
+            extensions={".md"},
+            default_visibility="admin",
+        )
+        if str(item.metadata.get("drive_file_id") or "").strip()
+        not in structured_drive_ids
+    ]
+    return [*structured, *fallback]

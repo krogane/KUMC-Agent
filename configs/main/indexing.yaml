@@ -29,6 +29,14 @@ indexing:
     enabled: true
     compact_after_publish: true
     force_reembed_on_full_rebuild: true
+  docs_quality:
+    enabled: true
+    fail_fast: false
+    min_text_bytes: 100
+    min_nonempty_characters: 200
+    max_short_document_ratio: 0.4
+    max_source_date_unknown_ratio: 0.2
+    quarantine_low_information: true
   sheets_quality:
     fail_fast: false
     max_empty_row_ratio: 0.8

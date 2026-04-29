@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import re
 import sys
 import tempfile
@@ -32,6 +33,17 @@ from kumc_agent.infra.loaders.common import (
     GOOGLE_SCOPES,
 )
 from kumc_agent.infra.loaders.common import ensure_dir, sanitize_filename
+from kumc_agent.infra.indexing.docs_normalizer import (
+    build_docs_quality_metadata,
+    is_page_number_only_text,
+    nonempty_character_count,
+    normalize_docx_blocks,
+    normalize_markdown_text,
+    normalize_pdf_pages,
+    normalize_pptx_slides,
+    quality_flags_for_text,
+    write_normalized_docs_jsonl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -683,7 +695,7 @@ def _worksheets_to_csv_text(worksheets: list[SpreadsheetWorksheet]) -> str:
     return "\n\n".join(sections).strip() + "\n" if sections else ""
 
 
-def _extract_docx_text(docx_bytes: bytes) -> str:
+def _extract_docx_blocks(docx_bytes: bytes) -> list[dict[str, object]]:
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as archive:
         xml_paths = sorted(
@@ -691,18 +703,48 @@ def _extract_docx_text(docx_bytes: bytes) -> str:
             for path in archive.namelist()
             if re.match(r"^word/(document|header\d+|footer\d+)\.xml$", path)
         )
-        lines: list[str] = []
+        blocks: list[dict[str, object]] = []
         for xml_path in xml_paths:
             root = ET.fromstring(archive.read(xml_path))
             for para in root.findall(".//w:p", ns):
                 text = "".join(node.text or "" for node in para.findall(".//w:t", ns))
                 text = text.strip()
                 if text:
-                    lines.append(text)
-        return "\n\n".join(lines).strip() + "\n" if lines else ""
+                    blocks.append({"block_type": "paragraph", "text": text})
+            for table in root.findall(".//w:tbl", ns):
+                rows: list[str] = []
+                for row in table.findall(".//w:tr", ns):
+                    cells: list[str] = []
+                    for cell in row.findall("w:tc", ns):
+                        cell_text = " ".join(
+                            node.text.strip()
+                            for node in cell.findall(".//w:t", ns)
+                            if node.text and node.text.strip()
+                        )
+                        cells.append(cell_text)
+                    if any(cell.strip() for cell in cells):
+                        rows.append(" | ".join(cells))
+                if rows:
+                    blocks.append(
+                        {
+                            "block_type": "table",
+                            "text": "\n".join(rows),
+                        }
+                    )
+        return blocks
 
 
-def _extract_pptx_text(pptx_bytes: bytes) -> str:
+def _docx_blocks_to_text(blocks: list[dict[str, object]]) -> str:
+    sections = [str(block.get("text") or "").strip() for block in blocks]
+    sections = [section for section in sections if section]
+    return "\n\n".join(sections).strip() + "\n" if sections else ""
+
+
+def _extract_docx_text(docx_bytes: bytes) -> str:
+    return _docx_blocks_to_text(_extract_docx_blocks(docx_bytes))
+
+
+def _extract_pptx_slide_records(pptx_bytes: bytes) -> list[dict[str, object]]:
     ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
     with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as archive:
         slide_paths = sorted(
@@ -710,7 +752,15 @@ def _extract_pptx_text(pptx_bytes: bytes) -> str:
             for path in archive.namelist()
             if re.match(r"^ppt/slides/slide\d+\.xml$", path)
         )
-        sections: list[str] = []
+        notes_paths = sorted(
+            (
+                path
+                for path in archive.namelist()
+                if re.match(r"^ppt/notesSlides/notesSlide\d+\.xml$", path)
+            ),
+            key=lambda path: int(re.search(r"(\d+)\.xml$", path).group(1)) if re.search(r"(\d+)\.xml$", path) else 0,
+        )
+        records: list[dict[str, object]] = []
         for idx, slide_path in enumerate(slide_paths, start=1):
             root = ET.fromstring(archive.read(slide_path))
             slide_lines = [
@@ -718,10 +768,80 @@ def _extract_pptx_text(pptx_bytes: bytes) -> str:
                 for node in root.findall(".//a:t", ns)
                 if node.text and node.text.strip()
             ]
-            if not slide_lines:
-                continue
-            sections.append(f"## Slide {idx}\n" + "\n".join(slide_lines))
-        return "\n\n".join(sections).strip() + "\n" if sections else ""
+            speaker_notes = ""
+            if idx - 1 < len(notes_paths):
+                notes_root = ET.fromstring(archive.read(notes_paths[idx - 1]))
+                note_lines = [
+                    node.text.strip()
+                    for node in notes_root.findall(".//a:t", ns)
+                    if node.text and node.text.strip()
+                ]
+                speaker_notes = "\n".join(note_lines).strip()
+            image_refs = _pptx_slide_image_refs(archive=archive, slide_path=slide_path)
+            records.append(
+                {
+                    "slide_number": idx,
+                    "text": "\n".join(slide_lines).strip(),
+                    "speaker_notes": speaker_notes,
+                    "embedded_image_refs": image_refs,
+                }
+            )
+        return records
+
+
+def _pptx_slide_records_to_text(slides: list[dict[str, object]]) -> str:
+    sections: list[str] = []
+    for slide in slides:
+        slide_number = int(slide.get("slide_number") or len(sections) + 1)
+        lines: list[str] = []
+        text = str(slide.get("text") or "").strip()
+        notes = str(slide.get("speaker_notes") or "").strip()
+        if text:
+            lines.append(text)
+        if notes:
+            lines.append("Speaker notes:")
+            lines.append(notes)
+        if not lines:
+            continue
+        sections.append(f"## Slide {slide_number}\n" + "\n".join(lines))
+    return "\n\n".join(sections).strip() + "\n" if sections else ""
+
+
+def _extract_pptx_text(pptx_bytes: bytes) -> str:
+    return _pptx_slide_records_to_text(_extract_pptx_slide_records(pptx_bytes))
+
+
+def _pptx_slide_image_refs(
+    *,
+    archive: zipfile.ZipFile,
+    slide_path: str,
+) -> list[str]:
+    rels_path = (
+        posixpath.dirname(slide_path)
+        + "/_rels/"
+        + posixpath.basename(slide_path)
+        + ".rels"
+    )
+    if rels_path not in archive.namelist():
+        return []
+    rel_ns = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
+    try:
+        root = ET.fromstring(archive.read(rels_path))
+    except Exception:
+        return []
+    refs: list[str] = []
+    base = posixpath.dirname(slide_path)
+    for rel in root.findall("r:Relationship", rel_ns):
+        rel_type = str(rel.get("Type") or "")
+        target = str(rel.get("Target") or "")
+        if "/image" not in rel_type or not target:
+            continue
+        normalized = posixpath.normpath(posixpath.join(base, target))
+        if normalized.startswith("../"):
+            normalized = normalized[3:]
+        if normalized.startswith("ppt/") and normalized not in refs:
+            refs.append(normalized)
+    return refs
 
 
 def _extract_pptx_images(
@@ -730,10 +850,18 @@ def _extract_pptx_images(
     drive_file: DriveFile,
     images_dir: Path,
     surrounding_text: str,
+    slide_records: list[dict[str, object]] | None = None,
 ) -> int:
     ensure_dir(images_dir)
     count = 0
     safe_path = sanitize_filename(drive_file.path.replace("/", "__"))
+    media_slide_map: dict[str, list[int]] = {}
+    for slide in slide_records or []:
+        slide_number = int(slide.get("slide_number") or 0)
+        for ref in slide.get("embedded_image_refs") or []:
+            if not isinstance(ref, str) or not ref:
+                continue
+            media_slide_map.setdefault(ref, []).append(slide_number)
     with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as archive:
         media_paths = sorted(
             path
@@ -751,11 +879,22 @@ def _extract_pptx_images(
             metadata.update(
                 {
                     "drive_embedded_source": "pptx_media",
+                    "source_document_id": drive_file.file_id,
+                    "source_location_type": "slide",
                     "pptx_media_path": media_path,
                     "image_index": index,
                     "surrounding_text": surrounding_text,
                 }
             )
+            slide_numbers = [
+                value
+                for value in media_slide_map.get(media_path, [])
+                if isinstance(value, int) and value > 0
+            ]
+            if slide_numbers:
+                metadata["slide_number"] = slide_numbers[0]
+                metadata["slide_numbers"] = slide_numbers
+                metadata["slide_ref"] = f"slide:{slide_numbers[0]}"
             out_path.with_suffix(out_path.suffix + ".meta.json").write_text(
                 json.dumps(metadata, ensure_ascii=False),
                 encoding="utf-8",
@@ -1268,7 +1407,16 @@ def _extract_pdf_page_text_with_ocr(*, page: Any, ocr_model_path: str) -> str:
         rgb_image.close()
 
 
-def _extract_pdf_text(pdf_bytes: bytes, *, ocr_model_path: str) -> str:
+def _is_pdf_ocr_candidate(page_text: str) -> bool:
+    text = (page_text or "").strip()
+    if not text:
+        return True
+    if is_page_number_only_text(text):
+        return True
+    return nonempty_character_count(text) < 40
+
+
+def _extract_pdf_pages(pdf_bytes: bytes, *, ocr_model_path: str) -> list[dict[str, object]]:
     try:
         import fitz  # type: ignore[import-not-found]
     except ImportError as e:
@@ -1276,20 +1424,67 @@ def _extract_pdf_text(pdf_bytes: bytes, *, ocr_model_path: str) -> str:
             "PyMuPDF is required for PDF parsing."
         ) from e
 
-    sections: list[str] = []
+    pages: list[dict[str, object]] = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
         for page_index, page in enumerate(document, start=1):
             page_text = (page.get_text("text") or "").strip()
-            if not page_text:
-                page_text = _extract_pdf_page_text_with_ocr(
-                    page=page,
-                    ocr_model_path=ocr_model_path,
-                )
-            if not page_text:
+            ocr_text = ""
+            ocr_status = "not_needed"
+            ocr_candidate = _is_pdf_ocr_candidate(page_text)
+            if ocr_candidate:
+                if not ocr_model_path:
+                    ocr_status = "skipped_model_unavailable"
+                else:
+                    try:
+                        ocr_text = _extract_pdf_page_text_with_ocr(
+                            page=page,
+                            ocr_model_path=ocr_model_path,
+                        )
+                        ocr_status = "succeeded" if ocr_text else "empty"
+                    except Exception as exc:
+                        logger.exception("PDF page OCR failed: page=%d", page_index)
+                        ocr_status = f"failed:{type(exc).__name__}"
+            final_text = page_text
+            if ocr_text:
+                if not page_text or len(ocr_text) > max(20, len(page_text) * 2):
+                    final_text = ocr_text
+                elif ocr_text not in page_text:
+                    final_text = f"{page_text}\n\nOCR:\n{ocr_text}"
+            if not final_text:
                 continue
-            sections.append(f"## Page {page_index}\n{page_text}")
+            flags = quality_flags_for_text(
+                final_text,
+                min_nonempty_characters=80,
+                ocr_candidate_count=1 if ocr_candidate else 0,
+                ocr_page_count=1 if ocr_text else 0,
+            )
+            pages.append(
+                {
+                    "page_number": page_index,
+                    "text": final_text,
+                    "extracted_text": page_text,
+                    "ocr_text": ocr_text,
+                    "ocr_status": ocr_status,
+                    "quality_flags": flags,
+                }
+            )
+    return pages
 
+
+def _pdf_pages_to_text(pages: list[dict[str, object]]) -> str:
+    sections: list[str] = []
+    for page in pages:
+        page_number = int(page.get("page_number") or len(sections) + 1)
+        page_text = str(page.get("text") or "").strip()
+        if page_text:
+            sections.append(f"## Page {page_number}\n{page_text}")
     return "\n\n".join(sections).strip() + "\n" if sections else ""
+
+
+def _extract_pdf_text(pdf_bytes: bytes, *, ocr_model_path: str) -> str:
+    return _pdf_pages_to_text(
+        _extract_pdf_pages(pdf_bytes, ocr_model_path=ocr_model_path)
+    )
 
 
 def _is_doc_like_mime(mime_type: str) -> bool:
@@ -1469,6 +1664,56 @@ def _write_drive_metadata(
     meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
 
 
+def _has_normalized_doc_output(
+    *,
+    docs_normalized_dir: Path | None,
+    drive_file: DriveFile,
+) -> bool:
+    if docs_normalized_dir is None or not docs_normalized_dir.exists():
+        return False
+    return any(
+        path.is_file()
+        for path in docs_normalized_dir.glob(
+            f"{drive_file.file_id}{FILE_ID_SEPARATOR}*.jsonl"
+        )
+    )
+
+
+def _normalized_doc_output_path(
+    *,
+    docs_normalized_dir: Path,
+    drive_file: DriveFile,
+) -> Path:
+    safe_path = sanitize_filename(drive_file.path.replace("/", "__"))
+    return docs_normalized_dir / f"{drive_file.file_id}{FILE_ID_SEPARATOR}{safe_path}.jsonl"
+
+
+def _write_normalized_doc_output(
+    *,
+    docs_normalized_dir: Path | None,
+    drive_file: DriveFile,
+    chunks: list[Any],
+    extra_metadata: dict[str, Any],
+) -> None:
+    if docs_normalized_dir is None:
+        return
+    ensure_dir(docs_normalized_dir)
+    out_path = _normalized_doc_output_path(
+        docs_normalized_dir=docs_normalized_dir,
+        drive_file=drive_file,
+    )
+    write_normalized_docs_jsonl(output_path=out_path, chunks=chunks)
+    _write_drive_metadata(
+        out_path,
+        drive_file,
+        extra_metadata={
+            **extra_metadata,
+            "structured_format": "normalized_docs_jsonl",
+            "record_count": len(chunks),
+        },
+    )
+
+
 def _has_structured_sheet_outputs(
     *,
     sheets_structured_dir: Path | None,
@@ -1554,10 +1799,137 @@ def _strip_drive_image_placeholders(text: str) -> str:
     return cleaned
 
 
+def _mark_duplicate_doc_content(
+    *,
+    docs_dir: Path,
+    docs_normalized_dir: Path | None,
+) -> None:
+    groups: dict[str, list[Path]] = {}
+    for path in sorted(docs_dir.glob("*.md")):
+        metadata = _read_json_sidecar_any(path)
+        digest = str(metadata.get("content_sha256") or metadata.get("checksum") or "").strip()
+        if not digest:
+            digest = hashlib_sha256_file_text(path)
+        if digest:
+            groups.setdefault(digest, []).append(path)
+    for digest, paths in groups.items():
+        if len(paths) < 2:
+            continue
+        canonical = paths[0]
+        canonical_meta = _read_json_sidecar_any(canonical)
+        canonical_drive_file_id = str(canonical_meta.get("drive_file_id") or _extract_drive_file_id(canonical.name) or "")
+        variant_ids = [
+            str(_read_json_sidecar_any(path).get("drive_file_id") or _extract_drive_file_id(path.name) or "")
+            for path in paths
+        ]
+        for path in paths:
+            metadata = _read_json_sidecar_any(path)
+            flags = _dedupe_metadata_list(metadata.get("quality_flags"))
+            if "duplicate_content" not in flags:
+                flags.append("duplicate_content")
+            metadata["quality_flags"] = flags
+            metadata["variant_group_id"] = digest
+            metadata["canonical_drive_file_id"] = canonical_drive_file_id
+            metadata["canonical_source_file_name"] = canonical.name
+            metadata["duplicate_group_size"] = len(paths)
+            metadata["variant_drive_file_ids"] = [item for item in variant_ids if item]
+            if path != canonical:
+                metadata["index_status"] = "quarantined"
+            _write_json_sidecar_any(path, metadata)
+            _update_normalized_doc_metadata(
+                docs_normalized_dir=docs_normalized_dir,
+                drive_file_id=str(metadata.get("drive_file_id") or _extract_drive_file_id(path.name) or ""),
+                metadata_updates={
+                    "quality_flags": metadata["quality_flags"],
+                    "variant_group_id": digest,
+                    "canonical_drive_file_id": canonical_drive_file_id,
+                    "canonical_source_file_name": canonical.name,
+                    "duplicate_group_size": len(paths),
+                    "variant_drive_file_ids": [item for item in variant_ids if item],
+                    "index_status": metadata.get("index_status", "active"),
+                },
+            )
+
+
+def hashlib_sha256_file_text(path: Path) -> str:
+    try:
+        import hashlib
+
+        return hashlib.sha256(
+            path.read_text(encoding="utf-8", errors="replace").encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return ""
+
+
+def _read_json_sidecar_any(path: Path) -> dict[str, Any]:
+    sidecar = path.with_suffix(path.suffix + ".meta.json")
+    if not sidecar.exists():
+        return {}
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_json_sidecar_any(path: Path, metadata: dict[str, Any]) -> None:
+    path.with_suffix(path.suffix + ".meta.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _update_normalized_doc_metadata(
+    *,
+    docs_normalized_dir: Path | None,
+    drive_file_id: str,
+    metadata_updates: dict[str, Any],
+) -> None:
+    if docs_normalized_dir is None or not drive_file_id:
+        return
+    for path in docs_normalized_dir.glob(f"{drive_file_id}{FILE_ID_SEPARATOR}*.jsonl"):
+        rows: list[dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    continue
+                metadata = payload.get("metadata")
+                if isinstance(metadata, dict):
+                    metadata.update(metadata_updates)
+                rows.append(payload)
+        except Exception:
+            logger.warning("Failed to update normalized Docs metadata: %s", path.name)
+            continue
+        with path.open("w", encoding="utf-8") as fw:
+            for row in rows:
+                fw.write(json.dumps(row, ensure_ascii=False) + "\n")
+        meta = _read_json_sidecar_any(path)
+        meta.update(metadata_updates)
+        _write_json_sidecar_any(path, meta)
+
+
+def _dedupe_metadata_list(value: object) -> list[str]:
+    items = value if isinstance(value, list) else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
 def download_drive_markdown(
     *,
     drive_folder_id: str,
     docs_dir: Path,
+    docs_normalized_dir: Path | None = None,
     sheets_dir: Path,
     sheets_structured_dir: Path | None = None,
     google_application_credentials: str,
@@ -1568,11 +1940,15 @@ def download_drive_markdown(
     drive_download_retry_initial_delay_seconds: float = 0.5,
     drive_download_retry_max_delay_seconds: float = 8.0,
     drive_download_retry_backoff_multiplier: float = 2.0,
+    docs_quality_min_nonempty_characters: int = 200,
+    docs_quality_quarantine_low_information: bool = True,
     skip_existing: bool = False,
     update_existing: bool = True,
     sync_deleted: bool = False,
 ) -> tuple[int, int]:
     ensure_dir(docs_dir)
+    if docs_normalized_dir is not None:
+        ensure_dir(docs_normalized_dir)
     ensure_dir(sheets_dir)
     if sheets_structured_dir is not None:
         ensure_dir(sheets_structured_dir)
@@ -1619,6 +1995,12 @@ def download_drive_markdown(
             extension=".md",
             valid_file_ids=valid_doc_ids,
         )
+        if docs_normalized_dir is not None:
+            _cleanup_missing_drive_files(
+                out_dir=docs_normalized_dir,
+                extension=".jsonl",
+                valid_file_ids=valid_doc_ids,
+            )
         _cleanup_missing_drive_files(
             out_dir=sheets_dir,
             extension=".csv",
@@ -1669,13 +2051,41 @@ def download_drive_markdown(
                     _cleanup_drive_duplicates(
                         out_dir=docs_dir, drive_file=drive_file, keep_path=out_path
                     )
-                    if skip_existing and out_path.exists():
+                    if docs_normalized_dir is not None:
+                        _cleanup_drive_duplicates(
+                            out_dir=docs_normalized_dir,
+                            drive_file=drive_file,
+                            keep_path=_normalized_doc_output_path(
+                                docs_normalized_dir=docs_normalized_dir,
+                                drive_file=drive_file,
+                            ),
+                        )
+                    normalized_missing = (
+                        docs_normalized_dir is not None
+                        and not _has_normalized_doc_output(
+                            docs_normalized_dir=docs_normalized_dir,
+                            drive_file=drive_file,
+                        )
+                    )
+                    if skip_existing and out_path.exists() and not normalized_missing:
                         if not update_existing:
                             logger.info("Skip download (exists): %s", out_path.name)
                             continue
                         if _is_drive_file_up_to_date(out_path, drive_file):
                             logger.info("Skip download (up-to-date): %s", out_path.name)
                             continue
+                    base_drive_metadata = _drive_metadata_payload(drive_file)
+                    normalized_chunks: list[Any] = []
+                    extraction_method = ""
+                    extraction_status = "ok"
+                    page_count = 0
+                    slide_count = 0
+                    ocr_page_count = 0
+                    ocr_candidate_count = 0
+                    embedded_image_count = 0
+                    pdf_pages: list[dict[str, object]] = []
+                    slide_records: list[dict[str, object]] = []
+                    docx_blocks: list[dict[str, object]] = []
                     if drive_file.mime_type == DRIVE_DOC_MIME:
                         content = _download_export_bytes(
                             drive_service,
@@ -1685,6 +2095,7 @@ def download_drive_markdown(
                         )
                         text = content.decode("utf-8", errors="replace")
                         text = _strip_drive_image_placeholders(text)
+                        extraction_method = "google_docs_markdown"
                     elif drive_file.mime_type == DRIVE_SLIDE_MIME:
                         try:
                             content = _download_export_bytes(
@@ -1693,13 +2104,17 @@ def download_drive_markdown(
                                 mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                 **download_retry_options,
                             )
-                            text = _extract_pptx_text(content)
-                            _extract_pptx_images(
+                            slide_records = _extract_pptx_slide_records(content)
+                            text = _pptx_slide_records_to_text(slide_records)
+                            slide_count = len(slide_records)
+                            embedded_image_count = _extract_pptx_images(
                                 content,
                                 drive_file=drive_file,
                                 images_dir=images_dir,
                                 surrounding_text=text,
+                                slide_records=slide_records,
                             )
+                            extraction_method = "google_slides_pptx"
                         except Exception as exc:
                             if not _is_export_size_limit_exceeded(exc):
                                 raise
@@ -1718,6 +2133,8 @@ def download_drive_markdown(
                                 **download_retry_options,
                             )
                             text = content.decode("utf-8", errors="replace")
+                            extraction_method = "google_slides_text_plain"
+                            extraction_status = "partial"
                     elif drive_file.mime_type in DRIVE_WORD_MIMES:
                         if drive_file.mime_type == "application/msword":
                             logger.warning(
@@ -1730,7 +2147,9 @@ def download_drive_markdown(
                             file_id=drive_file.file_id,
                             **download_retry_options,
                         )
-                        text = _extract_docx_text(content)
+                        docx_blocks = _extract_docx_blocks(content)
+                        text = _docx_blocks_to_text(docx_blocks)
+                        extraction_method = "docx_xml"
                     elif drive_file.mime_type in DRIVE_POWERPOINT_MIMES:
                         if drive_file.mime_type == "application/vnd.ms-powerpoint":
                             logger.warning(
@@ -1743,30 +2162,112 @@ def download_drive_markdown(
                             file_id=drive_file.file_id,
                             **download_retry_options,
                         )
-                        text = _extract_pptx_text(content)
-                        _extract_pptx_images(
+                        slide_records = _extract_pptx_slide_records(content)
+                        text = _pptx_slide_records_to_text(slide_records)
+                        slide_count = len(slide_records)
+                        embedded_image_count = _extract_pptx_images(
                             content,
                             drive_file=drive_file,
                             images_dir=images_dir,
                             surrounding_text=text,
+                            slide_records=slide_records,
                         )
+                        extraction_method = "pptx_xml"
                     elif drive_file.mime_type == DRIVE_PDF_MIME:
                         content = _download_file_bytes(
                             drive_service,
                             file_id=drive_file.file_id,
                             **download_retry_options,
                         )
-                        text = _extract_pdf_text(
+                        pdf_pages = _extract_pdf_pages(
                             content,
                             ocr_model_path=pdf_ocr_model_path,
                         )
+                        text = _pdf_pages_to_text(pdf_pages)
+                        page_count = len(pdf_pages)
+                        ocr_page_count = sum(
+                            1
+                            for page in pdf_pages
+                            if str(page.get("ocr_text") or "").strip()
+                        )
+                        ocr_candidate_count = sum(
+                            1
+                            for page in pdf_pages
+                            if str(page.get("ocr_status") or "") != "not_needed"
+                        )
+                        extraction_method = "pdf_text_ocr"
                     else:
                         continue
                     if not text.strip():
                         logger.warning("Skip empty extracted text: %s", drive_file.path)
                         continue
+                    quality_metadata = build_docs_quality_metadata(
+                        base_metadata=base_drive_metadata,
+                        text=text,
+                        extraction_method=extraction_method,
+                        extraction_status=extraction_status,
+                        page_count=page_count,
+                        slide_count=slide_count,
+                        ocr_page_count=ocr_page_count,
+                        ocr_candidate_count=ocr_candidate_count,
+                        embedded_image_count=embedded_image_count,
+                        min_nonempty_characters=docs_quality_min_nonempty_characters,
+                        quarantine_low_information=docs_quality_quarantine_low_information,
+                    )
+                    normalized_base_metadata = {**base_drive_metadata, **quality_metadata}
+                    if drive_file.mime_type == DRIVE_PDF_MIME:
+                        normalized_chunks = normalize_pdf_pages(
+                            pdf_pages,
+                            base_metadata=normalized_base_metadata,
+                            source_file_name=out_path.name,
+                            min_nonempty_characters=docs_quality_min_nonempty_characters,
+                            quarantine_low_information=docs_quality_quarantine_low_information,
+                        )
+                    elif drive_file.mime_type in {DRIVE_SLIDE_MIME, *DRIVE_POWERPOINT_MIMES}:
+                        if slide_records:
+                            normalized_chunks = normalize_pptx_slides(
+                                slide_records,
+                                base_metadata=normalized_base_metadata,
+                                source_file_name=out_path.name,
+                                min_nonempty_characters=docs_quality_min_nonempty_characters,
+                                quarantine_low_information=docs_quality_quarantine_low_information,
+                            )
+                        else:
+                            normalized_chunks = normalize_markdown_text(
+                                text,
+                                base_metadata=normalized_base_metadata,
+                                source_file_name=out_path.name,
+                                min_nonempty_characters=docs_quality_min_nonempty_characters,
+                                quarantine_low_information=docs_quality_quarantine_low_information,
+                            )
+                    elif drive_file.mime_type in DRIVE_WORD_MIMES:
+                        normalized_chunks = normalize_docx_blocks(
+                            docx_blocks,
+                            base_metadata=normalized_base_metadata,
+                            source_file_name=out_path.name,
+                            min_nonempty_characters=docs_quality_min_nonempty_characters,
+                            quarantine_low_information=docs_quality_quarantine_low_information,
+                        )
+                    else:
+                        normalized_chunks = normalize_markdown_text(
+                            text,
+                            base_metadata=normalized_base_metadata,
+                            source_file_name=out_path.name,
+                            min_nonempty_characters=docs_quality_min_nonempty_characters,
+                            quarantine_low_information=docs_quality_quarantine_low_information,
+                        )
                     out_path.write_text(text, encoding="utf-8")
-                    _write_drive_metadata(out_path, drive_file)
+                    _write_drive_metadata(
+                        out_path,
+                        drive_file,
+                        extra_metadata=quality_metadata,
+                    )
+                    _write_normalized_doc_output(
+                        docs_normalized_dir=docs_normalized_dir,
+                        drive_file=drive_file,
+                        chunks=normalized_chunks,
+                        extra_metadata=quality_metadata,
+                    )
                     docs_count += 1
                     logger.info("Downloaded doc-like file: %s", drive_file.path)
                 elif _is_sheet_like_mime(drive_file.mime_type):
@@ -1893,6 +2394,10 @@ def download_drive_markdown(
                     "Failed to download %s (%s)", drive_file.path, drive_file.file_id
                 )
 
+    _mark_duplicate_doc_content(
+        docs_dir=docs_dir,
+        docs_normalized_dir=docs_normalized_dir,
+    )
     logger.info(
         "Downloaded %d doc-like and %d sheet-like files",
         docs_count,

@@ -20,6 +20,8 @@ class GoogleDriveLoader:
         download_retry_max_delay_seconds: float,
         download_retry_backoff_multiplier: float,
         pdf_ocr_model_path: str,
+        docs_quality_min_nonempty_characters: int = 200,
+        docs_quality_quarantine_low_information: bool = True,
     ) -> None:
         self._folder_id = folder_id
         self._credentials_path = credentials_path
@@ -35,6 +37,10 @@ class GoogleDriveLoader:
             download_retry_backoff_multiplier
         )
         self._pdf_ocr_model_path = pdf_ocr_model_path
+        self._docs_quality_min_nonempty_characters = docs_quality_min_nonempty_characters
+        self._docs_quality_quarantine_low_information = (
+            docs_quality_quarantine_low_information
+        )
 
     def load(self) -> int:
         if not self._folder_id:
@@ -44,18 +50,27 @@ class GoogleDriveLoader:
         )
 
         docs_dir = self._ingestion_dir / "docs"
+        docs_normalized_dir = self._ingestion_dir / "docs_normalized"
         sheets_dir = self._ingestion_dir / "sheets"
         sheets_structured_dir = self._ingestion_dir / "sheets_structured"
         docs_dir.mkdir(parents=True, exist_ok=True)
+        docs_normalized_dir.mkdir(parents=True, exist_ok=True)
         sheets_dir.mkdir(parents=True, exist_ok=True)
         sheets_structured_dir.mkdir(parents=True, exist_ok=True)
         docs_count, sheets_count = download_drive_markdown(
             drive_folder_id=self._folder_id,
             docs_dir=docs_dir,
+            docs_normalized_dir=docs_normalized_dir,
             sheets_dir=sheets_dir,
             sheets_structured_dir=sheets_structured_dir,
             google_application_credentials=self._credentials_path,
             pdf_ocr_model_path=self._pdf_ocr_model_path,
+            docs_quality_min_nonempty_characters=(
+                self._docs_quality_min_nonempty_characters
+            ),
+            docs_quality_quarantine_low_information=(
+                self._docs_quality_quarantine_low_information
+            ),
             drive_max_files=self._max_files,
             drive_batch_size=self._batch_size,
             drive_download_max_retries=self._download_max_retries,

@@ -51,6 +51,33 @@ _METADATA_KEYS = (
     "drive_mime_type",
     "drive_file_path",
     "drive_file_id",
+    "drive_url",
+    "drive_modified_time",
+    "content_sha256",
+    "extraction_method",
+    "extraction_status",
+    "text_bytes",
+    "nonempty_characters",
+    "page_count",
+    "slide_count",
+    "ocr_page_count",
+    "ocr_candidate_count",
+    "embedded_image_count",
+    "quality_flags",
+    "index_status",
+    "redaction_policy",
+    "page_number",
+    "page_ref",
+    "slide_number",
+    "slide_ref",
+    "block_type",
+    "normalized_record_id",
+    "embedded_image_refs",
+    "canonical_drive_file_id",
+    "canonical_source_file_name",
+    "variant_group_id",
+    "duplicate_group_size",
+    "variant_drive_file_ids",
     "sheet_id",
     "sheet_name",
     "sheet_index",
@@ -123,6 +150,32 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "drive_path",
         "drive_mime_type",
         "drive_modified_time",
+        "drive_url",
+        "content_sha256",
+        "extraction_method",
+        "extraction_status",
+        "text_bytes",
+        "nonempty_characters",
+        "page_count",
+        "slide_count",
+        "ocr_page_count",
+        "ocr_candidate_count",
+        "embedded_image_count",
+        "quality_flags",
+        "index_status",
+        "redaction_policy",
+        "page_number",
+        "page_ref",
+        "slide_number",
+        "slide_ref",
+        "block_type",
+        "normalized_record_id",
+        "embedded_image_refs",
+        "canonical_drive_file_id",
+        "canonical_source_file_name",
+        "variant_group_id",
+        "duplicate_group_size",
+        "variant_drive_file_ids",
         "sheet_id",
         "sheet_name",
         "sheet_index",
@@ -160,6 +213,7 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "minecraft_wiki_cache_title",
         "minecraft_wiki_cache_file",
         "canonical_url",
+        "heading_path",
         "visibility",
         "access_scope",
         "checksum",
@@ -169,11 +223,31 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
             metadata[key] = value
         elif isinstance(value, bool):
             metadata[key] = value
-        elif key in {"minecraft_wiki_aliases", "sensitivity_findings"} and isinstance(value, list):
+        elif key in {
+            "minecraft_wiki_aliases",
+            "sensitivity_findings",
+            "quality_flags",
+            "embedded_image_refs",
+            "heading_path",
+            "variant_drive_file_ids",
+        } and isinstance(value, list):
             metadata[key] = value
         elif key in {"access_scope", "table_profile", "sensitivity"} and isinstance(value, dict):
             metadata[key] = value
-        elif key == "sheet_index" and isinstance(value, int):
+        elif key in {
+            "sheet_index",
+            "text_bytes",
+            "nonempty_characters",
+            "page_count",
+            "slide_count",
+            "ocr_page_count",
+            "ocr_candidate_count",
+            "embedded_image_count",
+            "page_number",
+            "slide_number",
+            "normalized_record_id",
+            "duplicate_group_size",
+        } and isinstance(value, int):
             metadata[key] = value
     return metadata
 
@@ -238,6 +312,11 @@ def _build_base_metadata(
         "access_scope": drive_metadata.get("access_scope", ""),
         "checksum": drive_metadata.get("checksum", ""),
     }
+    for key in _METADATA_KEYS:
+        if key in metadata:
+            continue
+        if key in drive_metadata:
+            metadata[key] = drive_metadata[key]
     metadata["source_date"] = infer_source_date(metadata=metadata)
     return metadata
 
@@ -567,6 +646,188 @@ def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) 
                 sidecar.name,
                 exc,
             )
+
+
+_DENIED_INDEX_STATUSES = {"deleted", "quarantined", "permission_lost"}
+
+
+def docs_chunk_dir(
+    *,
+    ingestion_data_dir: Path,
+    structured_data_dir: Path | None,
+    chunk_dir: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+    separators: Sequence[str],
+    stage: str,
+    skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
+) -> None:
+    ensure_dir(chunk_dir)
+    if not ingestion_data_dir.exists():
+        raise FileNotFoundError(
+            f"Ingestion source directory does not exist: {ingestion_data_dir}"
+        )
+
+    structured_files = (
+        sorted(structured_data_dir.glob("*.jsonl"), key=lambda path: str(path))
+        if structured_data_dir is not None and structured_data_dir.exists()
+        else []
+    )
+    markdown_files = sorted(ingestion_data_dir.rglob("*.md"), key=lambda path: str(path))
+    structured_drive_ids = {
+        drive_file_id
+        for path in structured_files
+        if (drive_file_id := _extract_drive_file_id(path.name))
+    }
+    fallback_markdown_files = [
+        path
+        for path in markdown_files
+        if (_extract_drive_file_id(path.name) or "") not in structured_drive_ids
+    ]
+    if not structured_files and not fallback_markdown_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=chunk_dir, expected_names=set())
+        logger.warning("No Docs files found under %s", ingestion_data_dir)
+        return
+
+    splitter = _build_splitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=separators,
+    )
+    expected_output_names: set[str] = set()
+
+    for path in structured_files:
+        out_path = chunk_dir / path.name
+        expected_output_names.add(out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="docs structured chunking",
+        ):
+            continue
+        from kumc_agent.infra.indexing.docs_normalizer import (
+            load_structured_doc_chunks,
+        )
+
+        output_chunks = _split_docs_chunks_for_stage(
+            chunks=load_structured_doc_chunks(path),
+            splitter=splitter,
+            stage=stage,
+        )
+        write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+        logger.info(
+            "Docs structured chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+    for path in fallback_markdown_files:
+        rel_path = path.relative_to(ingestion_data_dir)
+        safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
+        out_path = chunk_dir / f"{safe_rel}.jsonl"
+        expected_output_names.add(out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="docs markdown chunking",
+        ):
+            continue
+
+        text = path.read_text(encoding="utf-8")
+        drive_metadata = _load_drive_metadata(path)
+        base_metadata = _build_base_metadata(
+            source_file_name=path.name,
+            source_type="docs",
+            drive_metadata=drive_metadata,
+            fallback_drive_file_id=_extract_drive_file_id(path.name),
+        )
+        if _is_denied_index_status(base_metadata):
+            write_chunks(out_path, [])
+            _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+            logger.info("Skipped quarantined Docs raw file: %s", path.name)
+            continue
+
+        docs = splitter.split_text(text)
+        output_chunks: list[Chunk] = []
+        output_index = 0
+        for doc in docs:
+            doc_text = doc.strip()
+            if not doc_text:
+                continue
+            metadata = dict(base_metadata)
+            metadata["chunk_id"] = output_index
+            metadata = _with_stage(metadata, stage)
+            output_chunks.append(Chunk(text=doc_text, metadata=metadata))
+            output_index += 1
+        write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+        logger.info(
+            "Docs markdown chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=chunk_dir,
+            expected_names=expected_output_names,
+        )
+
+
+def _split_docs_chunks_for_stage(
+    *,
+    chunks: Sequence[Chunk],
+    splitter: RecursiveCharacterTextSplitter,
+    stage: str,
+) -> list[Chunk]:
+    output_chunks: list[Chunk] = []
+    output_index = 0
+    for chunk in chunks:
+        source_text = str(chunk.text or "").strip()
+        if not source_text:
+            continue
+        base_metadata = dict(chunk.metadata)
+        base_metadata.setdefault("source_type", "docs")
+        base_metadata.setdefault("source_date", SOURCE_DATE_UNKNOWN)
+        if _is_denied_index_status(base_metadata):
+            continue
+        base_metadata.pop("chunk_id", None)
+        if "normalized_record_id" in base_metadata:
+            base_metadata.setdefault(
+                "parent_normalized_record_id",
+                base_metadata.get("normalized_record_id"),
+            )
+        docs = splitter.split_text(source_text)
+        for doc in docs:
+            text = doc.strip()
+            if not text:
+                continue
+            metadata = dict(base_metadata)
+            metadata["chunk_id"] = output_index
+            metadata = _with_stage(metadata, stage)
+            output_chunks.append(Chunk(text=text, metadata=metadata))
+            output_index += 1
+    return output_chunks
+
+
+def _is_denied_index_status(metadata: dict[str, object]) -> bool:
+    index_status = str(metadata.get("index_status") or "active").strip().lower()
+    if index_status in _DENIED_INDEX_STATUSES:
+        return True
+    redaction_policy = str(metadata.get("redaction_policy") or "quote_allowed").strip().lower()
+    return redaction_policy == "deny"
 
 
 def sheets_chunk_dir(

@@ -31,6 +31,7 @@ from kumc_agent.config.schema import (
     FunctionCallSection,
     ImageSearchFeatureSection,
     InfrastructureSection,
+    IndexingDocsQualitySection,
     IndexingEmbeddingCacheSection,
     MemberSearchFeatureSection,
     RagGenerationProfileSection,
@@ -840,6 +841,9 @@ def _to_runtime_config(
     indexing_embedding_cache = indexing.get("embedding_cache", {})
     if not isinstance(indexing_embedding_cache, dict):
         indexing_embedding_cache = {}
+    indexing_docs_quality = indexing.get("docs_quality", {})
+    if not isinstance(indexing_docs_quality, dict):
+        indexing_docs_quality = {}
     indexing_sheets_quality = indexing.get("sheets_quality", {})
     if not isinstance(indexing_sheets_quality, dict):
         indexing_sheets_quality = {}
@@ -1825,6 +1829,23 @@ def _to_runtime_config(
                         "force_reembed_on_full_rebuild",
                         True,
                     )
+                ),
+            ),
+            docs_quality=IndexingDocsQualitySection(
+                enabled=bool(indexing_docs_quality.get("enabled", True)),
+                fail_fast=bool(indexing_docs_quality.get("fail_fast", False)),
+                min_text_bytes=int(indexing_docs_quality.get("min_text_bytes", 100)),
+                min_nonempty_characters=int(
+                    indexing_docs_quality.get("min_nonempty_characters", 200)
+                ),
+                max_short_document_ratio=float(
+                    indexing_docs_quality.get("max_short_document_ratio", 0.4)
+                ),
+                max_source_date_unknown_ratio=float(
+                    indexing_docs_quality.get("max_source_date_unknown_ratio", 0.2)
+                ),
+                quarantine_low_information=bool(
+                    indexing_docs_quality.get("quarantine_low_information", True)
                 ),
             ),
             sheets_quality=IndexingSheetsQualitySection(

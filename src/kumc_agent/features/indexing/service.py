@@ -112,6 +112,7 @@ class IndexingService:
         self._sparse_second_rec_dir = self._chunks_root / "sparse_second_rec_chunk"
         self._summary_dir = self._chunks_root / "summary_chunk"
         self._ingestion_docs_dir = self._ingestion_dir / "docs"
+        self._ingestion_docs_normalized_dir = self._ingestion_dir / "docs_normalized"
         self._ingestion_sheets_dir = self._ingestion_dir / "sheets"
         self._ingestion_sheets_structured_dir = self._ingestion_dir / "sheets_structured"
         self._ingestion_messages_dir = self._ingestion_dir / "messages"
@@ -251,9 +252,21 @@ class IndexingService:
             index_chunks = self._load_index_chunks_from_legacy_dirs(
                 legacy_cfg=legacy_cfg
             )
+        docs_quality_payload = self._docs_quality_payload(index_chunks=index_chunks)
         minecraft_wiki_quality_payload = self._minecraft_wiki_quality_payload(
             index_chunks=index_chunks
         )
+        if not bool(docs_quality_payload.get("can_continue", True)):
+            metadata = docs_quality_payload.get("metadata")
+            failures: list[str] = []
+            if isinstance(metadata, dict):
+                raw_failures = metadata.get("critical_failures")
+                if isinstance(raw_failures, list):
+                    failures = [str(item) for item in raw_failures]
+            raise RuntimeError(
+                "Docs quality gate failed: "
+                + (", ".join(failures) if failures else "unknown")
+            )
         from kumc_agent.usecases.indexing.sheets_quality import (
             build_sheets_quality_payload,
         )
@@ -327,6 +340,7 @@ class IndexingService:
                 else "raw_chunk_pipeline"
             )
         }
+        stage_results["docs_quality"] = docs_quality_payload
         if minecraft_wiki_quality_payload is not None:
             stage_results["minecraft_wiki_quality"] = minecraft_wiki_quality_payload
         stage_results["sheets_quality"] = sheets_quality_payload
@@ -656,6 +670,7 @@ class IndexingService:
     def _ensure_ingestion_source_dirs(self) -> None:
         for path in (
             self._ingestion_docs_dir,
+            self._ingestion_docs_normalized_dir,
             self._ingestion_sheets_dir,
             self._ingestion_sheets_structured_dir,
             self._ingestion_messages_dir,
@@ -842,6 +857,7 @@ class IndexingService:
         cancel_event: threading.Event | None,
     ) -> None:
         from kumc_agent.infra.indexing.chunking import (
+            docs_chunk_dir,
             message_chunk_jsonl_dir,
             recursive_chunk_dir,
             recursive_chunk_jsonl_dir,
@@ -881,13 +897,13 @@ class IndexingService:
                     update_existing=refresh.update_first_recursive_chunk_data,
                     sync_deleted=refresh.update_first_recursive_chunk_data,
                 )
-            recursive_chunk_dir(
+            docs_chunk_dir(
                 ingestion_data_dir=self._ingestion_docs_dir,
+                structured_data_dir=self._ingestion_docs_normalized_dir,
                 chunk_dir=self._first_rec_docs_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
                 separators=DOCS_SEPARATORS,
-                source_type="docs",
                 stage="first_recursive",
                 skip_existing=not refresh.clear_first_recursive_chunk_data,
                 update_existing=refresh.update_first_recursive_chunk_data,
@@ -1242,6 +1258,37 @@ class IndexingService:
                 sync_deleted=refresh.update_summary_chunk_data,
             )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+    def _docs_quality_payload(
+        self,
+        *,
+        index_chunks: list[Chunk],
+    ) -> dict[str, object]:
+        from kumc_agent.usecases.ingestion.google_drive_docs_audit import (
+            GoogleDriveDocsQualityThresholds,
+            build_google_drive_docs_quality_payload,
+        )
+
+        cfg = self._runtime.indexing.docs_quality
+        docs_chunk_count = sum(
+            1
+            for chunk in index_chunks
+            if str(chunk.metadata.get("source_type") or "").strip().lower() == "docs"
+        )
+        return build_google_drive_docs_quality_payload(
+            raw_dir=self._ingestion_docs_dir,
+            normalized_dir=self._ingestion_docs_normalized_dir,
+            image_dir=self._ingestion_dir / "images" / "google_drive",
+            chunk_count=docs_chunk_count,
+            thresholds=GoogleDriveDocsQualityThresholds(
+                enabled=cfg.enabled,
+                policy="fail" if cfg.fail_fast else "warn",
+                min_text_bytes=cfg.min_text_bytes,
+                min_nonempty_characters=cfg.min_nonempty_characters,
+                max_short_document_ratio=cfg.max_short_document_ratio,
+                max_source_date_unknown_ratio=cfg.max_source_date_unknown_ratio,
+            ),
+        )
 
     def _minecraft_wiki_quality_payload(
         self,
@@ -2778,6 +2825,7 @@ class IndexingService:
     def _clear_ingestion_source_contents(self) -> None:
         for path in (
             self._ingestion_docs_dir,
+            self._ingestion_docs_normalized_dir,
             self._ingestion_sheets_dir,
             self._ingestion_sheets_structured_dir,
             self._ingestion_messages_dir,
