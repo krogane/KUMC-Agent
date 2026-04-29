@@ -394,6 +394,10 @@ class AutoIndexUpdateUsecase:
                 "current_pointer": str(publish.current_pointer),
                 "previous_pointer": str(publish.previous_pointer),
             }
+            self._compact_embedding_cache_after_publish(
+                build_result=build_result,
+                metadata=metadata,
+            )
             self._run_event_delta_extraction(
                 run_id=run_id,
                 ingestion_results=ingestion_results,
@@ -469,6 +473,39 @@ class AutoIndexUpdateUsecase:
             )
             for guild_id in self._member_profile_guild_ids
         )
+
+    def _compact_embedding_cache_after_publish(
+        self,
+        *,
+        build_result: Any,
+        metadata: dict[str, Any],
+    ) -> None:
+        cache_config = getattr(getattr(self._config, "indexing", None), "embedding_cache", None)
+        if not bool(getattr(cache_config, "compact_after_publish", False)):
+            return
+        active_keys = tuple(getattr(build_result, "embedding_cache_keys", tuple()) or tuple())
+        stage_results = metadata.setdefault("stage_results", {})
+        if not isinstance(stage_results, dict):
+            return
+        embedding_stage = stage_results.setdefault("embedding", {})
+        if not isinstance(embedding_stage, dict):
+            embedding_stage = {}
+            stage_results["embedding"] = embedding_stage
+        compact = getattr(self._build_usecase, "compact_embedding_cache", None)
+        if not callable(compact):
+            embedding_stage["cache_compaction"] = {
+                "status": "skipped",
+                "reason": "not_supported",
+            }
+            return
+        try:
+            embedding_stage["cache_compaction"] = compact(active_keys)
+        except Exception as exc:
+            embedding_stage["cache_compaction"] = {
+                "status": "failed",
+                "degraded": True,
+                "error": str(exc)[:500],
+            }
 
     def _run_event_delta_extraction(
         self,

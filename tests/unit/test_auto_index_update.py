@@ -69,6 +69,31 @@ class _Build:
         return SimpleNamespace(loaded_sources=0, documents=1, chunks=1, index_dir=index_dir)
 
 
+class _BuildWithEmbeddingCache(_Build):
+    def __init__(self) -> None:
+        self.compacted: list[tuple[object, ...]] = []
+
+    def execute(self, request):
+        result = super().execute(request)
+        result.stage_results = {
+            "embedding": {
+                "enabled": True,
+                "embedded_chunks": 1,
+                "reused_chunks": 0,
+            }
+        }
+        result.embedding_cache_keys = ("cache-key-1",)
+        return result
+
+    def compact_embedding_cache(self, active_keys):
+        keys = tuple(active_keys)
+        self.compacted.append(keys)
+        return {
+            "status": "succeeded",
+            "kept_records": len(keys),
+        }
+
+
 class _Ingestion:
     def __init__(self, result: IngestionResult) -> None:
         self.result = result
@@ -171,6 +196,9 @@ def _config(root: Path):
             rollback_keep_snapshots=2,
         ),
         event_management=SimpleNamespace(auto_extract_after_index_update=True),
+        indexing=SimpleNamespace(
+            embedding_cache=SimpleNamespace(compact_after_publish=True),
+        ),
     )
 
 
@@ -234,9 +262,10 @@ class AutoIndexUpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))
             operations = _Operations()
+            build = _BuildWithEmbeddingCache()
             result = AutoIndexUpdateUsecase(
                 config=config,
-                build_usecase=_Build(),
+                build_usecase=build,
                 operations=operations,
                 ingestion_service=_Ingestion(
                     IngestionResult(
@@ -254,6 +283,13 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertEqual(result.status, "succeeded")
             self.assertTrue((config.app.index_dir / "dense_chunks.jsonl").exists())
             self.assertEqual(operations.runs[-1].metadata["source_results"][0]["changed"], 1)
+            self.assertEqual(build.compacted, [("cache-key-1",)])
+            self.assertEqual(
+                operations.runs[-1].metadata["stage_results"]["embedding"][
+                    "cache_compaction"
+                ]["status"],
+                "succeeded",
+            )
 
     def test_auto_update_extracts_events_from_ingestion_delta(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

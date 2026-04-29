@@ -481,10 +481,18 @@ class IndexingRefreshSection:
 
 
 @dataclass(frozen=True)
+class IndexingEmbeddingCacheSection:
+    enabled: bool
+    compact_after_publish: bool
+    force_reembed_on_full_rebuild: bool
+
+
+@dataclass(frozen=True)
 class IndexingSection:
     chunking: IndexingChunkingSection
     stages: IndexingStagesSection
     refresh: IndexingRefreshSection
+    embedding_cache: IndexingEmbeddingCacheSection
 
 
 @dataclass(frozen=True)

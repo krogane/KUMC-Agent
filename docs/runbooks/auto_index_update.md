@@ -37,10 +37,24 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli automation --action dry_ru
 自動更新は `data/index/staging/{run_id}` に index を作成し、quality smoke check 後に `data/index` 直下へ公開する。
 互換性のため検索側は従来通り `data/index` を読む。公開情報は `data/index/current.json` と `data/index/previous.json` に保存する。
 
+Dense embedding は通常更新では差分cacheを使う。cache本体は `data/cache/index_embeddings/` にあり、公開indexには含めない。公開snapshotには `dense_embedding_manifest.jsonl` が含まれ、chunkごとの embedding text hash、provider、model、dimensions、source参照を確認できる。
+
+`IndexingRun.metadata.stage_results.embedding` で次を確認する。
+
+- `embedded_chunks`: 今回実際に `embed_documents()` に渡したchunk数
+- `reused_chunks`: cacheからvectorを再利用したchunk数
+- `cache_misses`: cacheがなく再埋め込みしたchunk数
+- `cache_invalid`: 壊れたcache行や次元不一致で無視したrecord数
+- `cache_compaction`: publish成功後のcache compact結果
+
+`--full-rebuild` / admin `reindex` は既定でcacheをbypassし、全chunkを再埋め込みする。通常の `index update` でcacheを使いたくない場合は `configs/main/indexing.yaml` の `indexing.embedding_cache.enabled` を `false` にする。
+
 ## 障害時
 
 lock 取得不可の場合、run は `status=skipped` になり、理由は `metadata.reason=lock_already_held` に残る。
 品質確認失敗時は公開せず `status=failed` とし、`metadata.quality_check.critical_failures` と `metadata.notification` を確認する。
+
+embedding cacheが壊れている場合、壊れたrecordは無視され、対象chunkは再埋め込みされる。`cache_invalid` が増え続ける場合は `data/cache/index_embeddings/` を退避または削除して次回runで再作成する。cacheは最適化用であり、削除しても公開済みindex artifactは維持される。
 
 直前 snapshot へ戻す必要がある場合は、`data/index/previous/<snapshot_id>` の内容を `data/index` 直下へ戻す。
 `current.json`、`previous.json`、`staging/`、`previous/` は削除せず、復元対象の index artifact だけを戻す。

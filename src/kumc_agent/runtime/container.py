@@ -45,6 +45,7 @@ from kumc_agent.features.member_search.service import (
     MemberProfileIndexService,
 )
 from kumc_agent.features.indexing.service import IndexingService
+from kumc_agent.features.indexing.embedding_cache import FileIndexEmbeddingCache
 from kumc_agent.features.indexing.task_event import TaskEventIndexBuildService
 from kumc_agent.features.ingestion.chunking import ChunkingSettings, IngestionChunker
 from kumc_agent.features.ingestion.service import IngestionService
@@ -437,6 +438,11 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         if config.features.image_search.enabled
         else None
     )
+    index_embedding_cache = (
+        FileIndexEmbeddingCache(cache_dir=config.app.cache_dir / "index_embeddings")
+        if config.indexing.embedding_cache.enabled
+        else None
+    )
 
     indexing_service = IndexingService(
         storage=storage,
@@ -449,6 +455,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         minecraft_wiki_summary_llm=minecraft_wiki_summary_chunk_llm,
         image_asset_builder=image_asset_builder,
         ingestion_repository=ingestion_repository,
+        embedding_cache=index_embedding_cache,
     )
 
     ingestion_service = IngestionService(

@@ -427,6 +427,11 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.indexing.chunking.summary_temperature, 0.1)
             self.assertEqual(config.indexing.chunking.summary_max_output_tokens, 96)
             self.assertEqual(config.indexing.chunking.summary_thinking_level, "minimal")
+            self.assertTrue(config.indexing.embedding_cache.enabled)
+            self.assertTrue(config.indexing.embedding_cache.compact_after_publish)
+            self.assertTrue(
+                config.indexing.embedding_cache.force_reembed_on_full_rebuild
+            )
             self.assertEqual(config.ops.ragas_answer_generation_batch_size, 8)
             self.assertEqual(config.ops.ragas_batch_size, 4)
             self.assertEqual(config.ops.ragas_max_workers, 6)

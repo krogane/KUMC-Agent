@@ -31,6 +31,7 @@ from kumc_agent.config.schema import (
     FunctionCallSection,
     ImageSearchFeatureSection,
     InfrastructureSection,
+    IndexingEmbeddingCacheSection,
     MemberSearchFeatureSection,
     RagGenerationProfileSection,
     RagGenerationSection,
@@ -835,6 +836,9 @@ def _to_runtime_config(
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
+    indexing_embedding_cache = indexing.get("embedding_cache", {})
+    if not isinstance(indexing_embedding_cache, dict):
+        indexing_embedding_cache = {}
     ops_ragas_metrics = ops.get("ragas_metrics", {})
     database = infrastructure.get("database", {})
     redis = infrastructure.get("redis", {})
@@ -1802,6 +1806,21 @@ def _to_runtime_config(
                 ),
                 update_summary_chunk_data=bool(
                     indexing_refresh.get("update_summary_chunk_data", True)
+                ),
+            ),
+            embedding_cache=IndexingEmbeddingCacheSection(
+                enabled=bool(indexing_embedding_cache.get("enabled", True)),
+                compact_after_publish=bool(
+                    indexing_embedding_cache.get(
+                        "compact_after_publish",
+                        True,
+                    )
+                ),
+                force_reembed_on_full_rebuild=bool(
+                    indexing_embedding_cache.get(
+                        "force_reembed_on_full_rebuild",
+                        True,
+                    )
                 ),
             ),
         ),

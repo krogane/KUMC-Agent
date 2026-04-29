@@ -218,7 +218,13 @@ sourceごとのcursorは `sync_cursors` に保存する。cursorを持つsource�
 ### 9.3 embedding / sparse index
 Dense indexは第2 Recursive ChunkとSummary Chunkを対象に構築する。Sparse indexは通常BM25とステミング転置インデックスを作る。
 
-現行の `FaissLikeIndex.build()` と `SudachiBM25Retriever.build()` は全体上書きであるため、実装初期は「差分で処理対象を絞りつつ、公開indexは全体再構築」でよい。将来的にvector storeが差分upsert/deleteを提供する場合はsource item単位の部分更新へ移行する。
+通常更新では、最終的にDense indexへ入る `index_chunks` 単位で `chunk_id`、embedding text hash、provider、model、dimensionsを照合し、未変更chunkのembedding vectorを `data/cache/index_embeddings/` から再利用する。新規・本文変更・model変更・dimensions変更・cache欠損のchunkだけを `embed_documents()` に渡す。
+
+`--full-rebuild` / admin `reindex` では既定でcacheをbypassし、全chunkを再埋め込みする。ACLのみの変更でembedding textが変わらない場合はvectorを再利用し、`dense_chunks.jsonl` のmetadataだけを更新する。
+
+`FaissLikeIndex.build()` と `SudachiBM25Retriever.build()` は引き続き全体上書きであるため、公開artifactの `dense_vectors.npy`、`dense_vectors.faiss`、`dense_chunks.jsonl`、`bm25_tokens.json`、`bm25_chunks.jsonl` は毎run完全な状態でstagingに生成する。差分化するのはembedding計算であり、検索runtimeが読むartifact形式は変更しない。
+
+staging/publishされる `dense_embedding_manifest.jsonl` には、chunkごとの `embedding_text_hash`、provider、model、dimensions、source参照、metadata hashを保存する。本文そのものはcacheにもmanifestにも保存しない。
 
 ### 9.4 atomic publish
 更新中の成果物は `data/index/staging/{run_id}` に作成し、品質確認に通った後で `data/index` rootへpublishする。既存検索runtimeは `data/index` 直下の成果物を読むため、publish時に直前成果物を `data/index/previous/{snapshot_id}` へ退避し、`current.json` と `previous.json` にsnapshot情報を保存する。

@@ -136,18 +136,6 @@ chunk化側で `source_date` は推定されるが、raw sidecar自体には `so
 - 数式セルでキャッシュ値がない場合、実データが空になる可能性がある。
 - 見た目上の表意味とCSV化後のテキストが一致しない可能性がある。
 
-### 4.6 秘匿性の高い列がそのままindex対象になる可能性がある
-
-調査対象にはフォーム回答、機材管理、運営用メモなど、個人識別子・連絡情報・認証情報・内部運用情報になり得る列を含む表がある。
-
-`data/*` は `.gitignore` 対象なのでリポジトリ公開リスクは抑えられているが、index化・CLI出力・外部連携payloadでは別問題である。現状のSheets pipelineには、列単位の分類、redaction、index除外、metadataへの秘匿判定がない。
-
-影響:
-
-- RAG回答やcitationに秘匿列が出る可能性がある。
-- operatorが「Driveで閲覧できるからindexしてよい」と誤解しやすい。
-- ACLとは別に、列単位・表単位の公開可否を判断できない。
-
 ## 5. 改善方針
 
 ### 方針A: raw CSVを残しつつ、検索用の正規化成果物を追加する
@@ -201,17 +189,6 @@ Row {row_number}:
 ```
 
 表形式がスケジュールグリッドの場合は、行見出し・列見出しを推定して `time_slot`、`date_or_column_label`、`value` のような構造に寄せる。
-
-### 方針D: 秘匿列の扱いを明示する
-
-列名・シート名・Drive pathから、少なくとも次を判定する。
-
-- `public_indexable`
-- `internal_indexable`
-- `masked`
-- `excluded`
-
-秘匿性が高い列は、rawには残しても検索用成果物から除外またはmaskする。診断情報はpayloadトップレベルに出さず、既存方針どおり `metadata` 配下に置く。
 
 ## 6. 実装計画
 
@@ -327,43 +304,6 @@ CSV文字列の汎用recursive splitではなく、表単位・行単位の意�
 - 既存docs/messages/x_posts等のchunk化には影響しない。
 - 現行CSV fallbackも残る。
 
-### Phase 5: 秘匿列mask / 除外を導入する
-
-目的:
-
-Sheets由来の個人情報・認証情報・内部運用情報を、そのまま検索回答に出さない。
-
-追加候補:
-
-- `configs/main/ingestion.yaml`
-- `src/kumc_agent/infra/indexing/sheets_sensitivity.py`
-- `tests/unit/test_sheets_sensitivity.py`
-
-設定案:
-
-```yaml
-sheets:
-  sensitivity:
-    excluded_column_patterns:
-      - "(?i)password|pass|token|secret|api[_ -]?key"
-    masked_column_patterns:
-      - "メール|mail|連絡先|discord|mcid"
-    excluded_path_patterns: []
-```
-
-実装内容:
-
-- 列名・sheet名・Drive pathでmask / excludeを判定する。
-- 判定結果はchunk `metadata.sensitivity` に保存する。
-- mask対象値は検索用textから置換する。
-- exclude対象列は検索用textに入れない。
-
-完了条件:
-
-- 高リスク列が検索用chunk本文に残らない。
-- 判定理由は `metadata` 配下に残る。
-- CLI / 外部payloadのトップレベルに診断情報を増やさない。
-
 ### Phase 6: 品質ゲートと運用レポートを追加する
 
 目的:
@@ -404,7 +344,6 @@ PYTHONPATH=src app/.venv/bin/python -m unittest \
   tests.unit.test_google_drive_sheets_profile \
   tests.unit.test_google_drive_sheets_loading \
   tests.unit.test_sheets_normalizer \
-  tests.unit.test_sheets_sensitivity
 ```
 
 既存回帰:
@@ -421,13 +360,11 @@ PYTHONPATH=src app/.venv/bin/python -m unittest \
 - Google Sheets複数タブがタブ単位metadata付きで保存される。
 - Excel複数worksheetの `# sheet:` 情報が構造化metadataへ移る。
 - 空行・空列が検索用成果物から除外される。
-- 秘匿列の値が検索用textに残らない。
 - 既存CSV fallbackが維持される。
 
 ## 8. 優先順位
 
 1. Phase 1: profiler追加
-2. Phase 5: 秘匿列mask / 除外
 3. Phase 2: Google Sheetsタブ単位取得
 4. Phase 3: 正規化器追加
 5. Phase 4: Sheets専用chunk化
@@ -436,14 +373,12 @@ PYTHONPATH=src app/.venv/bin/python -m unittest \
 理由:
 
 - まずprofileで現状を継続監視できるようにする。
-- 次に秘匿列リスクを下げる。
 - その後、取得粒度とchunk化品質を改善する。
 
 ## 9. 完了定義
 
 - `data/raw/sheets` の取得結果を、ファイル単位だけでなくタブ・表・行範囲単位で追跡できる。
-- Sheets由来chunkのmetadataに、少なくとも `drive_file_id`、`drive_file_path`、`sheet_name`、`row_range`、`column_range`、`sensitivity` が入る。
+- Sheets由来chunkのmetadataに、少なくとも `drive_file_id`、`drive_file_path`、`sheet_name`、`row_range`、`column_range` が入る。
 - 空行・空列ノイズが検索用textから除去される。
-- 秘匿列がmaskまたは除外される。
 - `index update` のmetadataにSheets品質サマリが入り、運用者が問題を確認できる。
 - 既存のCSV保存形式と既存Drive取得フローは、移行期間中も壊さない。

@@ -25,6 +25,10 @@ indexing:
     update_second_recursive_chunk_data: true
     update_sparse_second_recursive_chunk_data: true
     update_summary_chunk_data: true
+  embedding_cache:
+    enabled: true
+    compact_after_publish: true
+    force_reembed_on_full_rebuild: true
 
 minecraft_wiki_rag:
   chunking:

@@ -10,11 +10,18 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 from kumc_agent.config.schema import RuntimeConfig
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.document import Document
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.domain.ports.llms import LLMPort
+from kumc_agent.features.indexing.embedding_cache import (
+    IndexEmbeddingCache,
+    IndexEmbeddingCacheKey,
+    IndexEmbeddingRecord,
+)
 from kumc_agent.infra.ingestion.repository import IngestionRepository
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
@@ -35,6 +42,17 @@ _MATERIAL_NAME_INDEX_EXCLUDED_SOURCE_TYPES = frozenset(
 logger = logging.getLogger(__name__)
 
 
+def _stable_json_hash(value: object) -> str:
+    return stable_hash(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class IndexBuildResult:
     loaded_sources: int
@@ -42,6 +60,7 @@ class IndexBuildResult:
     chunks: int
     index_dir: Path
     stage_results: dict[str, object] | None = None
+    embedding_cache_keys: tuple[IndexEmbeddingCacheKey, ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -51,6 +70,13 @@ class _RepositoryIndexArtifacts:
     sparse_chunks: list[Chunk]
     summary_chunks: list[Chunk]
     index_chunks: list[Chunk]
+
+
+@dataclass(frozen=True)
+class _DenseEmbeddingBuildResult:
+    matrix: np.ndarray
+    metadata: dict[str, object]
+    cache_keys: tuple[IndexEmbeddingCacheKey, ...] = tuple()
 
 
 class IndexingService:
@@ -67,6 +93,7 @@ class IndexingService:
         minecraft_wiki_summary_llm: LLMPort | None = None,
         image_asset_builder: object | None = None,
         ingestion_repository: IngestionRepository | None = None,
+        embedding_cache: IndexEmbeddingCache | None = None,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
@@ -78,6 +105,7 @@ class IndexingService:
         self._minecraft_wiki_summary_llm = minecraft_wiki_summary_llm
         self._image_asset_builder = image_asset_builder
         self._ingestion_repository = ingestion_repository
+        self._embedding_cache = embedding_cache
         self._chunks_root = self._runtime.app.data_dir / "chunks"
         self._first_rec_dir = self._chunks_root / "first_rec_chunk"
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
@@ -241,9 +269,11 @@ class IndexingService:
             )
         self._storage.save_chunks(index_chunks)
 
-        dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
-        embeddings = self._embedder.embed_documents(dense_texts)
-        self._faiss_index.build(chunks=index_chunks, embeddings=embeddings)
+        dense_embeddings = self._embed_index_chunks(
+            index_chunks=index_chunks,
+            full_rebuild=full_rebuild,
+        )
+        self._faiss_index.build(chunks=index_chunks, embeddings=dense_embeddings.matrix)
         self._bm25_index.build(index_chunks)
 
         if repository_artifacts is not None:
@@ -275,6 +305,7 @@ class IndexingService:
         }
         if minecraft_wiki_quality_payload is not None:
             stage_results["minecraft_wiki_quality"] = minecraft_wiki_quality_payload
+        stage_results["embedding"] = dense_embeddings.metadata
         if self._image_asset_builder is not None:
             build_from_ingestion_sources = getattr(
                 self._image_asset_builder,
@@ -291,7 +322,18 @@ class IndexingService:
             chunks=len(index_chunks),
             index_dir=self._faiss_index._index_dir,  # noqa: SLF001
             stage_results=stage_results,
+            embedding_cache_keys=dense_embeddings.cache_keys,
         )
+
+    def compact_embedding_cache(
+        self,
+        active_keys: tuple[IndexEmbeddingCacheKey, ...],
+    ) -> dict[str, object]:
+        if self._embedding_cache is None:
+            return {"status": "skipped", "reason": "cache_not_configured"}
+        if not self._embedding_cache_enabled():
+            return {"status": "skipped", "reason": "cache_disabled"}
+        return self._embedding_cache.compact(active_keys)
 
     def update(
         self,
@@ -313,6 +355,220 @@ class IndexingService:
             index_dir=index_dir,
             prefer_ingestion_repository=prefer_ingestion_repository,
         )
+
+    def _embed_index_chunks(
+        self,
+        *,
+        index_chunks: list[Chunk],
+        full_rebuild: bool,
+    ) -> _DenseEmbeddingBuildResult:
+        embedding_section = getattr(getattr(self._runtime, "providers", None), "embeddings", None)
+        provider = str(getattr(embedding_section, "provider", "unknown") or "unknown")
+        model = str(getattr(embedding_section, "model", "unknown") or "unknown")
+        configured_dimensions = int(getattr(embedding_section, "dimensions", 0) or 0)
+        dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
+        text_hashes = [stable_hash(text) for text in dense_texts]
+        cache_enabled = (
+            self._embedding_cache is not None
+            and self._embedding_cache_enabled()
+            and configured_dimensions > 0
+        )
+        force_reembed = bool(
+            full_rebuild and self._embedding_cache_force_reembed_on_full_rebuild()
+        )
+        if not cache_enabled:
+            matrix = self._embed_texts(
+                dense_texts,
+                expected_rows=len(index_chunks),
+                expected_dimensions=None,
+            )
+            dimensions = int(matrix.shape[1]) if matrix.ndim == 2 else configured_dimensions
+            manifest_path = self._write_dense_embedding_manifest(
+                chunks=index_chunks,
+                text_hashes=text_hashes,
+                provider=provider,
+                model=model,
+                dimensions=dimensions,
+            )
+            return _DenseEmbeddingBuildResult(
+                matrix=matrix,
+                metadata={
+                    "enabled": False,
+                    "reason": (
+                        "cache_disabled"
+                        if self._embedding_cache is not None
+                        else "cache_not_configured"
+                    ),
+                    "total_chunks": len(index_chunks),
+                    "embedded_chunks": len(index_chunks),
+                    "reused_chunks": 0,
+                    "cache_misses": len(index_chunks),
+                    "cache_invalid": 0,
+                    "provider": provider,
+                    "model": model,
+                    "dimensions": dimensions,
+                    "manifest_path": str(manifest_path),
+                },
+            )
+
+        assert self._embedding_cache is not None
+        cached = self._embedding_cache.load(
+            provider=provider,
+            model=model,
+            dimensions=configured_dimensions,
+        )
+        matrix_rows: list[np.ndarray | None] = [None] * len(index_chunks)
+        cache_keys: list[IndexEmbeddingCacheKey] = []
+        missing_indices: list[int] = []
+        cache_misses = 0
+        reused_chunks = 0
+        for index, (chunk, text_hash) in enumerate(zip(index_chunks, text_hashes)):
+            key = IndexEmbeddingCacheKey(
+                provider=provider,
+                model=model,
+                dimensions=configured_dimensions,
+                chunk_id=chunk.id,
+                embedding_text_hash=text_hash,
+            )
+            cache_keys.append(key)
+            record = cached.records.get(key)
+            if record is not None and not force_reembed:
+                matrix_rows[index] = np.asarray(record.vector, dtype=np.float32)
+                reused_chunks += 1
+                continue
+            if record is None:
+                cache_misses += 1
+            missing_indices.append(index)
+
+        records_to_save: list[IndexEmbeddingRecord] = []
+        if missing_indices:
+            new_vectors = self._embed_texts(
+                [dense_texts[index] for index in missing_indices],
+                expected_rows=len(missing_indices),
+                expected_dimensions=configured_dimensions,
+            )
+            for row_index, chunk_index in enumerate(missing_indices):
+                vector = new_vectors[row_index]
+                matrix_rows[chunk_index] = vector
+                chunk = index_chunks[chunk_index]
+                records_to_save.append(
+                    IndexEmbeddingRecord(
+                        provider=provider,
+                        model=model,
+                        dimensions=configured_dimensions,
+                        chunk_id=chunk.id,
+                        embedding_text_hash=text_hashes[chunk_index],
+                        vector=vector,
+                        chunk_metadata_hash=_stable_json_hash(chunk.metadata),
+                        source_kind=str(
+                            chunk.metadata.get("source_kind")
+                            or chunk.metadata.get("source_type")
+                            or ""
+                        ),
+                        source_item_id=str(chunk.metadata.get("source_item_id") or ""),
+                    )
+                )
+        if records_to_save:
+            self._embedding_cache.save(records_to_save)
+
+        if matrix_rows:
+            missing_rows = [index for index, row in enumerate(matrix_rows) if row is None]
+            if missing_rows:
+                raise ValueError(f"missing embedding rows: {missing_rows[:5]}")
+            matrix = np.vstack([np.asarray(row, dtype=np.float32) for row in matrix_rows if row is not None])
+        else:
+            matrix = np.empty((0, configured_dimensions), dtype=np.float32)
+        manifest_path = self._write_dense_embedding_manifest(
+            chunks=index_chunks,
+            text_hashes=text_hashes,
+            provider=provider,
+            model=model,
+            dimensions=configured_dimensions,
+        )
+        return _DenseEmbeddingBuildResult(
+            matrix=matrix,
+            metadata={
+                "enabled": True,
+                "total_chunks": len(index_chunks),
+                "embedded_chunks": len(missing_indices),
+                "reused_chunks": reused_chunks,
+                "cache_misses": cache_misses,
+                "cache_invalid": cached.invalid_records,
+                "forced_reembed_chunks": len(missing_indices) if force_reembed else 0,
+                "force_reembed": force_reembed,
+                "provider": provider,
+                "model": model,
+                "dimensions": configured_dimensions,
+                "manifest_path": str(manifest_path),
+            },
+            cache_keys=tuple(cache_keys),
+        )
+
+    def _embed_texts(
+        self,
+        texts: list[str],
+        *,
+        expected_rows: int,
+        expected_dimensions: int | None,
+    ) -> np.ndarray:
+        if not texts:
+            dimensions = max(0, int(expected_dimensions or 0))
+            return np.empty((0, dimensions), dtype=np.float32)
+        matrix = np.asarray(self._embedder.embed_documents(texts), dtype=np.float32)
+        if matrix.ndim == 1 and expected_rows == 1:
+            matrix = matrix.reshape(1, -1)
+        if matrix.ndim != 2:
+            raise ValueError("embedding result must be 2D")
+        if int(matrix.shape[0]) != int(expected_rows):
+            raise ValueError("embedding row count mismatch")
+        if expected_dimensions and int(matrix.shape[1]) != int(expected_dimensions):
+            raise ValueError("embedding dimension mismatch")
+        return matrix
+
+    def _write_dense_embedding_manifest(
+        self,
+        *,
+        chunks: list[Chunk],
+        text_hashes: list[str],
+        provider: str,
+        model: str,
+        dimensions: int,
+    ) -> Path:
+        path = self._runtime.app.index_dir / "dense_embedding_manifest.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fw:
+            for chunk, text_hash in zip(chunks, text_hashes):
+                metadata = dict(chunk.metadata or {})
+                fw.write(
+                    json.dumps(
+                        {
+                            "chunk_id": chunk.id,
+                            "embedding_text_hash": text_hash,
+                            "provider": provider,
+                            "model": model,
+                            "dimensions": int(dimensions),
+                            "chunk_metadata_hash": _stable_json_hash(metadata),
+                            "source_kind": str(
+                                metadata.get("source_kind")
+                                or metadata.get("source_type")
+                                or ""
+                            ),
+                            "source_item_id": str(metadata.get("source_item_id") or ""),
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                    + "\n"
+                )
+        return path
+
+    def _embedding_cache_enabled(self) -> bool:
+        cache_config = getattr(getattr(self._runtime, "indexing", None), "embedding_cache", None)
+        return bool(getattr(cache_config, "enabled", False))
+
+    def _embedding_cache_force_reembed_on_full_rebuild(self) -> bool:
+        cache_config = getattr(getattr(self._runtime, "indexing", None), "embedding_cache", None)
+        return bool(getattr(cache_config, "force_reembed_on_full_rebuild", True))
 
     def _build_with_index_dir(
         self,

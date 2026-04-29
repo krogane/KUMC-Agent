@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from kumc_agent.domain.models.source import BackfillScope
+from kumc_agent.features.indexing.embedding_cache import IndexEmbeddingCacheKey
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.loaders.crafters_colony import CraftersColonyLoader
 from kumc_agent.infra.loaders.discord import DiscordLoader
@@ -73,6 +74,12 @@ class BuildIndexUsecase:
             index_dir=request.index_dir,
             prefer_ingestion_repository=request.prefer_ingestion_repository,
         )
+
+    def compact_embedding_cache(
+        self,
+        active_keys: tuple[IndexEmbeddingCacheKey, ...],
+    ) -> dict[str, object]:
+        return self._indexing_service.compact_embedding_cache(active_keys)
 
     def _refresh_minecraft_wiki_source(self, *, force: bool) -> int:
         if self._ingestion_service is None:
