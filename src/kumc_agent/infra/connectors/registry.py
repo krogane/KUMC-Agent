@@ -149,5 +149,12 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             full_backfill_enabled=(
                 config.integrations.minecraft_wiki.full_backfill_enabled
             ),
+            acquisition_mode=config.integrations.minecraft_wiki.acquisition_mode,
+            category_sample_categories=dict(
+                config.integrations.minecraft_wiki.category_sample.categories
+            ),
+            category_sample_per_category=(
+                config.integrations.minecraft_wiki.category_sample.per_category_limit
+            ),
         )
     return connectors

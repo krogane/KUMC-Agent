@@ -162,13 +162,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest backfill --source m
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest backfill --limit 20
 ```
 
-検索インデックスを作ります。
-
-```bash
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index build
-```
-
-差分更新します。
+検索インデックスを更新します。
 
 ```bash
 PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index update

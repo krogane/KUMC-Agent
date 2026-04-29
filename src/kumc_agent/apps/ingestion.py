@@ -15,6 +15,7 @@ from kumc_agent.infra.secret_finding import SecretFindingDetector
 @dataclass(frozen=True)
 class IngestionAppContext:
     service: IngestionService
+    config: object
 
 
 def build_ingestion_app_context(*, base_dir: Path | None = None) -> IngestionAppContext:
@@ -41,4 +42,4 @@ def build_ingestion_app_context(*, base_dir: Path | None = None) -> IngestionApp
         secret_detector=SecretFindingDetector(),
         audit_log=foundation.audit_log,
     )
-    return IngestionAppContext(service=service)
+    return IngestionAppContext(service=service, config=foundation.config)

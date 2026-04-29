@@ -582,6 +582,23 @@ class IntegrationNotionSection:
 
 
 @dataclass(frozen=True)
+class MinecraftWikiCategorySampleSection:
+    per_category_limit: int
+    categories: dict[str, str]
+
+
+@dataclass(frozen=True)
+class MinecraftWikiQualityGateSection:
+    enabled: bool
+    min_article_characters: int
+    max_redirect_ratio: float
+    min_indexable_pages: int
+    min_chunk_count: int
+    required_canonical_host: str
+    policy: str
+
+
+@dataclass(frozen=True)
 class IntegrationMinecraftWikiSection:
     page_titles: list[str]
     api_url: str
@@ -591,6 +608,9 @@ class IntegrationMinecraftWikiSection:
     request_interval_seconds: float
     namespaces: list[int]
     full_backfill_enabled: bool
+    acquisition_mode: str
+    category_sample: MinecraftWikiCategorySampleSection
+    quality_gate: MinecraftWikiQualityGateSection
 
 
 @dataclass(frozen=True)

@@ -69,9 +69,9 @@ Minecraft Wiki RAGの正式入口は、サークル情報RAGと同じく `ChatAn
 ### 4.1 取得元
 取得元は日本語版Minecraft Wikiのみである。英語版、その他言語版、外部攻略サイトは取得対象にしない。
 
-現行実装では `MinecraftWikiConnector` がMediaWiki APIの `action=parse` を使用し、`wikitext`、`revid`、`displaytitle` を取得する。設定上は `integrations.minecraft_wiki.api_url` を日本語版Minecraft WikiのAPI URLに向け、`page_url_base` も日本語版記事URLにする。
+現行実装では `MinecraftWikiConnector` がMediaWiki APIの `action=parse` を使用し、`wikitext`、`revid`、`displaytitle` を取得する。`redirects=1` と本文先頭の `#転送` / `#REDIRECT` 検出を併用し、aliasページを取得した場合も転送先の実体記事本文をRawとして保存する。設定上は `integrations.minecraft_wiki.api_url` を日本語版Minecraft WikiのAPI URLに向け、`page_url_base` も日本語版記事URLにする。
 
-設計上は日本語版Minecraft Wiki内の全記事を対象にする。現行設定の `integrations.minecraft_wiki.page_titles` と `max_pages` は、開発・検証・段階移行向けの取得範囲制限として扱う。全記事取得では、MediaWiki APIのカテゴリ・全ページ一覧・名前空間指定を使って対象ページタイトルを列挙する。
+取得対象は `integrations.minecraft_wiki.acquisition_mode` で切り替える。`configured` は `page_titles` または `KUMC_MINECRAFT_WIKI_PAGES` の明示タイトル、`category_sample` は主要カテゴリから均等サンプル、`full_backfill` 相当は `full_backfill_enabled=true` のときだけ全ページ一覧を使う。`max_pages` はどのモードでも最終的な安全弁として扱う。
 
 ### 4.2 速度制限
 取得時は指定の取得速度制限を設ける。
@@ -88,8 +88,9 @@ Raw記事は `data/ingestion/minecraft_wiki` 配下にMarkdownまたはWiki Mark
 | --- | --- |
 | `{safe_title}.md` | 記事本文 |
 | `{safe_title}.md.meta.json` | ページID、revision id、canonical URLなど |
+| `manifest.json` | requested title、resolved title、page id、保存ファイルの対応 |
 
-保存時のファイル名は、記事タイトルを安全なファイル名へ正規化する。記事タイトルとファイル名の対応はmetadataに保持し、タイトル変更時でも同一ページを追跡できるよう `minecraft_wiki_page_id` を主識別子にする。
+保存時のファイル名は、取得要求タイトルを安全なファイル名へ正規化する。タイトル変更・alias・安全化後の衝突に備え、記事タイトルとファイル名の対応はmetadataと `manifest.json` に保持し、タイトル変更時でも同一ページを追跡できるよう `minecraft_wiki_page_id` を主識別子にする。
 
 ### 4.4 metadata
 Raw、NormalizedDocument、Chunkには次のmetadataを保持する。
@@ -99,8 +100,14 @@ Raw、NormalizedDocument、Chunkには次のmetadataを保持する。
 | `source_type` | yes | `minecraft_wiki` 固定 |
 | `source_kind` | yes | `minecraft_wiki` 固定 |
 | `minecraft_wiki_title` | yes | 表示、埋め込み前置、引用 |
+| `minecraft_wiki_requested_title` | yes | 取得要求タイトル |
 | `minecraft_wiki_page_id` | yes | ページの安定識別子 |
 | `minecraft_wiki_revision_id` | yes | 差分取得、再取得判定 |
+| `minecraft_wiki_is_redirect` | yes | alias取得かどうか |
+| `minecraft_wiki_redirect_from` | no | alias元タイトル |
+| `minecraft_wiki_redirect_to` | no | 解決先タイトル |
+| `minecraft_wiki_resolved_title` | yes | 実体記事タイトル |
+| `minecraft_wiki_resolved_page_id` | yes | 実体記事page id |
 | `canonical_url` | yes | 引用URL |
 | `heading_path` | no | セクション引用、チャンク説明 |
 | `access_scope` | yes | public固定 |
@@ -120,14 +127,28 @@ Minecraft Version、Minecraft Edition、Java版/統合版の判定結果はmetad
 - `title`: 記事タイトル
 - `normalized_text`: 記事本文
 
-MediaWikiのテンプレート・カテゴリ・表は、検索品質を損ねない範囲でMarkdown相当へ正規化する。完全なレンダリングよりも、見出し、箇条書き、表のキー情報が検索可能であることを優先する。
+MediaWikiのテンプレート・カテゴリ・表・HTMLタグは、検索品質を損ねない範囲でMarkdown相当へ正規化する。`<code>` の中身、`minecraft:...` ID、見出し、表のキー情報は保持し、`<div>`、`<gallery>`、画像ファイル名だけの断片、履歴表が1行へ潰れた巨大ノイズはchunk本文に残さない。
 
 ## 5. インデックス作成
 Minecraft Wiki RAGのindex正本は、`data/chunks/*/minecraft_wiki` に出力されるingestion chunk pipeline成果物である。
 
 ingestion repositoryは取得、変更検知、Raw snapshot、監査のために使うが、Minecraft Wiki RAGのDense/BM25/keyword indexへ投入する正本chunkにはしない。auto-indexでingestion repositoryを優先する場合も、Minecraft Wikiだけは専用ingestion chunk pipelineを再実行し、その第2 Recursive ChunkとSummary ChunkをDense/keyword indexへ投入する。
 
-### 5.1 保存先
+転送本文だけのRawはchunk化対象にしない。新規取得では転送先の実体本文を保存するが、既存Rawに `#転送` / `#REDIRECT` だけが残っている場合も、ingestion chunker と legacy chunk pipeline の両方で空chunkとして扱う。
+
+### 5.1 Quality Gate
+Raw取得後、chunk生成後、index publish前にMinecraft Wiki品質サマリを確認する。判定対象はRaw件数、転送本文のみページ率、本文長、metadata必須項目、canonical host、index可能ページ数、Minecraft Wiki chunk数である。
+
+CLI監査は次で実行する。
+
+```bash
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest audit --source minecraft_wiki --raw-dir data/ingestion/minecraft_wiki
+PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest audit --source minecraft_wiki --format markdown
+```
+
+JSON payloadでは `source`、`status`、`can_continue` だけをトップレベルに置き、本文長分布、転送率、metadata欠落、canonical host、短文ページなどの診断情報はすべて `metadata` 配下に入れる。
+
+### 5.2 保存先
 インデックス成果物は次の場所に置く。
 
 | 成果物 | 保存先 |
@@ -140,7 +161,7 @@ ingestion repositoryは取得、変更検知、Raw snapshot、監査のために
 | Dense Index | `data/index` |
 | Keyword Index | `data/index/keyword/*.json` |
 
-### 5.2 Minecraft Wiki専用設定
+### 5.3 Minecraft Wiki専用設定
 チャンク・検索設定はサークル情報RAGとは別に設定できるようにする。Minecraft Wiki RAGは、サークル情報RAGの `features.retrieval.*` や `indexing.chunking.*` を直接流用せず、専用設定を優先する。
 
 設定名の例:
@@ -168,7 +189,7 @@ ingestion repositoryは取得、変更検知、Raw snapshot、監査のために
 
 専用設定が未指定の場合だけ、互換性のためサークル情報RAGの既存設定をfallbackとして参照できる。
 
-### 5.3 第1 Recursive Chunking
+### 5.4 第1 Recursive Chunking
 Raw記事をMinecraft Wiki専用設定の文字数で再帰分割する。
 
 - 既定サイズ: `minecraft_wiki_rag.chunking.first_recursive_chunk_size`
@@ -178,7 +199,7 @@ Raw記事をMinecraft Wiki専用設定の文字数で再帰分割する。
 
 分割ではMarkdown見出し、空行、箇条書き、表の行境界を優先する。見出し単位のsectionを保持できる場合は、`heading_path` に記事名と見出し階層を入れる。
 
-### 5.4 第2 Recursive Chunking
+### 5.5 第2 Recursive Chunking
 第1 Recursive Chunkをさらに小さく分割する。
 
 - 既定サイズ: `minecraft_wiki_rag.chunking.second_recursive_chunk_size`
@@ -189,7 +210,7 @@ Raw記事をMinecraft Wiki専用設定の文字数で再帰分割する。
 
 分割結果が第1チャンクと同一の場合は、回答時の親チャンク重複を避けるため `skip_parent_context=true` を付与する。
 
-### 5.5 Summary Chunking
+### 5.6 Summary Chunking
 第1 Recursive Chunkを専用LLMで要約する。
 
 - stage: `summary`
@@ -201,7 +222,7 @@ Raw記事をMinecraft Wiki専用設定の文字数で再帰分割する。
 
 Minecraft Wikiでは、要約に記事名、見出し、重要な仕様・数値・条件を残す。
 
-### 5.6 Dense Index
+### 5.7 Dense Index
 第2 Recursive ChunkとSummary Chunkを埋め込み、FaissLikeIndexへ保存する。
 
 埋め込みテキストは本文単体ではなく、次の情報を前置する。
@@ -215,7 +236,7 @@ Minecraft Wikiでは、要約に記事名、見出し、重要な仕様・数値
 
 記事名を含めることは `kumc-agent.md` の仕様であり、現行の汎用チャンク埋め込み処理が記事名を含めない場合はMinecraft Wiki向けに補正する。
 
-### 5.7 転置インデックス
+### 5.8 転置インデックス
 キーワード検索用に転置インデックスを作成する。
 
 - クエリとチャンク本文をSudachiで正規化・ステミングする。
@@ -359,16 +380,14 @@ CLIや外部連携向けpayloadのトップレベルには、利用者・連携�
 | `integrations.minecraft_wiki.page_titles` | 検証・限定取得用ページタイトル |
 | `integrations.minecraft_wiki.api_url` | 日本語版MediaWiki API URL |
 | `integrations.minecraft_wiki.page_url_base` | 日本語版canonical URL生成 |
+| `integrations.minecraft_wiki.acquisition_mode` | `configured` / `category_sample` / full backfill系の取得モード |
 | `integrations.minecraft_wiki.max_pages` | 最大取得ページ数 |
-
-追加が必要な設定候補は次の通り。
-
-| 設定 | 用途 |
-| --- | --- |
 | `integrations.minecraft_wiki.rate_limit_per_minute` | 取得速度制限 |
 | `integrations.minecraft_wiki.request_interval_seconds` | リクエスト間隔 |
 | `integrations.minecraft_wiki.namespaces` | 取得対象namespace |
 | `integrations.minecraft_wiki.full_backfill_enabled` | 全記事取得を許可する安全弁 |
+| `integrations.minecraft_wiki.category_sample.*` | カテゴリ別サンプル取得のカテゴリと上限 |
+| `integrations.minecraft_wiki.quality_gate.*` | Raw/Chunk品質ゲートの閾値と `warn` / `fail` policy |
 | `minecraft_wiki_rag.chunking.*` | Minecraft Wiki専用チャンク設定 |
 | `minecraft_wiki_rag.retrieval.*` | Minecraft Wiki専用検索設定 |
 
@@ -378,7 +397,10 @@ CLIや外部連携向けpayloadのトップレベルには、利用者・連携�
 現行実装は、本設計のMinecraft Wiki RAG完全実装を満たす。
 
 - `MinecraftWikiConnector` は日本語版URL検証、rate limit、429/5xx backoff、revision id比較、Raw cache、metadata sidecar、NormalizedDocument化を行う。
-- 手動 `index build` はMinecraft Wiki connector ingestionを呼び、Raw取得からindex作成まで完結できる。
+- `MinecraftWikiConnector` はredirect aliasを実体記事へ解決し、alias元・解決先・実体page idをmetadataとmanifestへ保存する。
+- `ingest audit --source minecraft_wiki` はRaw品質をJSON/Markdownで出力し、診断情報をpayloadの `metadata` 配下に保持する。
+- index buildはMinecraft Wiki品質サマリを `stage_results.minecraft_wiki_quality` に残し、`quality_gate.policy=fail` の場合はpublish前に停止できる。
+- 手動 `index update` はMinecraft Wiki connector ingestionを呼び、Raw取得からindex作成まで完結できる。
 - auto-indexでingestion repositoryを使う場合も、Minecraft Wikiは専用ingestion chunk pipeline成果物をDense/keyword indexの正本にする。
 - Minecraft Wiki専用の第1/第2/sparse/Summary Chunk成果物を作成し、Summary Chunkは専用LLMを使い、失敗時だけfallback要約にする。
 - 検索時にはMinecraft Wiki専用のSudachi mode、normalized form、symbol処理、RRF k、sparse混合比率を適用する。

@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kumc_agent.cli import _build_tool_rag_payload, _workflow_response_payload, main
+from kumc_agent.cli import _build_parser, _build_tool_rag_payload, _workflow_response_payload, main
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.source import Source
 from kumc_agent.domain.models.workflow import WorkResponse
@@ -97,6 +97,38 @@ class CliToolRagTests(unittest.TestCase):
         self.assertEqual(getattr(request, "query"), "first query")
         self.assertEqual(getattr(request, "question_author"), "alice")
         self.assertEqual(getattr(request, "history_scope"), "global")
+
+    def test_index_build_subcommand_is_removed(self) -> None:
+        parser = _build_parser()
+
+        with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+            parser.parse_args(["index", "build"])
+
+        args = parser.parse_args(["index", "update", "--full-rebuild"])
+        self.assertEqual(args.command, "index")
+        self.assertEqual(args.index_command, "update")
+        self.assertTrue(args.full_rebuild)
+
+    def test_ingest_audit_command_accepts_minecraft_wiki_raw_dir(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "ingest",
+                "audit",
+                "--source",
+                "minecraft_wiki",
+                "--raw-dir",
+                "data/ingestion/minecraft_wiki",
+                "--format",
+                "markdown",
+            ]
+        )
+
+        self.assertEqual(args.command, "ingest")
+        self.assertEqual(args.ingest_command, "audit")
+        self.assertEqual(args.source, "minecraft_wiki")
+        self.assertEqual(args.format, "markdown")
 
     def test_tool_rag_multi_query_returns_results_array(self) -> None:
         chat_answer = _FakeChatAnswer(

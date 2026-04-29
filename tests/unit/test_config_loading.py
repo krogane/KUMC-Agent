@@ -304,6 +304,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GOOGLE_APPLICATION_CREDENTIALS": ".secrets/google-sa.json",
                     "KUMC_HATENA_BLOG_URL": "https://example.hatenablog.com/",
                     "KUMC_NOTION_API_TOKEN": "secret-notion-token",
+                    "KUMC_NOTION_DATABASE_IDS": "env-db-primary, env-db-secondary",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
                     "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
@@ -401,7 +402,7 @@ class ConfigLoadingTests(unittest.TestCase):
             )
             self.assertEqual(
                 config.integrations.notion.database_ids,
-                ["db-primary", "db-secondary"],
+                ["env-db-primary", "env-db-secondary"],
             )
             self.assertEqual(
                 config.integrations.hatenablog.blog_url,
@@ -510,6 +511,12 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(
             config.integrations.openclaw.config_dir,
             base / "configs" / "openclaw",
+        )
+        self.assertEqual(config.integrations.minecraft_wiki.acquisition_mode, "configured")
+        self.assertTrue(config.integrations.minecraft_wiki.quality_gate.enabled)
+        self.assertEqual(
+            config.integrations.minecraft_wiki.quality_gate.required_canonical_host,
+            "ja.minecraft.wiki",
         )
 
     def test_retrieval_rrf_k_defaults_to_60(self) -> None:

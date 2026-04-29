@@ -31,11 +31,30 @@ integrations:
     page_titles: []
     api_url: "https://ja.minecraft.wiki/api.php"
     page_url_base: "https://ja.minecraft.wiki/w/"
+    acquisition_mode: "configured"
     max_pages: 0
     rate_limit_per_minute: 120
     request_interval_seconds: 1.0
     namespaces: [0]
     full_backfill_enabled: false
+    category_sample:
+      per_category_limit: 20
+      categories:
+        blocks: "カテゴリ:ブロック"
+        items: "カテゴリ:アイテム"
+        mobs: "カテゴリ:Mob"
+        biomes: "カテゴリ:バイオーム"
+        enchantments: "カテゴリ:エンチャント"
+        commands: "カテゴリ:コマンド"
+        recipes: "カテゴリ:レシピ"
+    quality_gate:
+      enabled: true
+      min_article_characters: 500
+      max_redirect_ratio: 0.2
+      min_indexable_pages: 1
+      min_chunk_count: 1
+      required_canonical_host: "ja.minecraft.wiki"
+      policy: "warn"
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000

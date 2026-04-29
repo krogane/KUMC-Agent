@@ -25,7 +25,6 @@ from kumc_agent.usecases.eval.runner import (
     EvalRunner,
 )
 from kumc_agent.usecases.indexing.auto_update import AutoIndexUpdateRequest
-from kumc_agent.usecases.indexing.build import BuildIndexRequest
 from kumc_agent.utils.logging import configure_logging, default_execution_log_path
 
 logger = logging.getLogger(__name__)
@@ -203,10 +202,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     index_parser = subparsers.add_parser("index", help="Index operations")
     index_sub = index_parser.add_subparsers(dest="index_command", required=True)
-    build_parser = index_sub.add_parser("build")
-    build_parser.add_argument("--no-refresh-sources", action="store_true")
-    build_parser.add_argument("--full-rebuild", action="store_true")
-    build_parser.add_argument("--stage", action="append", dest="stages", default=None)
     update_parser = index_sub.add_parser("update")
     update_parser.add_argument("--no-refresh-sources", action="store_true")
     update_parser.add_argument("--full-rebuild", action="store_true")
@@ -290,6 +285,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backfill_parser.add_argument("--limit", type=int, default=None)
     backfill_parser.add_argument("--force", action="store_true")
+    audit_parser = ingest_sub.add_parser("audit")
+    audit_parser.add_argument(
+        "--source",
+        default="minecraft_wiki",
+        choices=("minecraft_wiki",),
+    )
+    audit_parser.add_argument("--raw-dir", type=Path, default=None)
+    audit_parser.add_argument(
+        "--format",
+        default="json",
+        choices=("json", "markdown"),
+    )
 
     ask_parser = subparsers.add_parser("ask", help="Wave 3 integrated ask route")
     ask_parser.add_argument("--question", required=True)
@@ -455,6 +462,35 @@ def _suite_min_cases(context, suite: str, explicit: int | None = None) -> int:  
     return int(context.config.evaluation.suite_min_cases.get(suite, 1))
 
 
+def _minecraft_wiki_quality_thresholds(context):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.minecraft_wiki_audit import (
+        MinecraftWikiQualityThresholds,
+    )
+
+    gate = context.config.integrations.minecraft_wiki.quality_gate
+    return MinecraftWikiQualityThresholds(
+        enabled=gate.enabled,
+        min_article_characters=gate.min_article_characters,
+        max_redirect_ratio=gate.max_redirect_ratio,
+        min_indexable_pages=gate.min_indexable_pages,
+        min_chunk_count=gate.min_chunk_count,
+        required_canonical_host=gate.required_canonical_host,
+        policy=gate.policy,
+    )
+
+
+def _minecraft_wiki_audit_payload(context, raw_dir: Path | None = None):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.minecraft_wiki_audit import (
+        audit_minecraft_wiki_raw_dir,
+    )
+
+    target_dir = raw_dir or context.config.app.ingestion_dir / "minecraft_wiki"
+    return audit_minecraft_wiki_raw_dir(
+        raw_dir=target_dir,
+        thresholds=_minecraft_wiki_quality_thresholds(context),
+    )
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -617,12 +653,28 @@ def main() -> None:
                     scope=BackfillScope(limit=args.limit, force=bool(args.force)),
                 )
             )
+            result_payloads = [result.__dict__ for result in results]
+            if any(result.source_kind == "minecraft_wiki" for result in results):
+                audit = _minecraft_wiki_audit_payload(ingestion)
+                for payload in result_payloads:
+                    if payload.get("source_kind") != "minecraft_wiki":
+                        continue
+                    payload["metadata"] = {
+                        "minecraft_wiki_quality": audit.to_payload(),
+                    }
             print(
                 json.dumps(
-                    [result.__dict__ for result in results],
+                    result_payloads,
                     ensure_ascii=False,
                 )
             )
+            return
+        if args.ingest_command == "audit":
+            audit = _minecraft_wiki_audit_payload(ingestion, raw_dir=args.raw_dir)
+            if args.format == "markdown":
+                print(audit.to_markdown())
+            else:
+                print(json.dumps(audit.to_payload(), ensure_ascii=False))
             return
 
     if args.command == "ask":
@@ -851,16 +903,7 @@ def main() -> None:
         return
 
     if args.command == "index":
-        if args.index_command == "build":
-            logger.info("Running index build")
-            result = context.build_index.execute(
-                BuildIndexRequest(
-                    refresh_sources=not args.no_refresh_sources,
-                    full_rebuild=bool(args.full_rebuild),
-                    stage_selection=tuple(args.stages or ()) or None,
-                )
-            )
-        else:
+        if args.index_command == "update":
             logger.info("Running index update")
             auto_result = context.auto_index_update.execute(
                 AutoIndexUpdateRequest(
@@ -874,25 +917,6 @@ def main() -> None:
             logger.info("Index update completed. status=%s run_id=%s", auto_result.status, auto_result.run_id)
             print(json.dumps(auto_result.as_payload(), ensure_ascii=False, default=str))
             return
-        logger.info(
-            "Index command completed. loaded_sources=%d documents=%d chunks=%d",
-            result.loaded_sources,
-            result.documents,
-            result.chunks,
-        )
-        print(
-            json.dumps(
-                {
-                    "loaded_sources": result.loaded_sources,
-                    "documents": result.documents,
-                    "chunks": result.chunks,
-                    "index_dir": str(result.index_dir),
-                    "metadata": {},
-                },
-                ensure_ascii=False,
-            )
-        )
-        return
 
     if args.command == "eval" and args.eval_command == "run":
         suite = args.suite or context.config.evaluation.default_suite

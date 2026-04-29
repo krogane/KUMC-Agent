@@ -22,6 +22,8 @@ class IngestionChunker:
         text = (document.normalized_text or "").strip()
         if not text:
             return []
+        if document.source_kind == "minecraft_wiki" and _is_redirect_only(text):
+            return []
         sections = self._sections(document=document, text=text)
         chunks: list[Chunk] = []
         for section_title, section_text in sections:
@@ -110,3 +112,7 @@ class IngestionChunker:
 
 def _token_count(text: str) -> int:
     return len([token for token in re.split(r"\s+", text.strip()) if token])
+
+
+def _is_redirect_only(text: str) -> bool:
+    return bool(re.match(r"(?is)^\s*#(?:転送|redirect)\s*:?\s*\[\[[^\]]+\]\]\s*$", text))

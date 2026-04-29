@@ -79,7 +79,6 @@ flowchart TD
 手動起動は次を維持する。
 
 - `kumc-agent index update`
-- `kumc-agent index build`
 - `kumc-agent admin --action sync`
 - `kumc-agent admin --action reindex`
 - `kumc-agent worker --job-type auto_index_update`

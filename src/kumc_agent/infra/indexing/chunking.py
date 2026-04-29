@@ -67,6 +67,15 @@ _METADATA_KEYS = (
     "minecraft_wiki_title",
     "minecraft_wiki_page_id",
     "minecraft_wiki_revision_id",
+    "minecraft_wiki_requested_title",
+    "minecraft_wiki_is_redirect",
+    "minecraft_wiki_redirect_from",
+    "minecraft_wiki_redirect_to",
+    "minecraft_wiki_resolved_title",
+    "minecraft_wiki_resolved_page_id",
+    "minecraft_wiki_aliases",
+    "minecraft_wiki_cache_title",
+    "minecraft_wiki_cache_file",
     "canonical_url",
     "heading_path",
     "visibility",
@@ -120,6 +129,15 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "minecraft_wiki_title",
         "minecraft_wiki_page_id",
         "minecraft_wiki_revision_id",
+        "minecraft_wiki_requested_title",
+        "minecraft_wiki_is_redirect",
+        "minecraft_wiki_redirect_from",
+        "minecraft_wiki_redirect_to",
+        "minecraft_wiki_resolved_title",
+        "minecraft_wiki_resolved_page_id",
+        "minecraft_wiki_aliases",
+        "minecraft_wiki_cache_title",
+        "minecraft_wiki_cache_file",
         "canonical_url",
         "visibility",
         "access_scope",
@@ -127,6 +145,10 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
     ):
         value = data.get(key)
         if isinstance(value, str) and value:
+            metadata[key] = value
+        elif isinstance(value, bool):
+            metadata[key] = value
+        elif key in {"minecraft_wiki_aliases"} and isinstance(value, list):
             metadata[key] = value
         elif key == "access_scope" and isinstance(value, dict):
             metadata[key] = value
@@ -179,6 +201,15 @@ def _build_base_metadata(
         "minecraft_wiki_title": drive_metadata.get("minecraft_wiki_title", ""),
         "minecraft_wiki_page_id": drive_metadata.get("minecraft_wiki_page_id", ""),
         "minecraft_wiki_revision_id": drive_metadata.get("minecraft_wiki_revision_id", ""),
+        "minecraft_wiki_requested_title": drive_metadata.get("minecraft_wiki_requested_title", ""),
+        "minecraft_wiki_is_redirect": drive_metadata.get("minecraft_wiki_is_redirect", False),
+        "minecraft_wiki_redirect_from": drive_metadata.get("minecraft_wiki_redirect_from", ""),
+        "minecraft_wiki_redirect_to": drive_metadata.get("minecraft_wiki_redirect_to", ""),
+        "minecraft_wiki_resolved_title": drive_metadata.get("minecraft_wiki_resolved_title", ""),
+        "minecraft_wiki_resolved_page_id": drive_metadata.get("minecraft_wiki_resolved_page_id", ""),
+        "minecraft_wiki_aliases": drive_metadata.get("minecraft_wiki_aliases", []),
+        "minecraft_wiki_cache_title": drive_metadata.get("minecraft_wiki_cache_title", ""),
+        "minecraft_wiki_cache_file": drive_metadata.get("minecraft_wiki_cache_file", ""),
         "canonical_url": drive_metadata.get("canonical_url", ""),
         "visibility": drive_metadata.get("visibility", ""),
         "access_scope": drive_metadata.get("access_scope", ""),
@@ -205,6 +236,15 @@ def _with_stage(metadata: dict[str, object], stage: str) -> dict[str, object]:
     updated = dict(metadata)
     updated["chunk_stage"] = stage
     return updated
+
+
+def _is_minecraft_wiki_redirect_only(text: str) -> bool:
+    return bool(
+        re.match(
+            r"(?is)^\s*#(?:転送|redirect)\s*:?\s*\[\[[^\]]+\]\]\s*$",
+            text or "",
+        )
+    )
 
 
 def _build_splitter(
@@ -579,6 +619,15 @@ def recursive_chunk_dir(
             )
             if not str(base_metadata.get("source_date") or "").strip():
                 base_metadata["source_date"] = source_date_from_vc_path(path)
+        if source_type == "minecraft_wiki" and _is_minecraft_wiki_redirect_only(text):
+            write_chunks(out_path, [])
+            _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+            logger.info(
+                "Skipped redirect-only Minecraft Wiki page %s -> %s",
+                path.name,
+                out_path.name,
+            )
+            continue
 
         docs = splitter.split_text(text)
         output_chunks: list[Chunk] = []

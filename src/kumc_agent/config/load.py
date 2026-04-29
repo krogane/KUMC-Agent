@@ -47,6 +47,8 @@ from kumc_agent.config.schema import (
     IntegrationOpenClawSection,
     IntegrationSection,
     LLMSection,
+    MinecraftWikiCategorySampleSection,
+    MinecraftWikiQualityGateSection,
     MinecraftWikiRagChunkingSection,
     MinecraftWikiRagRetrievalSection,
     MinecraftWikiRagSection,
@@ -879,6 +881,24 @@ def _to_runtime_config(
         ]
     else:
         minecraft_page_titles = []
+    minecraft_wiki_category_sample = minecraft_wiki.get("category_sample", {})
+    if not isinstance(minecraft_wiki_category_sample, dict):
+        minecraft_wiki_category_sample = {}
+    minecraft_wiki_category_sample_categories_raw = minecraft_wiki_category_sample.get(
+        "categories",
+        {},
+    )
+    if isinstance(minecraft_wiki_category_sample_categories_raw, dict):
+        minecraft_wiki_category_sample_categories = {
+            str(key).strip(): str(value).strip()
+            for key, value in minecraft_wiki_category_sample_categories_raw.items()
+            if str(key).strip() and str(value).strip()
+        }
+    else:
+        minecraft_wiki_category_sample_categories = {}
+    minecraft_wiki_quality_gate = minecraft_wiki.get("quality_gate", {})
+    if not isinstance(minecraft_wiki_quality_gate, dict):
+        minecraft_wiki_quality_gate = {}
     if not isinstance(minecraft_wiki_rag, dict):
         minecraft_wiki_rag = {}
     minecraft_wiki_rag_chunking = minecraft_wiki_rag.get("chunking", {})
@@ -2041,6 +2061,57 @@ def _to_runtime_config(
                 namespaces=minecraft_wiki_namespaces,
                 full_backfill_enabled=bool(
                     minecraft_wiki.get("full_backfill_enabled", False)
+                ),
+                acquisition_mode=str(
+                    minecraft_wiki.get("acquisition_mode", "configured")
+                ).strip().lower()
+                or "configured",
+                category_sample=MinecraftWikiCategorySampleSection(
+                    per_category_limit=max(
+                        0,
+                        int(
+                            minecraft_wiki_category_sample.get(
+                                "per_category_limit",
+                                20,
+                            )
+                        ),
+                    ),
+                    categories=minecraft_wiki_category_sample_categories,
+                ),
+                quality_gate=MinecraftWikiQualityGateSection(
+                    enabled=bool(minecraft_wiki_quality_gate.get("enabled", True)),
+                    min_article_characters=max(
+                        0,
+                        int(
+                            minecraft_wiki_quality_gate.get(
+                                "min_article_characters",
+                                500,
+                            )
+                        ),
+                    ),
+                    max_redirect_ratio=max(
+                        0.0,
+                        float(minecraft_wiki_quality_gate.get("max_redirect_ratio", 0.2)),
+                    ),
+                    min_indexable_pages=max(
+                        0,
+                        int(minecraft_wiki_quality_gate.get("min_indexable_pages", 1)),
+                    ),
+                    min_chunk_count=max(
+                        0,
+                        int(minecraft_wiki_quality_gate.get("min_chunk_count", 1)),
+                    ),
+                    required_canonical_host=str(
+                        minecraft_wiki_quality_gate.get(
+                            "required_canonical_host",
+                            "ja.minecraft.wiki",
+                        )
+                    ).strip().lower()
+                    or "ja.minecraft.wiki",
+                    policy=str(minecraft_wiki_quality_gate.get("policy", "warn"))
+                    .strip()
+                    .lower()
+                    or "warn",
                 ),
             ),
             openai_api_key=str(integrations.get("openai_api_key", "")),

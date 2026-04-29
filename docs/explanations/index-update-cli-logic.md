@@ -12,7 +12,7 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli index update
 
 `index update` は、通常運用で検索 index を安全に更新するためのコマンドです。
 
-似たコマンドに `index build` がありますが、役割が違います。`index build` は index を直接作る低レベルなコマンドです。一方、`index update` は次のような運用上の安全機構を含みます。
+CLI からの手動 index 更新入口は `index update` に一本化されています。このコマンドは次のような運用上の安全機構を含みます。
 
 - 同時実行を避ける lock
 - source の差分取り込み
@@ -75,7 +75,7 @@ auto_result = context.auto_index_update.execute(
 
 通常実行では `refresh_sources=True` です。`--no-refresh-sources` を付けた場合だけ `False` になります。
 
-`--full-rebuild` は `force=True` と `full_rebuild=True` の両方に反映されます。つまり、source 差分検出側にも「強制」、index build 側にも「全体作り直し」として伝わります。
+`--full-rebuild` は `force=True` と `full_rebuild=True` の両方に反映されます。つまり、source 差分検出側にも「強制」、index 構築側にも「全体作り直し」として伝わります。
 
 ## RuntimeContext で組み立てられる部品
 
@@ -107,7 +107,7 @@ CLI は `RuntimeContext` を通して usecase を呼びます。
 | `trigger` | `manual` | 何をきっかけに実行されたか |
 | `source_filter` | 空 tuple | 対象 source の絞り込み。CLI の `index update` では指定されない |
 | `force` | `--full-rebuild` と同じ | 差分取り込みを強制実行するか |
-| `full_rebuild` | `--full-rebuild` と同じ | index build 側で全体再構築するか |
+| `full_rebuild` | `--full-rebuild` と同じ | index 構築側で全体再構築するか |
 | `quality_check_enabled` | 既定で `True` | publish 前の品質確認を行うか |
 | `refresh_sources` | `--no-refresh-sources` の逆 | 外部 source を取り込むか |
 | `stage_selection` | `--stage` の値 | 実行する chunk stage の指定 |
@@ -277,7 +277,7 @@ BuildIndexRequest(
 )
 ```
 
-ここで `index build` との違いが出ます。
+CLI からはこの staging build を直接起動せず、必ず `index update` 経由で実行します。
 
 | 項目 | `index update` の staging build |
 | --- | --- |
@@ -456,26 +456,24 @@ CLI は `AutoIndexUpdateResult.as_payload()` の結果を JSON で標準出力�
 
 そのため、品質確認、source 別結果、snapshot、通知、rollback、event 抽出結果のような詳細情報は `metadata` 配下に入ります。
 
-## `index build` との違い
+## CLI 入口の一本化
 
-初学者が混乱しやすい点として、`index update` と `index build` はどちらも index を作りますが、目的が違います。
+以前の CLI には直接 build 用の入口がありましたが、現在は `index update` だけを公開しています。
 
-| 項目 | `index update` | `index build` |
-| --- | --- | --- |
-| 主用途 | 通常運用の安全な更新 | 低レベルな直接 build |
-| 呼び出す usecase | `AutoIndexUpdateUsecase` | `BuildIndexUsecase` |
-| lock | あり | なし |
-| `IndexingRun` 保存 | あり | なし |
-| 変更なし skip | あり | なし |
-| staging | あり | 通常なし |
-| 品質確認 | あり | なし |
-| publish / rollback | あり | なし |
-| ingestion repository | active chunks を優先 | 通常は raw data / legacy pipeline |
-| CLI 出力 | `status`, `run_id`, 件数, `metadata` | `loaded_sources`, `documents`, `chunks` など |
+| 項目 | 現在の扱い |
+| --- | --- |
+| CLI 入口 | `index update` |
+| 呼び出す usecase | `AutoIndexUpdateUsecase` |
+| lock | あり |
+| `IndexingRun` 保存 | あり |
+| 変更なし skip | あり |
+| staging | あり |
+| 品質確認 | あり |
+| publish / rollback | あり |
+| ingestion repository | active chunks を優先 |
+| CLI 出力 | `status`, `run_id`, 件数, `metadata` |
 
-通常運用で index を更新したい場合は `index update` を使います。
-
-raw data から直接 index を作り直す挙動を確認したい場合や、開発中に低レベルな build 処理だけを検証したい場合は `index build` を使います。
+内部の staging build では `BuildIndexUsecase` を使いますが、これは `AutoIndexUpdateUsecase` から呼ばれる実装部品です。CLI 利用者は `index update` を使います。
 
 ## status 別の代表的な流れ
 
@@ -527,13 +525,13 @@ publish 中に失敗し、直前 snapshot への復元に成功した場合で�
 | `src/kumc_agent/cli.py` | CLI 引数定義と `AutoIndexUpdateRequest` 作成 |
 | `src/kumc_agent/runtime/container.py` | `AutoIndexUpdateUsecase` に渡す依存部品の組み立て |
 | `src/kumc_agent/usecases/indexing/auto_update.py` | `index update` の中心ロジック |
-| `src/kumc_agent/usecases/indexing/build.py` | staging build で呼ばれる通常 index build usecase |
+| `src/kumc_agent/usecases/indexing/build.py` | staging build で呼ばれる通常 index 構築 usecase |
 | `src/kumc_agent/features/indexing/service.py` | document / chunk / Dense / Sparse index の構築 |
 | `src/kumc_agent/features/indexing/lock.py` | 同時実行防止 lock |
 | `src/kumc_agent/features/indexing/quality.py` | publish 前の品質確認 |
 | `src/kumc_agent/features/indexing/snapshot.py` | staging publish と rollback |
 | `src/kumc_agent/features/ingestion/service.py` | source 差分取り込み |
-| `src/kumc_agent/features/indexing/task_event.py` | task / event index build |
+| `src/kumc_agent/features/indexing/task_event.py` | task / event index 構築 |
 
 ## 読む順番のおすすめ
 

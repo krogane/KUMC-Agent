@@ -16,8 +16,9 @@ if str(SRC) not in sys.path:
 from kumc_agent.domain.models.answer import Answer
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.routing import RoutingDecision
-from kumc_agent.domain.models.source import BackfillScope
+from kumc_agent.domain.models.source import AccessScope, BackfillScope, NormalizedDocument
 from kumc_agent.config.load import load_runtime_config
+from kumc_agent.features.ingestion.chunking import IngestionChunker
 from kumc_agent.features.rag.config import RagConfig, RagGenerationSettings
 from kumc_agent.features.rag.service import RagService
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
@@ -198,6 +199,77 @@ class MinecraftWikiRagTests(unittest.TestCase):
         self.assertIn("丸石は石から得られる。", raw.text)
         self.assertNotIn("minecraft_version", raw.metadata)
         self.assertNotIn("minecraft_edition", raw.metadata)
+
+    def test_connector_resolves_redirect_alias_to_article_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            connector = _Connector(
+                ingestion_dir=Path(tmp),
+                page_titles=("Amethyst Cluster",),
+                api_url="https://ja.minecraft.wiki/api.php",
+                page_url_base="https://ja.minecraft.wiki/w/",
+                max_pages=20,
+                payloads=[
+                    {
+                        "parse": {
+                            "title": "Amethyst Cluster",
+                            "pageid": 10,
+                            "revid": 1,
+                            "wikitext": "#REDIRECT [[アメジストの塊]]",
+                        }
+                    },
+                    {
+                        "parse": {
+                            "title": "アメジストの塊",
+                            "pageid": 20,
+                            "revid": 2,
+                            "wikitext": "== 入手 ==\n<code>minecraft:amethyst_cluster</code> は[[アメジストジオード]]で生成される。",
+                        }
+                    },
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 20,
+                                    "title": "アメジストの塊",
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                                    "revisions": [
+                                        {"revid": 2, "timestamp": "2026-01-03T00:00:00Z"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                ],
+            )
+
+            raw = asyncio.run(_first_backfill_item(connector))
+
+        self.assertEqual(raw.title, "アメジストの塊")
+        self.assertEqual(raw.metadata["minecraft_wiki_is_redirect"], True)
+        self.assertEqual(raw.metadata["minecraft_wiki_redirect_from"], "Amethyst Cluster")
+        self.assertEqual(raw.metadata["minecraft_wiki_redirect_to"], "アメジストの塊")
+        self.assertEqual(raw.metadata["minecraft_wiki_resolved_page_id"], "20")
+        self.assertIn("minecraft:amethyst_cluster", raw.text)
+        self.assertNotIn("<code>", raw.text)
+        self.assertNotIn("#REDIRECT", raw.text)
+
+    def test_ingestion_chunker_skips_redirect_only_minecraft_wiki_documents(self) -> None:
+        document = NormalizedDocument(
+            id="doc",
+            source_item_id="item",
+            source_kind="minecraft_wiki",
+            external_id="alias",
+            version=1,
+            title="Amethyst Cluster",
+            normalized_text="#転送 [[アメジストの塊]]",
+            normalized_format="wiki_markdown",
+            language="ja",
+            access_scope=AccessScope(visibility="public"),
+            checksum="checksum",
+            metadata={"minecraft_wiki_is_redirect": True},
+        )
+
+        self.assertEqual(IngestionChunker().chunk(document), [])
 
     def test_minecraft_wiki_service_skips_synthesis_and_answer_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

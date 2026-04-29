@@ -222,6 +222,23 @@ class IndexingService:
             index_chunks = self._load_index_chunks_from_legacy_dirs(
                 legacy_cfg=legacy_cfg
             )
+        minecraft_wiki_quality_payload = self._minecraft_wiki_quality_payload(
+            index_chunks=index_chunks
+        )
+        if (
+            minecraft_wiki_quality_payload is not None
+            and not bool(minecraft_wiki_quality_payload.get("can_continue", True))
+        ):
+            metadata = minecraft_wiki_quality_payload.get("metadata")
+            failures = []
+            if isinstance(metadata, dict):
+                raw_failures = metadata.get("critical_failures")
+                if isinstance(raw_failures, list):
+                    failures = [str(item) for item in raw_failures]
+            raise RuntimeError(
+                "Minecraft Wiki quality gate failed: "
+                + (", ".join(failures) if failures else "unknown")
+            )
         self._storage.save_chunks(index_chunks)
 
         dense_texts = [self._chunk_embedding_text_for_dense(chunk) for chunk in index_chunks]
@@ -256,6 +273,8 @@ class IndexingService:
                 else "raw_chunk_pipeline"
             )
         }
+        if minecraft_wiki_quality_payload is not None:
+            stage_results["minecraft_wiki_quality"] = minecraft_wiki_quality_payload
         if self._image_asset_builder is not None:
             build_from_ingestion_sources = getattr(
                 self._image_asset_builder,
@@ -941,6 +960,47 @@ class IndexingService:
                 sync_deleted=refresh.update_summary_chunk_data,
             )
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
+
+    def _minecraft_wiki_quality_payload(
+        self,
+        *,
+        index_chunks: list[Chunk],
+    ) -> dict[str, object] | None:
+        if (
+            not self._ingestion_minecraft_wiki_dir.exists()
+            and not self._runtime.features.sources.minecraft_wiki
+        ):
+            return None
+        from kumc_agent.usecases.ingestion.minecraft_wiki_audit import (
+            MinecraftWikiQualityThresholds,
+            audit_minecraft_wiki_raw_dir,
+        )
+
+        gate = self._runtime.integrations.minecraft_wiki.quality_gate
+        wiki_chunk_count = sum(
+            1
+            for chunk in index_chunks
+            if str(
+                chunk.metadata.get("source_type")
+                or chunk.metadata.get("source_kind")
+                or ""
+            ).strip().lower()
+            == "minecraft_wiki"
+        )
+        report = audit_minecraft_wiki_raw_dir(
+            raw_dir=self._ingestion_minecraft_wiki_dir,
+            thresholds=MinecraftWikiQualityThresholds(
+                enabled=gate.enabled,
+                min_article_characters=gate.min_article_characters,
+                max_redirect_ratio=gate.max_redirect_ratio,
+                min_indexable_pages=gate.min_indexable_pages,
+                min_chunk_count=gate.min_chunk_count,
+                required_canonical_host=gate.required_canonical_host,
+                policy=gate.policy,
+            ),
+            chunk_count=wiki_chunk_count,
+        )
+        return report.to_payload()
 
     def _build_minecraft_wiki_summary_chunks(
         self,
