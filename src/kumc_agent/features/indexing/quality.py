@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
+from kumc_agent.features.indexing.paths import resolve_current_index_dir
 
 
 @dataclass(frozen=True)
@@ -28,8 +29,9 @@ class IndexQualitySmokeChecker:
 
     def check(self, *, staging_dir: Path, current_dir: Path) -> IndexQualityResult:
         failures: list[str] = []
+        current_active_dir = resolve_current_index_dir(current_dir)
         staging_chunks = _read_chunks(staging_dir / "dense_chunks.jsonl")
-        current_chunks = _read_chunks(current_dir / "dense_chunks.jsonl")
+        current_chunks = _read_chunks(current_active_dir / "dense_chunks.jsonl")
 
         for required in ("dense_vectors.npy", "dense_chunks.jsonl", "bm25_tokens.json", "bm25_chunks.jsonl"):
             if not (staging_dir / required).exists():
@@ -60,7 +62,7 @@ class IndexQualitySmokeChecker:
         failures.extend(feature_load["failures"])
         metadata = {
             "staging_dir": str(staging_dir),
-            "current_dir": str(current_dir),
+            "current_dir": str(current_active_dir),
             "chunk_count": len(staging_chunks),
             "previous_chunk_count": len(current_chunks),
             "min_chunk_ratio": self._min_chunk_ratio,

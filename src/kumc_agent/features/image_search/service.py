@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 import base64
 import html
@@ -19,6 +20,11 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.operations import Asset, IndexingRun
 from kumc_agent.domain.models.retrieval import AccessContext
 from kumc_agent.domain.ports.embedders import EmbedderPort
+from kumc_agent.features.indexing.paths import resolve_feature_index_dir
+from kumc_agent.infra.llm.gemini_rate_limit import (
+    image_caption_rate_limiter_name,
+    wait_for_gemini_rate_limit,
+)
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.utils.hashing import cosine_similarity_matrix, hashed_vector, stable_hash
 
@@ -46,6 +52,7 @@ class ImageSearchConfig:
     surrounding_text_char_limit: int = 1200
     ocr_text_char_limit: int = 800
     caption_model: str = ""
+    caption_batch_size: int = 8
     ocr_model: str = ""
     feature_model: str = "openai/clip-vit-base-patch32"
     feature_dimensions: int = 512
@@ -173,11 +180,15 @@ class GeminiImageCaptioner:
         model: str = "",
         prompt_path: Path | None = None,
         max_output_tokens: int = 512,
+        requests_per_minute: int = 60,
+        limiter_name: str = "",
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._prompt_path = prompt_path
         self._max_output_tokens = max_output_tokens
+        self._requests_per_minute = max(0, int(requests_per_minute))
+        self._limiter_name = limiter_name or image_caption_rate_limiter_name()
 
     def caption(self, *, image_path: Path, surrounding_text: str = "") -> tuple[str, dict[str, Any]]:
         if not self._api_key or not self._model or not image_path.exists():
@@ -190,6 +201,10 @@ class GeminiImageCaptioner:
             prompt = self._prompt_text().format(surrounding_text=surrounding_text[:2000])
             client = genai.Client(api_key=self._api_key)
             part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            wait_for_gemini_rate_limit(
+                max_requests_per_minute=self._requests_per_minute,
+                limiter_name=self._limiter_name,
+            )
             response = client.models.generate_content(
                 model=self._model,
                 contents=[prompt, part],
@@ -369,7 +384,12 @@ class ImageAssetBuildService:
         self._captioner = captioner
         self._ocr = ocr
 
-    def build_from_ingestion_sources(self, *, index_dir: Path | None = None) -> IndexingRun:
+    def build_from_ingestion_sources(
+        self,
+        *,
+        index_dir: Path | None = None,
+        commit_repository: bool = True,
+    ) -> IndexingRun:
         target_index = (
             _ImageSearchIndex(index_dir=index_dir / "image_search", embedder=self._embedder, config=self._config)
             if index_dir is not None
@@ -378,21 +398,26 @@ class ImageAssetBuildService:
         seen = changed = skipped = failed = deleted = 0
         self._image_dir.mkdir(parents=True, exist_ok=True)
         current_asset_ids: set[str] = set()
-        for candidate in self._scan_candidates():
-            seen += 1
-            try:
-                asset = self._asset_from_candidate(candidate)
-                current_asset_ids.add(asset.id)
-                existing = self._repository.get_asset(asset.id)
-                if existing and existing.metadata.get("source_fingerprint") == asset.metadata.get("source_fingerprint"):
-                    skipped += 1
-                    continue
-                self._repository.save_asset(asset)
-                changed += 1
-            except Exception:
+        staged_assets: dict[str, Asset] = {}
+        candidates = self._scan_candidates()
+        seen = len(candidates)
+        for asset, error_ref in self._build_assets_from_candidates(candidates):
+            if asset is None:
                 failed += 1
-                logger.exception("Failed to build image asset from %s", candidate.image_ref)
-        for asset in self._repository.list_assets(query=""):
+                logger.warning("Failed to build image asset from %s", error_ref)
+                continue
+            current_asset_ids.add(asset.id)
+            existing = self._repository.get_asset(asset.id)
+            if existing and existing.metadata.get("source_fingerprint") == asset.metadata.get("source_fingerprint"):
+                staged_assets[existing.id] = existing
+                skipped += 1
+                continue
+            staged_assets[asset.id] = asset
+            if commit_repository:
+                self._repository.save_asset(asset)
+            changed += 1
+        existing_assets = {asset.id: asset for asset in self._repository.list_assets(query="")}
+        for asset in existing_assets.values():
             if _normalize_source_kind(asset.source_kind) not in _all_image_source_kinds():
                 continue
             if not asset.metadata.get("source_fingerprint") and asset.metadata.get("index_version") != "image-search-v1":
@@ -401,21 +426,24 @@ class ImageAssetBuildService:
                 continue
             if str(asset.metadata.get("index_status") or "active") in _DENIED_INDEX_STATUSES:
                 continue
-            self._repository.save_asset(
-                replace(
-                    asset,
-                    metadata={
-                        **asset.metadata,
-                        "index_status": "deleted",
-                        "deleted_reason": "source_image_missing",
-                    },
-                )
+            deleted_asset = replace(
+                asset,
+                metadata={
+                    **asset.metadata,
+                    "index_status": "deleted",
+                    "deleted_reason": "source_image_missing",
+                },
             )
+            staged_assets[deleted_asset.id] = deleted_asset
+            if commit_repository:
+                self._repository.save_asset(deleted_asset)
             deleted += 1
 
+        merged_assets = dict(existing_assets)
+        merged_assets.update(staged_assets)
         searchable_assets = [
             asset
-            for asset in self._repository.list_assets(query="")
+            for asset in merged_assets.values()
             if _normalize_source_kind(asset.source_kind) in _all_image_source_kinds()
             and str(asset.metadata.get("index_status") or "active") not in _DENIED_INDEX_STATUSES
         ]
@@ -427,7 +455,15 @@ class ImageAssetBuildService:
             metadata = {**dict(asset.metadata or {}), **feature_metadata}
             if metadata == dict(asset.metadata or {}):
                 continue
-            self._repository.save_asset(replace(asset, metadata=metadata))
+            updated_asset = replace(asset, metadata=metadata)
+            staged_assets[updated_asset.id] = updated_asset
+            if commit_repository:
+                self._repository.save_asset(updated_asset)
+        if not commit_repository:
+            _write_staged_asset_manifest(
+                target_index.index_dir,
+                staged_assets.values(),
+            )
         run = IndexingRun(
             id=stable_hash(f"image-search:{datetime.now(UTC).isoformat()}")[:32],
             source_kind="image_search",
@@ -441,9 +477,75 @@ class ImageAssetBuildService:
                 "indexed_assets": len(searchable_assets),
                 "failed": failed,
                 "index_dir": str(target_index.index_dir),
+                "repository_commit": "immediate" if commit_repository else "staged",
+                "staged_assets": len(staged_assets),
             },
         )
-        return self._repository.save_indexing_run(run)
+        return self._repository.save_indexing_run(run) if commit_repository else run
+
+    def _build_assets_from_candidates(
+        self,
+        candidates: list[_ImageSourceCandidate],
+    ) -> list[tuple[Asset | None, str]]:
+        if not candidates:
+            return []
+        batch_size = max(1, int(self._config.caption_batch_size))
+        results: list[tuple[Asset | None, str]] = [(None, "")] * len(candidates)
+        for batch_start in range(0, len(candidates), batch_size):
+            batch = candidates[batch_start : batch_start + batch_size]
+            max_workers = max(1, min(len(batch), batch_size))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures: dict[Future[Asset], tuple[int, _ImageSourceCandidate]] = {}
+                for offset, candidate in enumerate(batch):
+                    futures[
+                        executor.submit(self._asset_from_candidate, candidate)
+                    ] = (batch_start + offset, candidate)
+                for future in as_completed(futures):
+                    index, candidate = futures[future]
+                    try:
+                        results[index] = (future.result(), candidate.image_ref)
+                    except Exception:
+                        logger.exception(
+                            "Failed to build image asset from %s",
+                            candidate.image_ref,
+                        )
+                        results[index] = (None, candidate.image_ref)
+        return results
+
+    def commit_staged_assets(self, *, index_dir: Path) -> dict[str, object]:
+        manifest = Path(index_dir) / "image_search" / "image_asset_commits.jsonl"
+        if not manifest.exists():
+            return {"status": "skipped", "reason": "no_image_asset_manifest"}
+        upserted = 0
+        deleted = 0
+        for payload in _read_jsonl(manifest):
+            asset_payload = payload.get("asset")
+            if not isinstance(asset_payload, dict):
+                continue
+            asset = _asset_from_manifest(asset_payload)
+            self._repository.save_asset(asset)
+            upserted += 1
+            if str(asset.metadata.get("index_status") or "active") in _DENIED_INDEX_STATUSES:
+                deleted += 1
+        run = IndexingRun(
+            id=stable_hash(f"image-search-commit:{datetime.now(UTC).isoformat()}")[:32],
+            source_kind="image_search",
+            status="succeeded",
+            seen=upserted,
+            changed=upserted - deleted,
+            deleted=deleted,
+            metadata={
+                "manifest": str(manifest),
+                "repository_commit": "post_publish",
+            },
+        )
+        self._repository.save_indexing_run(run)
+        return {
+            "status": "succeeded",
+            "assets": upserted,
+            "deleted": deleted,
+            "manifest": str(manifest),
+        }
 
     def _asset_from_candidate(self, candidate: _ImageSourceCandidate) -> Asset:
         local_path, content_hash, download_metadata = self._materialize_image(candidate)
@@ -757,9 +859,6 @@ class _ImageSearchIndex:
             model=config.feature_model,
             dimensions=config.feature_dimensions,
         )
-        self._text_vectors_path = self.index_dir / "image_text_vectors.npy"
-        self._feature_vectors_path = self.index_dir / "image_feature_vectors.npy"
-        self._items_path = self.index_dir / "image_assets.jsonl"
         self.index_dir.mkdir(parents=True, exist_ok=True)
 
     def build(self, assets: list[Asset]) -> dict[str, dict[str, Any]]:
@@ -772,9 +871,9 @@ class _ImageSearchIndex:
             feature_rows.append(vector)
             feature_metadata_by_asset[asset.id] = feature_metadata
         feature_vectors = np.vstack(feature_rows) if feature_rows else np.empty((0, self._config.feature_dimensions), dtype=np.float32)
-        np.save(self._text_vectors_path, text_vectors.astype(np.float32))
-        np.save(self._feature_vectors_path, feature_vectors.astype(np.float32))
-        with self._items_path.open("w", encoding="utf-8") as fw:
+        np.save(self._write_path("image_text_vectors.npy"), text_vectors.astype(np.float32))
+        np.save(self._write_path("image_feature_vectors.npy"), feature_vectors.astype(np.float32))
+        with self._write_path("image_assets.jsonl").open("w", encoding="utf-8") as fw:
             for asset in assets:
                 fw.write(
                     json.dumps(
@@ -790,13 +889,14 @@ class _ImageSearchIndex:
         return feature_metadata_by_asset
 
     def has_feature_index(self) -> bool:
-        if not self._feature_vectors_path.exists() or not self._items_path.exists():
+        feature_vectors_path = self._read_path("image_feature_vectors.npy")
+        if not feature_vectors_path.exists() or not self._read_path("image_assets.jsonl").exists():
             return False
         asset_ids = self._load_asset_ids()
         if not asset_ids:
             return False
         try:
-            matrix = np.load(self._feature_vectors_path)
+            matrix = np.load(feature_vectors_path)
         except Exception:
             return False
         return matrix.size > 0 and matrix.shape[0] >= len(asset_ids)
@@ -809,9 +909,10 @@ class _ImageSearchIndex:
         top_k: int,
     ) -> list[tuple[str, float]]:
         asset_ids = self._load_asset_ids()
-        if not asset_ids or not self._text_vectors_path.exists():
+        text_vectors_path = self._read_path("image_text_vectors.npy")
+        if not asset_ids or not text_vectors_path.exists():
             return []
-        matrix = np.load(self._text_vectors_path)
+        matrix = np.load(text_vectors_path)
         if matrix.size == 0:
             return []
         query_vector = self._embedder.embed_query(query)
@@ -835,9 +936,10 @@ class _ImageSearchIndex:
         top_k: int,
     ) -> list[tuple[str, float]]:
         asset_ids = self._load_asset_ids()
-        if not asset_ids or not seed_asset_ids or not self._feature_vectors_path.exists():
+        feature_vectors_path = self._read_path("image_feature_vectors.npy")
+        if not asset_ids or not seed_asset_ids or not feature_vectors_path.exists():
             return []
-        matrix = np.load(self._feature_vectors_path)
+        matrix = np.load(feature_vectors_path)
         if matrix.size == 0:
             return []
         seed_positions = [asset_ids.index(asset_id) for asset_id in seed_asset_ids if asset_id in asset_ids]
@@ -860,16 +962,23 @@ class _ImageSearchIndex:
         return out
 
     def _load_asset_ids(self) -> list[str]:
-        if not self._items_path.exists():
+        items_path = self._read_path("image_assets.jsonl")
+        if not items_path.exists():
             return []
         out: list[str] = []
-        with self._items_path.open("r", encoding="utf-8") as fr:
+        with items_path.open("r", encoding="utf-8") as fr:
             for line in fr:
                 if not line.strip():
                     continue
                 payload = json.loads(line)
                 out.append(str(payload.get("asset_id") or ""))
         return [asset_id for asset_id in out if asset_id]
+
+    def _read_path(self, name: str) -> Path:
+        return resolve_feature_index_dir(self.index_dir) / name
+
+    def _write_path(self, name: str) -> Path:
+        return self.index_dir / name
 
 
 def _scan_discord_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
@@ -1279,6 +1388,49 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(payload, dict):
                 out.append(payload)
     return out
+
+
+def _write_staged_asset_manifest(index_dir: Path, assets: Iterable[Asset]) -> None:
+    path = index_dir / "image_asset_commits.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fw:
+        for asset in assets:
+            fw.write(
+                json.dumps(
+                    {"asset": _asset_manifest_payload(asset)},
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n"
+            )
+
+
+def _asset_manifest_payload(asset: Asset) -> dict[str, Any]:
+    payload = asdict(asset)
+    for key in ("captured_at", "created_at", "updated_at"):
+        value = payload.get(key)
+        if isinstance(value, datetime):
+            payload[key] = value.isoformat()
+    return payload
+
+
+def _asset_from_manifest(payload: dict[str, Any]) -> Asset:
+    return Asset(
+        id=str(payload.get("id") or ""),
+        source_kind=str(payload.get("source_kind") or ""),
+        source_item_id=str(payload.get("source_item_id") or ""),
+        title=str(payload.get("title") or ""),
+        description=str(payload.get("description") or ""),
+        uri=str(payload.get("uri") or ""),
+        media_type=str(payload.get("media_type") or "image"),
+        captured_at=_dt_from(payload.get("captured_at")),
+        access_scope=dict(payload.get("access_scope") or {}),
+        rights_status=str(payload.get("rights_status") or "unknown"),
+        contains_people=bool(payload.get("contains_people", False)),
+        metadata=dict(payload.get("metadata") or {}),
+        created_at=_dt_from(payload.get("created_at")),
+        updated_at=_dt_from(payload.get("updated_at")),
+    )
 
 
 def _read_sidecar(path: Path) -> dict[str, Any]:

@@ -70,11 +70,18 @@ class IngestionService:
         resolved_scope = scope or BackfillScope()
         item_states = self._repository.load_item_states(source_kind)
         cursor = self._repository.load_sync_cursor(source_kind)
+        supports_incremental = bool(getattr(connector, "supports_incremental", False))
+        use_poll_changes = bool(
+            supports_incremental
+            and cursor is not None
+            and cursor.cursor
+            and not resolved_scope.force
+        )
         seen = changed = skipped = deleted = documents = chunks = findings_count = 0
 
         stream = (
             connector.poll_changes(cursor)
-            if cursor is not None and cursor.cursor and not resolved_scope.force
+            if use_poll_changes and cursor is not None
             else connector.backfill(resolved_scope)
         )
         async for item in stream:
@@ -109,7 +116,15 @@ class IngestionService:
                 source_kind=source_kind,
                 cursor=datetime.now(UTC).isoformat(),
                 metadata={
-                    "mode": "poll_changes" if cursor is not None and cursor.cursor and not resolved_scope.force else "backfill",
+                    "mode": (
+                        "poll_changes"
+                        if use_poll_changes
+                        else "full_scan_cursor_unsupported"
+                        if cursor is not None and cursor.cursor and not resolved_scope.force
+                        else "backfill"
+                    ),
+                    "cursor_supported": supports_incremental,
+                    "previous_cursor_present": bool(cursor is not None and cursor.cursor),
                     "seen": seen,
                     "changed": changed,
                     "skipped": skipped,

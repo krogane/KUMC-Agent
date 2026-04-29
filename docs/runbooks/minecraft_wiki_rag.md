@@ -26,6 +26,7 @@ Wiki 側への負荷を避けるため、次の設定で取得間隔を制御し
 
 Raw cache は `data/ingestion/minecraft_wiki` に保存されます。
 redirect alias は実体記事へ解決され、alias元・解決先・page id の対応は各 `.meta.json` と `manifest.json` に保存されます。
+同じ `minecraft_wiki_page_id` に解決されるaliasと実体記事はRaw cache上で1件に統合され、重複する旧cacheファイルは該当ページの再取得時に削除されます。
 通常の再取得は次のコマンドを使います。
 
 ```bash

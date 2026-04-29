@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Callable
@@ -20,11 +21,12 @@ class LoaderBackedConnector:
     loader: object
     raw_items: Callable[[], list[SourceRawItem]]
     normalized_format: str = "markdown"
+    supports_incremental: bool = False
 
     async def backfill(self, scope: BackfillScope) -> AsyncIterator[SourceRawItem]:
         load = getattr(self.loader, "load", None)
         if callable(load):
-            load()
+            await asyncio.to_thread(load)
         count = 0
         for item in self.raw_items():
             if scope.limit is not None and count >= scope.limit:

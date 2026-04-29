@@ -28,6 +28,9 @@ class IndexingLock(Protocol):
     def release(self) -> None:
         ...
 
+    def refresh(self) -> None:
+        ...
+
 
 class FallbackIndexingLock:
     def __init__(self, locks: tuple[IndexingLock, ...]) -> None:
@@ -56,6 +59,11 @@ class FallbackIndexingLock:
             return
         self._acquired.release()
         self._acquired = None
+
+    def refresh(self) -> None:
+        if self._acquired is None:
+            return
+        self._acquired.refresh()
 
 
 class RedisIndexingLock:
@@ -91,6 +99,16 @@ class RedisIndexingLock:
             client = self._redis.client()
             if client.get(self._key) in {self._token, self._token.encode("utf-8")}:
                 client.delete(self._key)
+        except Exception:
+            return
+
+    def refresh(self) -> None:
+        if not self._token:
+            return
+        try:
+            client = self._redis.client()
+            if client.get(self._key) in {self._token, self._token.encode("utf-8")}:
+                client.expire(self._key, self._ttl_seconds)
         except Exception:
             return
 
@@ -135,6 +153,9 @@ class PostgresIndexingLock:
             pass
         finally:
             self._close()
+
+    def refresh(self) -> None:
+        return
 
     def _close(self) -> None:
         if self._conn is None:
@@ -183,6 +204,17 @@ class FileIndexingLock:
             pass
         self._acquired = False
 
+    def refresh(self) -> None:
+        if not self._acquired:
+            return
+        try:
+            payload = self._read_payload()
+            payload["refreshed_at"] = datetime.now(UTC).isoformat()
+            self._path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.utime(self._path, None)
+        except Exception:
+            return
+
     def __enter__(self) -> FileIndexingLock:
         return self
 
@@ -230,7 +262,7 @@ def build_indexing_lock(config: RuntimeConfig) -> FallbackIndexingLock:
         )
     locks.append(
         FileIndexingLock(
-            path=config.app.index_dir / ".auto_index.lock",
+            path=config.app.data_dir / "locks" / "auto_index.lock",
             ttl_minutes=config.scheduler.auto_index_lock_ttl_minutes,
         )
     )

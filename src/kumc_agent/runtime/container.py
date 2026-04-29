@@ -414,6 +414,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         surrounding_text_char_limit=config.features.image_search.surrounding_text_char_limit,
         ocr_model=config.features.image_search.ocr_model or config.integrations.drive.pdf_ocr_model_path,
         caption_model=config.features.image_search.caption_model or config.providers.llm.gemini_model,
+        caption_batch_size=config.features.image_search.caption_batch_size,
         feature_model=config.features.image_search.feature_model,
         feature_dimensions=config.features.image_search.feature_dimensions,
         duplicate_group_limit=config.features.image_search.duplicate_group_limit,
@@ -430,6 +431,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 api_key=config.integrations.gemini_api_key,
                 model=image_search_config.caption_model,
                 prompt_path=config.base_dir / "assets" / "prompts" / "image_caption.md",
+                requests_per_minute=config.integrations.gemini_requests_per_minute,
             ),
             ocr=LocalImageOcrExtractor(
                 model_path=image_search_config.ocr_model
@@ -520,6 +522,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         NotionLoader(
             api_token=config.integrations.notion.api_token,
             database_ids=config.integrations.notion.database_ids,
+            page_ids=config.integrations.notion.page_ids,
             ingestion_dir=config.app.ingestion_dir,
         )
         if config.features.sources.notion

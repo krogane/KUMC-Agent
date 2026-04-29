@@ -90,7 +90,7 @@ Raw記事は `data/ingestion/minecraft_wiki` 配下にMarkdownまたはWiki Mark
 | `{safe_title}.md.meta.json` | ページID、revision id、canonical URLなど |
 | `manifest.json` | requested title、resolved title、page id、保存ファイルの対応 |
 
-保存時のファイル名は、取得要求タイトルを安全なファイル名へ正規化する。タイトル変更・alias・安全化後の衝突に備え、記事タイトルとファイル名の対応はmetadataと `manifest.json` に保持し、タイトル変更時でも同一ページを追跡できるよう `minecraft_wiki_page_id` を主識別子にする。
+保存時のファイル名は、redirect解決後の実体記事タイトルを安全なファイル名へ正規化する。取得要求タイトルがaliasでも、同じ `minecraft_wiki_page_id` に解決されるRawは1件に統合し、alias元・解決先・保存ファイルの対応はmetadataと `manifest.json` に保持する。安全化後のファイル名が別記事と衝突する場合は `minecraft_wiki_page_id` を付けて保存し、タイトル変更時でも同一ページを追跡できるよう `minecraft_wiki_page_id` を主識別子にする。
 
 ### 4.4 metadata
 Raw、NormalizedDocument、Chunkには次のmetadataを保持する。

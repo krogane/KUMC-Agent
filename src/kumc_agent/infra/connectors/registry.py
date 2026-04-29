@@ -82,6 +82,7 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             loader=NotionLoader(
                 api_token=config.integrations.notion.api_token,
                 database_ids=config.integrations.notion.database_ids,
+                page_ids=config.integrations.notion.page_ids,
                 ingestion_dir=ingestion_dir,
             ),
             raw_items=lambda: iter_raw_files(

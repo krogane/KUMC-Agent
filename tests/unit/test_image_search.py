@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -20,8 +22,32 @@ from kumc_agent.features.image_search import (
     ImageSearchRequest,
     ImageSearchService,
 )
+from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
 from kumc_agent.infra.embeddings.local import LocalEmbedder
 from kumc_agent.infra.operations import FileOperationsRepository, PostgresOperationsRepository
+
+
+class _ParallelCaptioner:
+    def __init__(self, *, delay_seconds: float = 0.05) -> None:
+        self._delay_seconds = delay_seconds
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
+        self.calls = 0
+
+    def caption(self, *, image_path: Path, surrounding_text: str = "") -> tuple[str, dict[str, object]]:
+        del image_path, surrounding_text
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(self._delay_seconds)
+            with self._lock:
+                self.calls += 1
+            return "画像説明", {"caption_status": "succeeded", "caption_model": "fake"}
+        finally:
+            with self._lock:
+                self._in_flight -= 1
 
 
 class _FakePostgresCursor:
@@ -199,6 +225,82 @@ class ImageSearchTests(unittest.TestCase):
             self.assertIn("surrounding_text", asset.metadata)
             self.assertIn("search", asset.metadata)
 
+    def test_staged_image_assets_commit_after_publish_and_runtime_reads_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "poster.png"
+            image_path.write_bytes(_tiny_png())
+            messages_dir = root / "ingestion" / "messages" / "guild"
+            messages_dir.mkdir(parents=True)
+            (messages_dir / "channel.jsonl").write_text(
+                json.dumps(
+                    {
+                        "text": "2026 新歓ポスターです",
+                        "metadata": {
+                            "guild_id": "guild-1",
+                            "channel_id": "channel-1",
+                            "channel_name": "広報",
+                            "message_id": "message-1",
+                            "attachments": [
+                                {
+                                    "id": "att-1",
+                                    "filename": "poster.png",
+                                    "url": str(image_path),
+                                    "content_type": "image/png",
+                                }
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            repository = FileOperationsRepository(root_dir=root / "operations")
+            embedder = LocalEmbedder(model_name="", dimensions=32)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                feature_model="local_hash",
+                feature_dimensions=32,
+            )
+            builder = ImageAssetBuildService(
+                repository=repository,
+                ingestion_dir=root / "ingestion",
+                image_dir=root / "image_search" / "images",
+                index_dir=root / "index" / "image_search",
+                embedder=embedder,
+                config=config,
+            )
+            index_root = root / "index"
+            staging = index_root / "staging" / "run"
+
+            run = builder.build_from_ingestion_sources(index_dir=staging, commit_repository=False)
+            self.assertEqual(run.status, "succeeded")
+            self.assertEqual(repository.list_assets(query=""), [])
+            published = IndexSnapshotPublisher(index_dir=index_root).publish(
+                run_id="run",
+                staging_dir=staging,
+            )
+            commit = builder.commit_staged_assets(index_dir=published.release_dir)
+            self.assertEqual(commit["status"], "succeeded")
+
+            service = ImageSearchService(
+                repository=repository,
+                embedder=embedder,
+                index_dir=index_root / "image_search",
+                config=config,
+                allowed_guild_ids=("guild-1",),
+            )
+            result = service.search(
+                ImageSearchRequest(
+                    query="新歓",
+                    access_context=AccessContext(user_id="u", guild_id="guild-1"),
+                )
+            )
+            self.assertEqual(len(result.assets), 1)
+
     def test_builder_falls_back_to_discord_proxy_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -269,6 +371,41 @@ class ImageSearchTests(unittest.TestCase):
                 "https://media.discordapp.net/proxy/poster.png",
                 assets[0].metadata["downloaded_image_ref"],
             )
+
+    def test_caption_batch_size_controls_parallel_gemini_image_recognition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / "ingestion" / "images" / "google_drive"
+            image_dir.mkdir(parents=True)
+            for index in range(5):
+                (image_dir / f"poster-{index}.png").write_bytes(_tiny_png())
+            repository = FileOperationsRepository(root_dir=root / "operations")
+            embedder = LocalEmbedder(model_name="", dimensions=32)
+            config = ImageSearchConfig(
+                limit=5,
+                dense_top_k=5,
+                feature_top_k=5,
+                caption_batch_size=2,
+                feature_model="local_hash",
+                feature_dimensions=32,
+            )
+            captioner = _ParallelCaptioner()
+            builder = ImageAssetBuildService(
+                repository=repository,
+                ingestion_dir=root / "ingestion",
+                image_dir=root / "image_search" / "images",
+                index_dir=root / "image_search",
+                embedder=embedder,
+                config=config,
+                captioner=captioner,  # type: ignore[arg-type]
+            )
+
+            run = builder.build_from_ingestion_sources()
+
+            self.assertEqual(run.status, "succeeded")
+            self.assertEqual(captioner.calls, 5)
+            self.assertGreaterEqual(captioner.max_in_flight, 2)
+            self.assertLessEqual(captioner.max_in_flight, 2)
 
     def test_access_filter_hides_protected_images_and_allows_public_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

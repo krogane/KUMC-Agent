@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import json
 import sys
 import tempfile
 import unittest
@@ -252,6 +253,139 @@ class MinecraftWikiRagTests(unittest.TestCase):
         self.assertIn("minecraft:amethyst_cluster", raw.text)
         self.assertNotIn("<code>", raw.text)
         self.assertNotIn("#REDIRECT", raw.text)
+
+    def test_connector_dedupes_redirect_aliases_at_raw_cache_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ingestion_dir = Path(tmp)
+            connector = _Connector(
+                ingestion_dir=ingestion_dir,
+                page_titles=("Amethyst Cluster", "アメジストの塊"),
+                api_url="https://ja.minecraft.wiki/api.php",
+                page_url_base="https://ja.minecraft.wiki/w/",
+                max_pages=20,
+                payloads=[
+                    {
+                        "parse": {
+                            "title": "Amethyst Cluster",
+                            "pageid": 10,
+                            "revid": 1,
+                            "wikitext": "#REDIRECT [[アメジストの塊]]",
+                        }
+                    },
+                    {
+                        "parse": {
+                            "title": "アメジストの塊",
+                            "pageid": 20,
+                            "revid": 2,
+                            "wikitext": "== 入手 ==\nアメジストの塊はアメジストジオードで生成される。",
+                        }
+                    },
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 20,
+                                    "title": "アメジストの塊",
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                                    "revisions": [
+                                        {"revid": 2, "timestamp": "2026-01-03T00:00:00Z"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 20,
+                                    "title": "アメジストの塊",
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                                    "revisions": [
+                                        {"revid": 2, "timestamp": "2026-01-03T00:00:00Z"}
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                ],
+            )
+
+            items = asyncio.run(_all_backfill_items(connector))
+
+            markdown_files = sorted(path.name for path in ingestion_dir.glob("*.md"))
+            manifest = (ingestion_dir / "manifest.json").read_text(encoding="utf-8")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].external_id, "20")
+        self.assertEqual(markdown_files, ["アメジストの塊.md"])
+        self.assertNotIn("Amethyst_Cluster.md", markdown_files)
+        self.assertEqual(manifest.count('"minecraft_wiki_page_id": "20"'), 1)
+
+    def test_connector_consolidates_existing_redirect_alias_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ingestion_dir = Path(tmp)
+            alias_path = ingestion_dir / "Amethyst_Cluster.md"
+            canonical_path = ingestion_dir / "アメジストの塊.md"
+            alias_path.write_text("アメジストの塊はアメジストジオードで生成される。", encoding="utf-8")
+            canonical_path.write_text("アメジストの塊はアメジストジオードで生成される。", encoding="utf-8")
+            for path, requested in (
+                (alias_path, "Amethyst Cluster"),
+                (canonical_path, "アメジストの塊"),
+            ):
+                path.with_suffix(path.suffix + ".meta.json").write_text(
+                    json.dumps(
+                        {
+                            "minecraft_wiki_title": "アメジストの塊",
+                            "minecraft_wiki_requested_title": requested,
+                            "minecraft_wiki_page_id": "20",
+                            "minecraft_wiki_revision_id": "2",
+                            "minecraft_wiki_resolved_title": "アメジストの塊",
+                            "canonical_url": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            connector = _Connector(
+                ingestion_dir=ingestion_dir,
+                page_titles=("Amethyst Cluster", "アメジストの塊"),
+                api_url="https://ja.minecraft.wiki/api.php",
+                page_url_base="https://ja.minecraft.wiki/w/",
+                max_pages=20,
+                payloads=[
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 20,
+                                    "title": "アメジストの塊",
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                                    "revisions": [{"revid": 2}],
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "query": {
+                            "pages": [
+                                {
+                                    "pageid": 20,
+                                    "title": "アメジストの塊",
+                                    "canonicalurl": "https://ja.minecraft.wiki/w/%E3%82%A2%E3%83%A1%E3%82%B8%E3%82%B9%E3%83%88%E3%81%AE%E5%A1%8A",
+                                    "revisions": [{"revid": 2}],
+                                }
+                            ]
+                        }
+                    },
+                ],
+            )
+
+            items = asyncio.run(_all_backfill_items(connector))
+            markdown_files = sorted(path.name for path in ingestion_dir.glob("*.md"))
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(markdown_files, ["アメジストの塊.md"])
 
     def test_ingestion_chunker_skips_redirect_only_minecraft_wiki_documents(self) -> None:
         document = NormalizedDocument(
@@ -546,6 +680,10 @@ async def _first_backfill_item(connector: MinecraftWikiConnector):
     async for item in connector.backfill(BackfillScope()):
         return item
     raise AssertionError("expected one backfill item")
+
+
+async def _all_backfill_items(connector: MinecraftWikiConnector):
+    return [item async for item in connector.backfill(BackfillScope())]
 
 
 if __name__ == "__main__":

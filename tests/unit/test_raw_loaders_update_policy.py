@@ -109,6 +109,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
             loader = NotionLoader(
                 api_token="token",
                 database_ids=["db-1"],
+                page_ids=["page-1"],
                 ingestion_dir=Path(td),
             )
             with patch(
@@ -123,6 +124,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
             self.assertTrue(kwargs["skip_existing"])
             self.assertTrue(kwargs["update_existing"])
             self.assertTrue(kwargs["sync_deleted"])
+            self.assertEqual(["page-1"], kwargs["page_ids"])
 
 
 if __name__ == "__main__":

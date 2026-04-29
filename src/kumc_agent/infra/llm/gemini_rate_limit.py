@@ -10,6 +10,7 @@ _DEFAULT_LIMITER_NAME = "default"
 _RAGAS_LIMITER_NAME = "ragas_eval"
 _RAGAS_EMBEDDING_LIMITER_NAME = "ragas_eval_embedding"
 _INDEX_SUMMARY_LIMITER_NAME = "index_summary"
+_IMAGE_CAPTION_LIMITER_NAME = "image_caption"
 _EMBEDDING_LIMITER_NAME = "embedding"
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,10 @@ def ragas_embedding_rate_limiter_name() -> str:
 
 def index_summary_rate_limiter_name() -> str:
     return _INDEX_SUMMARY_LIMITER_NAME
+
+
+def image_caption_rate_limiter_name() -> str:
+    return _IMAGE_CAPTION_LIMITER_NAME
 
 
 def embedding_rate_limiter_name() -> str:

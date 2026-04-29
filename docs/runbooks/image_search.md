@@ -14,6 +14,7 @@ python3 -m kumc_agent.cli index update
 ```
 
 Gemini API keyまたはOCRモデルが未設定の場合、caption/OCRはfallbackまたはskipされ、周辺テキストと既存metadataで検索を継続する。
+Gemini caption呼び出しの同時実行数は `configs/main/features.yaml` の `features.image_search.caption_batch_size` で調整する。
 
 ## ロールバック
 重大な誤indexや権限設定ミスがある場合は、直前のバックアップから次を戻す。

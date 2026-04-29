@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -13,6 +14,7 @@ class SnapshotPublishResult:
     previous_snapshot_id: str
     current_pointer: Path
     previous_pointer: Path
+    release_dir: Path
 
 
 class IndexSnapshotPublisher:
@@ -20,6 +22,7 @@ class IndexSnapshotPublisher:
         self._index_dir = index_dir
         self._staging_root = index_dir / "staging"
         self._previous_root = index_dir / "previous"
+        self._releases_root = index_dir / "releases"
         self._keep_snapshots = max(1, int(keep_snapshots))
 
     def staging_dir(self, run_id: str) -> Path:
@@ -29,48 +32,61 @@ class IndexSnapshotPublisher:
     def publish(self, *, run_id: str, staging_dir: Path) -> SnapshotPublishResult:
         self._index_dir.mkdir(parents=True, exist_ok=True)
         snapshot_id = staging_dir.name
-        previous_snapshot_id = self._snapshot_id("previous")
-        if self._has_root_artifacts():
-            previous_snapshot_id = f"previous-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
-            previous_dir = self._previous_root / previous_snapshot_id
-            self._replace_tree(
-                previous_dir,
-                self._index_dir,
-                skip_names={"staging", "previous", "current.json", "previous.json", ".auto_index.lock"},
-            )
-        try:
-            self._copy_root_artifacts(staging_dir)
-        except Exception:
-            if previous_snapshot_id:
-                self.rollback(previous_snapshot_id=previous_snapshot_id)
-            raise
+        previous_snapshot_id = self._snapshot_id("current")
+        release_dir = self._releases_root / snapshot_id
+        self._replace_tree(release_dir, staging_dir, skip_names=set())
         current_pointer = self._index_dir / "current.json"
         previous_pointer = self._index_dir / "previous.json"
-        current_pointer.write_text(
-            json.dumps({"snapshot_id": snapshot_id, "path": str(staging_dir)}, ensure_ascii=False),
-            encoding="utf-8",
+        self._write_pointer_atomic(
+            previous_pointer,
+            {
+                "snapshot_id": previous_snapshot_id,
+                "path": str(self._release_dir(previous_snapshot_id)) if previous_snapshot_id else "",
+            },
         )
-        previous_pointer.write_text(
-            json.dumps({"snapshot_id": previous_snapshot_id}, ensure_ascii=False),
-            encoding="utf-8",
+        self._write_pointer_atomic(
+            current_pointer,
+            {
+                "snapshot_id": snapshot_id,
+                "path": str(release_dir),
+                "previous_snapshot_id": previous_snapshot_id,
+                "published_at": datetime.now(UTC).isoformat(),
+            },
         )
-        self._prune_previous_snapshots()
+        self._prune_releases()
         return SnapshotPublishResult(
             snapshot_id=snapshot_id,
             previous_snapshot_id=previous_snapshot_id,
             current_pointer=current_pointer,
             previous_pointer=previous_pointer,
+            release_dir=release_dir,
         )
 
     def rollback(self, *, previous_snapshot_id: str) -> dict[str, object]:
-        previous_dir = self._previous_root / previous_snapshot_id
+        previous_dir = self._release_dir(previous_snapshot_id)
         if not previous_snapshot_id or not previous_dir.exists():
             return {
                 "status": "failed",
                 "reason": "previous_snapshot_not_found",
                 "previous_snapshot_id": previous_snapshot_id,
             }
-        self._copy_root_artifacts(previous_dir)
+        current_snapshot_id = self._snapshot_id("current")
+        self._write_pointer_atomic(
+            self._index_dir / "previous.json",
+            {
+                "snapshot_id": current_snapshot_id,
+                "path": str(self._release_dir(current_snapshot_id)) if current_snapshot_id else "",
+            },
+        )
+        self._write_pointer_atomic(
+            self._index_dir / "current.json",
+            {
+                "snapshot_id": previous_snapshot_id,
+                "path": str(previous_dir),
+                "rolled_back_from_snapshot_id": current_snapshot_id,
+                "published_at": datetime.now(UTC).isoformat(),
+            },
+        )
         return {
             "status": "succeeded",
             "previous_snapshot_id": previous_snapshot_id,
@@ -78,36 +94,19 @@ class IndexSnapshotPublisher:
 
     def rollback_to_latest_previous(self) -> dict[str, object]:
         previous_snapshot_id = self._snapshot_id("previous")
-        if not previous_snapshot_id and self._previous_root.exists():
+        if not previous_snapshot_id and self._releases_root.exists():
+            current_snapshot_id = self._snapshot_id("current")
             snapshots = sorted(
-                (path for path in self._previous_root.iterdir() if path.is_dir()),
+                (
+                    path
+                    for path in self._releases_root.iterdir()
+                    if path.is_dir() and path.name != current_snapshot_id
+                ),
                 key=lambda value: value.stat().st_mtime,
                 reverse=True,
             )
             previous_snapshot_id = snapshots[0].name if snapshots else ""
         return self.rollback(previous_snapshot_id=previous_snapshot_id)
-
-    def _has_root_artifacts(self) -> bool:
-        return any(
-            path.is_file()
-            for path in self._index_dir.iterdir()
-            if path.name not in {"current.json", "previous.json", ".auto_index.lock"}
-        ) if self._index_dir.exists() else False
-
-    def _copy_root_artifacts(self, source_dir: Path) -> None:
-        for path in self._index_dir.iterdir():
-            if path.name in {"staging", "previous"}:
-                continue
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-        for item in source_dir.iterdir():
-            target = self._index_dir / item.name
-            if item.is_dir():
-                shutil.copytree(item, target)
-            else:
-                shutil.copy2(item, target)
 
     def _replace_tree(self, target_dir: Path, source_dir: Path, *, skip_names: set[str]) -> None:
         if target_dir.exists():
@@ -122,16 +121,26 @@ class IndexSnapshotPublisher:
             else:
                 shutil.copy2(item, target)
 
-    def _prune_previous_snapshots(self) -> None:
-        if not self._previous_root.exists():
+    def _prune_releases(self) -> None:
+        if not self._releases_root.exists():
             return
+        protected = {self._snapshot_id("current"), self._snapshot_id("previous")}
         snapshots = sorted(
-            (path for path in self._previous_root.iterdir() if path.is_dir()),
+            (path for path in self._releases_root.iterdir() if path.is_dir()),
             key=lambda value: value.stat().st_mtime,
             reverse=True,
         )
-        for path in snapshots[self._keep_snapshots :]:
+        kept = 0
+        for path in snapshots:
+            if path.name in protected:
+                continue
+            kept += 1
+            if kept <= self._keep_snapshots:
+                continue
             shutil.rmtree(path, ignore_errors=True)
+
+    def _release_dir(self, snapshot_id: str) -> Path:
+        return self._releases_root / snapshot_id
 
     def _snapshot_id(self, pointer_name: str) -> str:
         pointer = self._index_dir / f"{pointer_name}.json"
@@ -142,3 +151,13 @@ class IndexSnapshotPublisher:
         except Exception:
             return ""
         return str(payload.get("snapshot_id") or "") if isinstance(payload, dict) else ""
+
+    @staticmethod
+    def _write_pointer_atomic(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        tmp.replace(path)

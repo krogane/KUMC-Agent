@@ -24,6 +24,8 @@ from kumc_agent.utils.hashing import stable_hash
 
 @dataclass(frozen=True)
 class MinecraftWikiConnector:
+    supports_incremental = False
+
     ingestion_dir: Path
     page_titles: tuple[str, ...]
     api_url: str
@@ -58,10 +60,16 @@ class MinecraftWikiConnector:
             titles = titles[: max(0, scope.limit)]
         if self.max_pages > 0:
             titles = titles[: self.max_pages]
+        seen_page_ids: set[str] = set()
         for title in titles:
             raw = self._fetch_page(title, force=scope.force)
             if raw is None:
                 continue
+            page_id = str(raw.metadata.get("minecraft_wiki_page_id") or raw.external_id).strip()
+            if page_id and page_id in seen_page_ids:
+                continue
+            if page_id:
+                seen_page_ids.add(page_id)
             yield raw
 
     async def poll_changes(
@@ -98,7 +106,7 @@ class MinecraftWikiConnector:
         clean_title = (title or "").strip()
         if not clean_title:
             return None
-        path = self.ingestion_dir / f"{_safe_name(clean_title)}.md"
+        path = self._cache_path_for_title(clean_title)
         meta_path = path.with_suffix(path.suffix + ".meta.json")
         if path.exists() and not force:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -115,6 +123,12 @@ class MinecraftWikiConnector:
                 remote_metadata = {}
             remote_revision = str(remote_metadata.get("revid") or "").strip()
             if not remote_revision or remote_revision == cached_revision:
+                path = self._consolidate_cached_page(
+                    text=text,
+                    metadata=metadata,
+                    current_path=path,
+                    fallback_title=clean_title,
+                )
                 return self._raw_item(
                     title=_raw_item_title(clean_title, metadata),
                     text=text,
@@ -128,6 +142,12 @@ class MinecraftWikiConnector:
             if path.exists():
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 metadata = _read_json(meta_path)
+                path = self._consolidate_cached_page(
+                    text=text,
+                    metadata=metadata,
+                    current_path=path,
+                    fallback_title=clean_title,
+                )
                 return self._raw_item(
                     title=_raw_item_title(clean_title, metadata),
                     text=text,
@@ -138,10 +158,13 @@ class MinecraftWikiConnector:
         if not text.strip():
             return None
         metadata["checksum"] = stable_hash(text)
-        metadata["minecraft_wiki_cache_title"] = clean_title
+        path = self._cache_path_for_metadata(metadata=metadata, fallback_title=clean_title)
+        meta_path = path.with_suffix(path.suffix + ".meta.json")
+        metadata["minecraft_wiki_cache_title"] = _raw_item_title(clean_title, metadata)
         metadata["minecraft_wiki_cache_file"] = path.name
         path.write_text(text, encoding="utf-8")
         meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        self._remove_duplicate_cache_files(metadata=metadata, keep_path=path)
         self._write_manifest_entry(metadata=metadata, path=path)
         return self._raw_item(
             title=_raw_item_title(clean_title, metadata),
@@ -457,6 +480,93 @@ class MinecraftWikiConnector:
                 "visibility": "public",
             },
         )
+
+    def _cache_path_for_title(self, title: str) -> Path:
+        return self.ingestion_dir / f"{_safe_name(title)}.md"
+
+    def _cache_path_for_metadata(
+        self,
+        *,
+        metadata: dict[str, object],
+        fallback_title: str,
+    ) -> Path:
+        title = _raw_item_title(fallback_title, metadata)
+        page_id = str(metadata.get("minecraft_wiki_page_id") or "").strip()
+        base = self._cache_path_for_title(title)
+        existing_metadata = _read_json(base.with_suffix(base.suffix + ".meta.json"))
+        existing_page_id = str(existing_metadata.get("minecraft_wiki_page_id") or "").strip()
+        if not base.exists() or not page_id or not existing_page_id or existing_page_id == page_id:
+            return base
+
+        stem = _safe_name(f"{title}_{page_id}")
+        candidate = self.ingestion_dir / f"{stem}.md"
+        counter = 2
+        while candidate.exists():
+            candidate_metadata = _read_json(candidate.with_suffix(candidate.suffix + ".meta.json"))
+            candidate_page_id = str(
+                candidate_metadata.get("minecraft_wiki_page_id") or ""
+            ).strip()
+            if not candidate_page_id or candidate_page_id == page_id:
+                return candidate
+            candidate = self.ingestion_dir / f"{stem}_{counter}.md"
+            counter += 1
+        return candidate
+
+    def _consolidate_cached_page(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, object],
+        current_path: Path,
+        fallback_title: str,
+    ) -> Path:
+        target_path = self._cache_path_for_metadata(
+            metadata=metadata,
+            fallback_title=fallback_title,
+        )
+        metadata["checksum"] = stable_hash(text)
+        metadata["minecraft_wiki_cache_title"] = _raw_item_title(fallback_title, metadata)
+        metadata["minecraft_wiki_cache_file"] = target_path.name
+        if target_path != current_path:
+            target_path.write_text(text, encoding="utf-8")
+            target_path.with_suffix(target_path.suffix + ".meta.json").write_text(
+                json.dumps(metadata, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        else:
+            current_path.with_suffix(current_path.suffix + ".meta.json").write_text(
+                json.dumps(metadata, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        self._remove_duplicate_cache_files(metadata=metadata, keep_path=target_path)
+        self._write_manifest_entry(metadata=metadata, path=target_path)
+        return target_path
+
+    def _remove_duplicate_cache_files(
+        self,
+        *,
+        metadata: dict[str, object],
+        keep_path: Path,
+    ) -> None:
+        page_id = str(metadata.get("minecraft_wiki_page_id") or "").strip()
+        if not page_id:
+            return
+        keep_path = keep_path.resolve()
+        for meta_path in self.ingestion_dir.glob("*.md.meta.json"):
+            cached_metadata = _read_json(meta_path)
+            cached_page_id = str(
+                cached_metadata.get("minecraft_wiki_page_id") or ""
+            ).strip()
+            if cached_page_id != page_id:
+                continue
+            raw_path = Path(str(meta_path)[: -len(".meta.json")])
+            if raw_path.resolve() == keep_path:
+                continue
+            try:
+                raw_path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+            except OSError:
+                continue
 
     def _write_manifest_entry(
         self,

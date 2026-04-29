@@ -6,5 +6,5 @@ event_management:
   notification_before_days: 1
   notification_channel_id: ""
   prompt_name: "event_extraction.md"
-  auto_extract_after_index_update: true
+  auto_extract_after_index_update: false
   timezone: "Asia/Tokyo"

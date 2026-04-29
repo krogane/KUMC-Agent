@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - fallback for minimal runtime
             return scores
 
 logger = logging.getLogger(__name__)
-FileSignature = tuple[int, int]
+FileSignature = tuple[str, int, int]
 
 try:
     from sudachipy import dictionary as sudachi_dictionary
@@ -44,6 +44,7 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.policies.chunk_visibility import is_chunk_allowed_for_answer_context
+from kumc_agent.features.indexing.paths import resolve_current_index_dir
 
 
 class SudachiBM25Retriever:
@@ -58,8 +59,6 @@ class SudachiBM25Retriever:
         remove_symbols: bool = True,
     ) -> None:
         self._index_dir = index_dir
-        self._tokens_path = self._index_dir / "bm25_tokens.json"
-        self._chunks_path = self._index_dir / "bm25_chunks.jsonl"
         self._sudachi_mode = (sudachi_mode or "B").upper()
         self._bm25_k1 = float(bm25_k1)
         self._bm25_b = float(bm25_b)
@@ -77,8 +76,10 @@ class SudachiBM25Retriever:
 
     def build(self, chunks: list[Chunk]) -> None:
         tokenized = [self._tokenize(chunk.text) for chunk in chunks]
-        self._tokens_path.write_text(json.dumps(tokenized, ensure_ascii=False), encoding="utf-8")
-        with self._chunks_path.open("w", encoding="utf-8") as fw:
+        tokens_path = self._write_path("bm25_tokens.json")
+        chunks_path = self._write_path("bm25_chunks.jsonl")
+        tokens_path.write_text(json.dumps(tokenized, ensure_ascii=False), encoding="utf-8")
+        with chunks_path.open("w", encoding="utf-8") as fw:
             for chunk in chunks:
                 fw.write(
                     json.dumps(
@@ -94,9 +95,9 @@ class SudachiBM25Retriever:
                     + "\n"
                 )
         self._cached_tokens = tokenized
-        self._cached_tokens_signature = self._file_signature(self._tokens_path)
+        self._cached_tokens_signature = self._file_signature(tokens_path)
         self._cached_chunks = list(chunks)
-        self._cached_chunks_signature = self._file_signature(self._chunks_path)
+        self._cached_chunks_signature = self._file_signature(chunks_path)
         self._cached_bm25 = self._build_bm25(tokenized)
         self._cached_bm25_signature = self._cached_tokens_signature
 
@@ -144,18 +145,19 @@ class SudachiBM25Retriever:
         return bm25
 
     def _load_tokenized(self) -> list[list[str]]:
-        if not self._tokens_path.exists():
+        tokens_path = self._read_path("bm25_tokens.json")
+        if not tokens_path.exists():
             self._cached_tokens = None
             self._cached_tokens_signature = None
             return []
-        current_signature = self._file_signature(self._tokens_path)
+        current_signature = self._file_signature(tokens_path)
         if (
             self._cached_tokens is not None
             and self._cached_tokens_signature is not None
             and self._cached_tokens_signature == current_signature
         ):
             return self._cached_tokens
-        tokenized = json.loads(self._tokens_path.read_text(encoding="utf-8"))
+        tokenized = json.loads(tokens_path.read_text(encoding="utf-8"))
         if not isinstance(tokenized, list):
             tokenized = []
         normalized: list[list[str]] = []
@@ -170,11 +172,12 @@ class SudachiBM25Retriever:
         return normalized
 
     def _load_chunks(self) -> list[Chunk]:
-        if not self._chunks_path.exists():
+        chunks_path = self._read_path("bm25_chunks.jsonl")
+        if not chunks_path.exists():
             self._cached_chunks = None
             self._cached_chunks_signature = None
             return []
-        current_signature = self._file_signature(self._chunks_path)
+        current_signature = self._file_signature(chunks_path)
         if (
             self._cached_chunks is not None
             and self._cached_chunks_signature is not None
@@ -182,7 +185,7 @@ class SudachiBM25Retriever:
         ):
             return self._cached_chunks
         out: list[Chunk] = []
-        with self._chunks_path.open("r", encoding="utf-8") as fr:
+        with chunks_path.open("r", encoding="utf-8") as fr:
             for line in fr:
                 payload = json.loads(line)
                 out.append(
@@ -275,10 +278,16 @@ class SudachiBM25Retriever:
             )
             return None
 
+    def _read_path(self, name: str) -> Path:
+        return resolve_current_index_dir(self._index_dir) / name
+
+    def _write_path(self, name: str) -> Path:
+        return self._index_dir / name
+
     @staticmethod
     def _file_signature(path: Path) -> FileSignature | None:
         try:
             stat = path.stat()
         except FileNotFoundError:
             return None
-        return (int(stat.st_mtime_ns), int(stat.st_size))
+        return (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))

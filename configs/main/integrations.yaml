@@ -27,14 +27,15 @@ integrations:
   notion:
     api_token: ""
     database_ids: []
+    page_ids: []
   minecraft_wiki:
     page_titles: []
     api_url: "https://ja.minecraft.wiki/api.php"
     page_url_base: "https://ja.minecraft.wiki/w/"
     acquisition_mode: "configured"
-    max_pages: 0
-    rate_limit_per_minute: 120
-    request_interval_seconds: 1.0
+    max_pages: 50
+    rate_limit_per_minute: 600
+    request_interval_seconds: 0.1
     namespaces: [0]
     full_backfill_enabled: false
     category_sample:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+import json
 from typing import Any, Callable
 
 from kumc_agent.domain.models.audit import AuditEvent
@@ -51,6 +52,7 @@ class AutomationService:
         action_executor: Callable[[ActionSpecRef], dict[str, object]] | None = None,
         auto_index_cron: str = "0 6 * * MON-FRI",
         auto_index_enabled: bool = True,
+        auto_index_timezone: str = "Asia/Tokyo",
         autonomous_agent_rules: tuple[AutomationRule, ...] = tuple(),
     ) -> None:
         self.repository = repository
@@ -60,19 +62,24 @@ class AutomationService:
         self.action_executor = action_executor
         self.auto_index_cron = auto_index_cron
         self.auto_index_enabled = auto_index_enabled
+        self.auto_index_timezone = auto_index_timezone
         self.autonomous_agent_rules = autonomous_agent_rules
 
     def seed_defaults(self) -> tuple[AutomationRule, ...]:
-        existing = {rule.id for rule in self.repository.list_rules()}
-        stored = [
-            self.repository.save_rule(rule)
-            for rule in _default_rules(
-                auto_index_cron=self.auto_index_cron,
-                auto_index_enabled=self.auto_index_enabled,
-                autonomous_agent_rules=self.autonomous_agent_rules,
-            )
-            if rule.id not in existing
-        ]
+        existing_rules = {rule.id: rule for rule in self.repository.list_rules()}
+        stored: list[AutomationRule] = []
+        for rule in _default_rules(
+            auto_index_cron=self.auto_index_cron,
+            auto_index_enabled=self.auto_index_enabled,
+            auto_index_timezone=self.auto_index_timezone,
+            autonomous_agent_rules=self.autonomous_agent_rules,
+        ):
+            existing = existing_rules.get(rule.id)
+            if existing is None:
+                stored.append(self.repository.save_rule(rule))
+                continue
+            if _managed_default_should_sync(existing=existing, default=rule):
+                stored.append(self.repository.save_rule(rule))
         if not stored:
             return tuple(self.repository.list_rules())
         self._audit(
@@ -408,14 +415,31 @@ def _default_rules(
     *,
     auto_index_cron: str = "0 6 * * MON-FRI",
     auto_index_enabled: bool = True,
+    auto_index_timezone: str = "Asia/Tokyo",
     autonomous_agent_rules: tuple[AutomationRule, ...] = tuple(),
 ) -> tuple[AutomationRule, ...]:
+    auto_index_metadata = {
+        "managed_by": "config",
+        "config_hash": stable_hash(
+            json.dumps(
+                {
+                    "cron": auto_index_cron,
+                    "enabled": auto_index_enabled,
+                    "timezone": auto_index_timezone,
+                },
+                sort_keys=True,
+            )
+        ),
+    }
     return (
         AutomationRule(
             id="auto_index_daily",
             name="自動インデックス日次更新",
             enabled=auto_index_enabled,
-            trigger=TriggerSpec("schedule_cron", {"cron": auto_index_cron}),
+            trigger=TriggerSpec(
+                "schedule_cron",
+                {"cron": auto_index_cron, "timezone": auto_index_timezone},
+            ),
             actions=(
                 ActionSpecRef(
                     "auto_index_update",
@@ -428,6 +452,7 @@ def _default_rules(
             risk_level="low",
             created_by_user_id="system",
             approved_by_user_id="system",
+            metadata=auto_index_metadata,
         ),
         AutomationRule(
             id="weekly_summary",
@@ -555,6 +580,16 @@ def _default_rules(
         ),
         *autonomous_agent_rules,
     )
+
+
+def _managed_default_should_sync(*, existing: AutomationRule, default: AutomationRule) -> bool:
+    if existing.created_by_user_id != "system":
+        return False
+    existing_metadata = dict(existing.metadata or {})
+    default_metadata = dict(default.metadata or {})
+    if existing_metadata.get("managed_by") not in {"", None, "config"}:
+        return False
+    return existing_metadata.get("config_hash") != default_metadata.get("config_hash")
 
 
 def _normalize_mode(mode: str) -> str:

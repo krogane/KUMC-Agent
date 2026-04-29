@@ -330,6 +330,7 @@ class ImageSearchFeatureSection:
     ocr_text_char_limit: int = 800
     surrounding_text_char_limit: int = 1200
     caption_model: str = ""
+    caption_batch_size: int = 8
     ocr_model: str = ""
     feature_model: str = "openai/clip-vit-base-patch32"
     feature_dimensions: int = 512
@@ -607,6 +608,7 @@ class IntegrationHatenablogSection:
 class IntegrationNotionSection:
     api_token: str
     database_ids: list[str]
+    page_ids: list[str]
 
 
 @dataclass(frozen=True)

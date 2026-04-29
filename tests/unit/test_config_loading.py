@@ -117,6 +117,7 @@ class ConfigLoadingTests(unittest.TestCase):
                   notion:
                     api_token: ""
                     database_ids: ["db-primary", "db-secondary"]
+                    page_ids: ["page-primary"]
                   openai_api_key: ""
                   gemini_api_key: ""
                   gemini_requests_per_minute: 60
@@ -305,6 +306,7 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_HATENA_BLOG_URL": "https://example.hatenablog.com/",
                     "KUMC_NOTION_API_TOKEN": "secret-notion-token",
                     "KUMC_NOTION_DATABASE_IDS": "env-db-primary, env-db-secondary",
+                    "KUMC_NOTION_PAGE_IDS": "env-page-primary, env-page-secondary",
                     "KUMC_DRIVE_BATCH_SIZE": "11",
                     "KUMC_DRIVE_DOWNLOAD_MAX_RETRIES": "4",
                     "KUMC_DRIVE_DOWNLOAD_RETRY_INITIAL_DELAY_SECONDS": "0.25",
@@ -405,6 +407,10 @@ class ConfigLoadingTests(unittest.TestCase):
                 ["env-db-primary", "env-db-secondary"],
             )
             self.assertEqual(
+                config.integrations.notion.page_ids,
+                ["env-page-primary", "env-page-secondary"],
+            )
+            self.assertEqual(
                 config.integrations.hatenablog.blog_url,
                 "https://example.hatenablog.com/",
             )
@@ -421,6 +427,7 @@ class ConfigLoadingTests(unittest.TestCase):
                 config.integrations.drive.download_retry_backoff_multiplier,
                 1.5,
             )
+            self.assertEqual(config.features.image_search.caption_batch_size, 8)
             self.assertEqual(config.indexing.chunking.summary_batch_size, 3)
             self.assertEqual(config.indexing.chunking.summary_llm_provider, "gemini")
             self.assertEqual(config.indexing.chunking.summary_gemini_model, "gemini-summary")

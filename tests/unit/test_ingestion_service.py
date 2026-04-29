@@ -73,6 +73,26 @@ class DummyConnector:
         )
 
 
+class FullScanOnlyConnector(DummyConnector):
+    supports_incremental = False
+
+    async def poll_changes(self, cursor: SyncCursor):
+        raise AssertionError("unsupported connector must not poll changes")
+
+
+class IncrementalConnector(DummyConnector):
+    supports_incremental = True
+
+    def __init__(self, items: list[SourceRawItem]) -> None:
+        super().__init__(items)
+        self.polled = False
+
+    async def poll_changes(self, cursor: SyncCursor):
+        self.polled = True
+        for item in self.items:
+            yield item
+
+
 class IngestionServiceTests(unittest.TestCase):
     def test_backfill_detects_checksum_and_secret_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,6 +153,117 @@ class IngestionServiceTests(unittest.TestCase):
             )
             self.assertEqual(source_item["metadata"]["terms_review_status"], "pending")
             self.assertFalse(source_item["metadata"]["external_reuse_allowed"])
+
+    def test_existing_cursor_uses_full_scan_when_connector_has_no_incremental_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = FileIngestionRepository(root / "ingestion")
+            repository.save_sync_cursor(
+                SyncCursor(source_kind="dummy", cursor="old-cursor", metadata={})
+            )
+            raw = SourceRawItem(
+                source_kind="dummy",
+                external_id="item-1",
+                title="Sample",
+                text="hello",
+                access_scope=AccessScope(visibility="public"),
+                checksum=stable_hash("hello"),
+            )
+            service = IngestionService(
+                connectors={"dummy": FullScanOnlyConnector([raw])},
+                repository=repository,
+                raw_snapshots=RawSnapshotStore(
+                    config=ObjectStorageSection(
+                        endpoint_url="",
+                        bucket="",
+                        region="ap-northeast-1",
+                        access_key_id="",
+                        secret_access_key="",
+                        prefix="test",
+                        use_ssl=True,
+                    ),
+                    local_root=root / "objects",
+                    s3=S3ObjectStorageClient(
+                        ObjectStorageSection(
+                            endpoint_url="",
+                            bucket="",
+                            region="ap-northeast-1",
+                            access_key_id="",
+                            secret_access_key="",
+                            prefix="test",
+                            use_ssl=True,
+                        )
+                    ),
+                ),
+                chunker=IngestionChunker(),
+                secret_detector=SecretFindingDetector(),
+                audit_log=FileAuditLogRepository(root / "audit.jsonl"),
+            )
+
+            result = asyncio.run(service.backfill(source_kind="dummy"))
+            cursor = repository.load_sync_cursor("dummy")
+
+            self.assertEqual(result.changed, 1)
+            self.assertIsNotNone(cursor)
+            self.assertEqual(cursor.metadata["mode"], "full_scan_cursor_unsupported")  # type: ignore[union-attr]
+            self.assertFalse(cursor.metadata["cursor_supported"])  # type: ignore[union-attr]
+            self.assertTrue(cursor.metadata["previous_cursor_present"])  # type: ignore[union-attr]
+
+    def test_existing_cursor_uses_poll_changes_when_connector_supports_incremental(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = FileIngestionRepository(root / "ingestion")
+            repository.save_sync_cursor(
+                SyncCursor(source_kind="dummy", cursor="old-cursor", metadata={})
+            )
+            raw = SourceRawItem(
+                source_kind="dummy",
+                external_id="item-1",
+                title="Sample",
+                text="hello",
+                access_scope=AccessScope(visibility="public"),
+                checksum=stable_hash("hello"),
+            )
+            connector = IncrementalConnector([raw])
+            service = IngestionService(
+                connectors={"dummy": connector},
+                repository=repository,
+                raw_snapshots=RawSnapshotStore(
+                    config=ObjectStorageSection(
+                        endpoint_url="",
+                        bucket="",
+                        region="ap-northeast-1",
+                        access_key_id="",
+                        secret_access_key="",
+                        prefix="test",
+                        use_ssl=True,
+                    ),
+                    local_root=root / "objects",
+                    s3=S3ObjectStorageClient(
+                        ObjectStorageSection(
+                            endpoint_url="",
+                            bucket="",
+                            region="ap-northeast-1",
+                            access_key_id="",
+                            secret_access_key="",
+                            prefix="test",
+                            use_ssl=True,
+                        )
+                    ),
+                ),
+                chunker=IngestionChunker(),
+                secret_detector=SecretFindingDetector(),
+                audit_log=FileAuditLogRepository(root / "audit.jsonl"),
+            )
+
+            result = asyncio.run(service.backfill(source_kind="dummy"))
+            cursor = repository.load_sync_cursor("dummy")
+
+            self.assertEqual(result.changed, 1)
+            self.assertTrue(connector.polled)
+            self.assertIsNotNone(cursor)
+            self.assertEqual(cursor.metadata["mode"], "poll_changes")  # type: ignore[union-attr]
+            self.assertTrue(cursor.metadata["cursor_supported"])  # type: ignore[union-attr]
 
     def test_filesystem_storage_excludes_deny_chunks_from_answer_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

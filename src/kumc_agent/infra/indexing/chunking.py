@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import bisect
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -1451,6 +1451,34 @@ def summery_chunk_jsonl_dir(
     )
 
     expected_output_names = {path.name for path in jsonl_files}
+    output_chunks_by_path: dict[Path, list[Chunk]] = {}
+    summary_jobs: list[tuple[Path, str, dict[str, object], str]] = []
+    processed_paths: list[Path] = []
+    input_path_by_output_path: dict[Path, Path] = {}
+    summary_requests_per_minute = getattr(
+        config,
+        "gemini_summary_requests_per_minute",
+        getattr(config, "gemini_requests_per_minute", 60),
+    )
+    summary_model = config.summery_gemini_model
+
+    def _run_summary_prompt(prompt: str, *, source_name: str) -> list[str] | None:
+        return _run_llm_chunking(
+            prompt=prompt,
+            source_name=source_name,
+            provider=provider,
+            api_key=config.gemini_api_key,
+            gemini_requests_per_minute=summary_requests_per_minute,
+            model=summary_model,
+            temperature=config.summery_temperature,
+            max_output_tokens=config.summery_max_output_tokens,
+            max_retries=max_retries,
+            action_label="Summery chunking",
+            gemini_rate_limiter_name=index_summary_rate_limiter_name(),
+            output_format="raw_text",
+            response_mime_type="text/plain",
+        )
+
     for path in jsonl_files:
         out_path = output_chunk_dir / path.name
         if _should_skip_existing_output(
@@ -1461,6 +1489,9 @@ def summery_chunk_jsonl_dir(
             action_label="summery chunking",
         ):
             continue
+        processed_paths.append(out_path)
+        input_path_by_output_path[out_path] = path
+        output_chunks_by_path[out_path] = []
 
         chunks = load_chunks(path)
         if not chunks:
@@ -1475,66 +1506,6 @@ def summery_chunk_jsonl_dir(
                 skip_parent_chunk_ids = _skip_parent_chunk_ids_from_second_chunks(
                     second_chunks
                 )
-
-        output_chunks: list[Chunk] = []
-        output_index = 0
-        summary_requests_per_minute = getattr(
-            config,
-            "gemini_summary_requests_per_minute",
-            getattr(config, "gemini_requests_per_minute", 60),
-        )
-        summary_model = config.summery_gemini_model
-        pending_prompts: list[str] = []
-        pending_metadatas: list[dict[str, object]] = []
-
-        def _run_summary_prompt(prompt: str) -> list[str] | None:
-            return _run_llm_chunking(
-                prompt=prompt,
-                source_name=path.name,
-                provider=provider,
-                api_key=config.gemini_api_key,
-                gemini_requests_per_minute=summary_requests_per_minute,
-                model=summary_model,
-                temperature=config.summery_temperature,
-                max_output_tokens=config.summery_max_output_tokens,
-                max_retries=max_retries,
-                action_label="Summery chunking",
-                gemini_rate_limiter_name=index_summary_rate_limiter_name(),
-                output_format="raw_text",
-                response_mime_type="text/plain",
-            )
-
-        def _flush_summary_batch() -> None:
-            nonlocal output_index
-            if not pending_prompts:
-                return
-
-            if len(pending_prompts) == 1:
-                batch_results = [_run_summary_prompt(pending_prompts[0])]
-            else:
-                with ThreadPoolExecutor(max_workers=len(pending_prompts)) as executor:
-                    futures = [
-                        executor.submit(_run_summary_prompt, prompt)
-                        for prompt in pending_prompts
-                    ]
-                    batch_results = [future.result() for future in futures]
-
-            for base_metadata, chunk_texts in zip(
-                pending_metadatas,
-                batch_results,
-                strict=False,
-            ):
-                if chunk_texts is None:
-                    continue
-                for chunk_text in chunk_texts:
-                    metadata = dict(base_metadata)
-                    metadata["chunk_id"] = output_index
-                    metadata = _with_stage(metadata, "summery")
-                    output_chunks.append(Chunk(text=chunk_text, metadata=metadata))
-                    output_index += 1
-
-            pending_prompts.clear()
-            pending_metadatas.clear()
 
         for chunk in chunks:
             source_text = chunk.text
@@ -1561,20 +1532,58 @@ def summery_chunk_jsonl_dir(
                 source_type=source_type,
                 drive_file_path=drive_file_path,
             )
-            pending_prompts.append(prompt)
-            pending_metadatas.append(base_metadata)
-            if len(pending_prompts) >= summary_batch_size:
-                _flush_summary_batch()
+            summary_jobs.append((out_path, path.name, base_metadata, prompt))
 
-        _flush_summary_batch()
+    batch_results: list[list[str] | None] = [None] * len(summary_jobs)
+    for batch_start in range(0, len(summary_jobs), summary_batch_size):
+        batch = summary_jobs[batch_start : batch_start + summary_batch_size]
+        if len(batch) == 1:
+            _out_path, source_name, _metadata, prompt = batch[0]
+            batch_results[batch_start] = _run_summary_prompt(
+                prompt,
+                source_name=source_name,
+            )
+            continue
 
-        write_chunks(out_path, output_chunks)
-        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            futures: dict[Future[list[str] | None], int] = {}
+            for offset, (_out_path, source_name, _metadata, prompt) in enumerate(batch):
+                futures[
+                    executor.submit(
+                        _run_summary_prompt,
+                        prompt,
+                        source_name=source_name,
+                    )
+                ] = batch_start + offset
+            for future in as_completed(futures):
+                batch_results[futures[future]] = future.result()
+
+    output_indexes: dict[Path, int] = {path: 0 for path in processed_paths}
+    for (out_path, _source_name, base_metadata, _prompt), chunk_texts in zip(
+        summary_jobs,
+        batch_results,
+        strict=False,
+    ):
+        if chunk_texts is None:
+            continue
+        for chunk_text in chunk_texts:
+            metadata = dict(base_metadata)
+            metadata["chunk_id"] = output_indexes[out_path]
+            metadata = _with_stage(metadata, "summery")
+            output_chunks_by_path[out_path].append(
+                Chunk(text=chunk_text, metadata=metadata)
+            )
+            output_indexes[out_path] += 1
+
+    for out_path in processed_paths:
+        write_chunks(out_path, output_chunks_by_path.get(out_path, []))
+        input_path = input_path_by_output_path[out_path]
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=input_path)
         logger.info(
             "Summery chunked %s -> %s (%d chunks)",
-            path.name,
+            input_path.name,
             out_path.name,
-            len(output_chunks),
+            len(output_chunks_by_path.get(out_path, [])),
         )
 
     if sync_deleted:

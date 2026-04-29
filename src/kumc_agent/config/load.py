@@ -521,6 +521,7 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     image_search.setdefault("ocr_text_char_limit", 800)
     image_search.setdefault("surrounding_text_char_limit", 1200)
     image_search.setdefault("caption_model", "")
+    image_search.setdefault("caption_batch_size", 8)
     image_search.setdefault("ocr_model", "")
     image_search.setdefault("feature_model", "openai/clip-vit-base-patch32")
     image_search.setdefault("feature_dimensions", 512)
@@ -557,6 +558,13 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
         integrations = {}
         updated["integrations"] = integrations
     integrations.setdefault("openai_api_key", "")
+    notion = integrations.get("notion")
+    if not isinstance(notion, dict):
+        notion = {}
+        integrations["notion"] = notion
+    notion.setdefault("api_token", "")
+    notion.setdefault("database_ids", [])
+    notion.setdefault("page_ids", [])
     openclaw = integrations.get("openclaw")
     if not isinstance(openclaw, dict):
         openclaw = {}
@@ -858,6 +866,9 @@ def _to_runtime_config(
     notion_database_ids_raw = notion.get("database_ids", [])
     if not isinstance(notion_database_ids_raw, list):
         notion_database_ids_raw = []
+    notion_page_ids_raw = notion.get("page_ids", [])
+    if not isinstance(notion_page_ids_raw, list):
+        notion_page_ids_raw = []
     minecraft_wiki = integrations.get("minecraft_wiki", {})
     if not isinstance(minecraft_wiki, dict):
         minecraft_wiki = {}
@@ -1412,6 +1423,7 @@ def _to_runtime_config(
                     image_search_raw.get("surrounding_text_char_limit", 1200)
                 ),
                 caption_model=str(image_search_raw.get("caption_model", "")),
+                caption_batch_size=int(image_search_raw.get("caption_batch_size", 8)),
                 ocr_model=str(image_search_raw.get("ocr_model", "")),
                 feature_model=str(image_search_raw.get("feature_model", "openai/clip-vit-base-patch32")),
                 feature_dimensions=int(image_search_raw.get("feature_dimensions", 512)),
@@ -2091,6 +2103,11 @@ def _to_runtime_config(
                 database_ids=[
                     str(value).strip()
                     for value in notion_database_ids_raw
+                    if str(value).strip()
+                ],
+                page_ids=[
+                    str(value).strip()
+                    for value in notion_page_ids_raw
                     if str(value).strip()
                 ],
             ),

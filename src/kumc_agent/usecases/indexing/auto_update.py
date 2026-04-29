@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import threading
+import time
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -15,6 +17,7 @@ from kumc_agent.domain.models.source import BackfillScope
 from kumc_agent.features.indexing.lock import build_indexing_lock
 from kumc_agent.features.indexing.quality import IndexQualitySmokeChecker
 from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
+from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload_metadata
 from kumc_agent.features.ingestion.service import IngestionResult, IngestionService
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.usecases.indexing.build import BuildIndexRequest, BuildIndexUsecase
@@ -131,12 +134,16 @@ class AutoIndexUpdateUsecase:
 
     def execute(self, request: AutoIndexUpdateRequest) -> AutoIndexUpdateResult:
         run_id = _run_id(request.trigger)
+        max_runtime_minutes = int(
+            getattr(self._config.scheduler, "auto_index_max_runtime_minutes", 120)
+        )
         metadata: dict[str, Any] = {
             "trigger": request.trigger,
             "source_filter": list(request.source_filter),
             "force": request.force,
             "full_rebuild": request.full_rebuild,
             "quality_check_enabled": request.quality_check_enabled,
+            "max_runtime_minutes": max_runtime_minutes,
         }
         schedule_skip = _schedule_skip_reason(self._config, request)
         if schedule_skip:
@@ -165,11 +172,20 @@ class AutoIndexUpdateUsecase:
                 )
             )
 
-        run = self._operations.save_indexing_run(
-            IndexingRun(id=run_id, source_kind="all", status="running", metadata=metadata)
+        heartbeat = _LockHeartbeat(
+            lock=lock,
+            interval_seconds=_heartbeat_interval_seconds(
+                self._config.scheduler.auto_index_lock_ttl_minutes
+            ),
         )
+        heartbeat.start()
+        deadline = datetime.now(UTC) + timedelta(minutes=max(1, max_runtime_minutes))
+        run = IndexingRun(id=run_id, source_kind="all", status="running", metadata=metadata)
         try:
+            run = self._operations.save_indexing_run(run)
+            _ensure_before_deadline(deadline)
             ingestion_results = self._ingest_sources(request)
+            _ensure_before_deadline(deadline)
             source_results = [result.__dict__ for result in ingestion_results]
             seen = sum(result.seen for result in ingestion_results)
             changed = sum(result.changed for result in ingestion_results)
@@ -266,6 +282,7 @@ class AutoIndexUpdateUsecase:
                     prefer_ingestion_repository=self._ingestion_service is not None,
                 )
             )
+            _ensure_before_deadline(deadline)
             metadata["stage_results"] = {
                 "index": {
                     "loaded_sources": build_result.loaded_sources,
@@ -278,6 +295,7 @@ class AutoIndexUpdateUsecase:
                 metadata["stage_results"].update(dict(build_result.stage_results or {}))
             if member_profile_refresh_planned:
                 member_profile_runs = self._rebuild_member_profiles(staging_dir=staging_dir)
+                _ensure_before_deadline(deadline)
                 member_profile_results = [profile_run.__dict__ for profile_run in member_profile_runs]
                 metadata["source_results"] = source_results + member_profile_results
                 metadata["stage_results"]["member_profiles"] = {
@@ -315,6 +333,7 @@ class AutoIndexUpdateUsecase:
                     )
             if task_event_refresh_planned and self._task_event_indexer is not None:
                 task_event_run = self._task_event_indexer.rebuild(index_dir=staging_dir)
+                _ensure_before_deadline(deadline)
                 metadata["source_results"] = metadata.get("source_results", []) + [
                     task_event_run.__dict__
                 ]
@@ -379,7 +398,9 @@ class AutoIndexUpdateUsecase:
                     )
 
             try:
+                _ensure_before_deadline(deadline)
                 publish = self._publisher.publish(run_id=run_id, staging_dir=staging_dir)
+                _ensure_before_deadline(deadline)
             except Exception as exc:
                 rollback = self._publisher.rollback_to_latest_previous()
                 return self._save_result(
@@ -407,7 +428,12 @@ class AutoIndexUpdateUsecase:
             metadata["publish"] = {
                 "current_pointer": str(publish.current_pointer),
                 "previous_pointer": str(publish.previous_pointer),
+                "release_dir": str(publish.release_dir),
             }
+            self._commit_staged_side_effects(
+                release_dir=publish.release_dir,
+                metadata=metadata,
+            )
             self._compact_embedding_cache_after_publish(
                 build_result=build_result,
                 metadata=metadata,
@@ -444,7 +470,33 @@ class AutoIndexUpdateUsecase:
             )
             return self._save_result(failed)
         finally:
+            heartbeat.stop()
             lock.release()
+
+    def _commit_staged_side_effects(
+        self,
+        *,
+        release_dir: Path,
+        metadata: dict[str, Any],
+    ) -> None:
+        commit = getattr(self._build_usecase, "commit_staged_side_effects", None)
+        if not callable(commit):
+            return
+        stage_results = metadata.setdefault("stage_results", {})
+        if not isinstance(stage_results, dict):
+            return
+        try:
+            result = commit(release_dir)
+        except Exception as exc:
+            metadata["degraded"] = True
+            stage_results["staged_side_effect_commit"] = {
+                "status": "failed",
+                "error": str(exc)[:500],
+            }
+            return
+        if not result:
+            return
+        stage_results["staged_side_effect_commit"] = result
 
     def _ingest_sources(self, request: AutoIndexUpdateRequest):
         if not request.refresh_sources or self._ingestion_service is None:
@@ -889,27 +941,40 @@ def _notification_payload(*, run_id: str, status: str, reason: str) -> dict[str,
 
 
 def _sanitize_metadata(value: dict[str, Any]) -> dict[str, object]:
-    blocked = {"context", "contexts", "raw", "raw_text", "normalized_text", "secret", "llm_prompt"}
-    sanitized: dict[str, object] = {}
-    for key, item in value.items():
-        if key in blocked:
-            continue
-        if isinstance(item, str):
-            sanitized[key] = _mask_secret(item[:1200])
-        elif isinstance(item, dict):
-            sanitized[key] = _sanitize_metadata(item)
-        elif isinstance(item, list):
-            sanitized[key] = [
-                _sanitize_metadata(entry) if isinstance(entry, dict) else entry
-                for entry in item[:200]
-            ]
-        else:
-            sanitized[key] = item
-    return sanitized
+    return sanitize_payload_metadata(value)
 
 
-def _mask_secret(value: str) -> str:
-    lowered = value.lower()
-    if any(token in lowered for token in ("api_key", "apikey", "token", "secret", "password")):
-        return "[REDACTED]"
-    return value
+def _ensure_before_deadline(deadline: datetime) -> None:
+    if datetime.now(UTC) > deadline:
+        raise TimeoutError("auto_index_max_runtime_exceeded")
+
+
+def _heartbeat_interval_seconds(ttl_minutes: int) -> float:
+    ttl_seconds = max(60, int(ttl_minutes) * 60)
+    return float(max(10, min(60, ttl_seconds // 3)))
+
+
+class _LockHeartbeat:
+    def __init__(self, *, lock: Any, interval_seconds: float) -> None:
+        self._lock = lock
+        self._interval_seconds = float(interval_seconds)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="auto-index-lock-heartbeat",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                self._lock.refresh()
+            except Exception:
+                time.sleep(0)

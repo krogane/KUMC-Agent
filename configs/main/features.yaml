@@ -52,7 +52,8 @@ features:
     rrf_k: 60
     ocr_text_char_limit: 800
     surrounding_text_char_limit: 1200
-    caption_model: "gemini-3.1-flash-lite-preview"
+    caption_model: "gemini-2.5-flash-lite"
+    caption_batch_size: 100
     ocr_model: ""
     feature_model: "openai/clip-vit-base-patch32"
     feature_dimensions: 512

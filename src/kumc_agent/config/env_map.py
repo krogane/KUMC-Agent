@@ -159,6 +159,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         _to_str_list,
     ),
     EnvBinding(
+        "KUMC_NOTION_PAGE_IDS",
+        "integrations.notion.page_ids",
+        _to_str_list,
+    ),
+    EnvBinding(
         "KUMC_MINECRAFT_WIKI_PAGES",
         "integrations.minecraft_wiki.page_titles",
         _to_str_list,

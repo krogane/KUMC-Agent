@@ -13,6 +13,7 @@ from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
+from kumc_agent.features.indexing.paths import resolve_current_index_dir
 from kumc_agent.utils.hashing import stable_hash
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class RetrievalComponent:
 
     @property
     def index_dir(self):
-        return self._dense_index._index_dir  # noqa: SLF001
+        return resolve_current_index_dir(self._dense_index._index_dir)  # noqa: SLF001
 
     def retrieve(
         self,

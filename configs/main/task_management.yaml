@@ -5,4 +5,4 @@ task_management:
   admin_user_ids: []
   admin_role_ids: []
   prompt_name: task_extraction.md
-  auto_extract_after_index_update: true
+  auto_extract_after_index_update: false

@@ -20,6 +20,7 @@ from kumc_agent.domain.models.operations import IndexingRun, MemberProfile
 from kumc_agent.domain.models.retrieval import AccessContext, RetrievalQuery
 from kumc_agent.domain.ports.embedders import EmbedderPort
 from kumc_agent.domain.ports.llms import LLMPort
+from kumc_agent.features.indexing.paths import resolve_feature_index_dir
 from kumc_agent.infra.indexing.keyword_inverted_index import (
     build_and_save_keyword_index,
     load_keyword_index,
@@ -740,8 +741,9 @@ class MemberSearchService:
         normalize: Any,
     ) -> tuple[list[tuple[str, float]], bool, str]:
         if self._index_dir is not None:
+            index_dir = resolve_feature_index_dir(self._index_dir)
             ranked = _keyword_index_rank(
-                index_dir=self._index_dir,
+                index_dir=index_dir,
                 corpus_name=corpus_name,
                 query=query,
                 profiles=profiles,
@@ -757,8 +759,9 @@ class MemberSearchService:
         try:
             query_vector = self._embedder.embed_query(query)
             if self._index_dir is not None:
+                index_dir = resolve_feature_index_dir(self._index_dir)
                 ranked = _dense_index_rank(
-                    index_dir=self._index_dir,
+                    index_dir=index_dir,
                     query_vector=query_vector,
                     profiles=profiles,
                 )

@@ -81,6 +81,12 @@ class BuildIndexUsecase:
     ) -> dict[str, object]:
         return self._indexing_service.compact_embedding_cache(active_keys)
 
+    def commit_staged_side_effects(self, index_dir: Path) -> dict[str, object]:
+        commit = getattr(self._indexing_service, "commit_staged_side_effects", None)
+        if not callable(commit):
+            return {}
+        return commit(index_dir)
+
     def _refresh_minecraft_wiki_source(self, *, force: bool) -> int:
         if self._ingestion_service is None:
             return 0

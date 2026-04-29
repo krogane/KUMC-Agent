@@ -21,11 +21,14 @@ from kumc_agent.domain.models.operations import IndexingRun
 from kumc_agent.domain.models.source import AccessScope, SourceRawItem
 from kumc_agent.features.indexing.change_detection import SourceItemState, detect_source_change
 from kumc_agent.features.indexing.lock import FileIndexingLock
+from kumc_agent.features.indexing.paths import resolve_current_index_dir
 from kumc_agent.features.indexing.quality import IndexQualitySmokeChecker
 from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
 from kumc_agent.features.indexing.task_event import TaskEventIndexBuildService
 from kumc_agent.features.ingestion.service import IngestionResult
 from kumc_agent.infra.ingestion.repository import FileIngestionRepository
+from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
+from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.usecases.indexing.auto_update import (
     AutoIndexUpdateRequest,
     AutoIndexUpdateUsecase,
@@ -92,6 +95,15 @@ class _BuildWithEmbeddingCache(_Build):
             "status": "succeeded",
             "kept_records": len(keys),
         }
+
+
+class _BuildWithFailingStagedCommit(_Build):
+    def __init__(self) -> None:
+        self.commit_index_dir: Path | None = None
+
+    def commit_staged_side_effects(self, index_dir: Path):
+        self.commit_index_dir = index_dir
+        raise RuntimeError("commit failed")
 
 
 class _Ingestion:
@@ -207,7 +219,10 @@ class _EventDeltaChunkSource:
 
 def _config(root: Path):
     return SimpleNamespace(
-        app=SimpleNamespace(index_dir=root / "data" / "index"),
+        app=SimpleNamespace(
+            data_dir=root / "data",
+            index_dir=root / "data" / "index",
+        ),
         infrastructure=SimpleNamespace(
             database=SimpleNamespace(url="", connect_timeout_seconds=1.0, application_name="test"),
             redis=SimpleNamespace(url="", socket_timeout_seconds=1.0),
@@ -216,6 +231,7 @@ def _config(root: Path):
             auto_index_enabled=True,
             auto_index_time="06:00",
             auto_index_weekdays=[0, 1, 2, 3, 4, 5, 6],
+            auto_index_max_runtime_minutes=120,
             auto_index_lock_ttl_minutes=5,
             quality_min_chunk_ratio=0.5,
             quality_smoke_queries=[],
@@ -279,10 +295,77 @@ class AutoIndexUpdateTests(unittest.TestCase):
             _Build().execute(SimpleNamespace(index_dir=staging))
             quality = IndexQualitySmokeChecker().check(staging_dir=staging, current_dir=root)
             self.assertTrue(quality.passed)
+            (root / ".auto_index.lock").write_text("held", encoding="utf-8")
             result = IndexSnapshotPublisher(index_dir=root).publish(run_id="run", staging_dir=staging)
             self.assertEqual(result.snapshot_id, "run")
-            self.assertTrue((root / "dense_chunks.jsonl").exists())
+            self.assertTrue((result.release_dir / "dense_chunks.jsonl").exists())
             self.assertTrue((root / "current.json").exists())
+            self.assertTrue((root / ".auto_index.lock").exists())
+            self.assertEqual(resolve_current_index_dir(root), result.release_dir)
+            (root / "current.json").write_text(
+                json.dumps({"snapshot_id": "bad", "path": str(Path(tmp).parent)}),
+                encoding="utf-8",
+            )
+            self.assertEqual(resolve_current_index_dir(root), root)
+
+    def test_search_indexes_follow_current_release_pointer_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "index"
+            publisher = IndexSnapshotPublisher(index_dir=root)
+            runtime_dense = FaissLikeIndex(index_dir=root)
+            runtime_sparse = SudachiBM25Retriever(index_dir=root)
+
+            staging_one = publisher.staging_dir("run-one")
+            chunks_one = [
+                Chunk(
+                    id="old",
+                    document_id="doc-old",
+                    text="alpha release",
+                    index=0,
+                    metadata={},
+                )
+            ]
+            FaissLikeIndex(index_dir=staging_one).build(
+                chunks=chunks_one,
+                embeddings=np.array([[1.0, 0.0]], dtype=np.float32),
+            )
+            SudachiBM25Retriever(index_dir=staging_one).build(chunks_one)
+            publisher.publish(run_id="run-one", staging_dir=staging_one)
+
+            self.assertEqual(
+                runtime_dense.search(
+                    query_vector=np.array([1.0, 0.0], dtype=np.float32),
+                    top_k=1,
+                )[0].chunk.id,
+                "old",
+            )
+            self.assertEqual(runtime_sparse.search("alpha", top_k=1)[0].id, "old")
+
+            staging_two = publisher.staging_dir("run-two")
+            chunks_two = [
+                Chunk(
+                    id="new",
+                    document_id="doc-new",
+                    text="beta release",
+                    index=0,
+                    metadata={},
+                )
+            ]
+            FaissLikeIndex(index_dir=staging_two).build(
+                chunks=chunks_two,
+                embeddings=np.array([[0.0, 1.0]], dtype=np.float32),
+            )
+            SudachiBM25Retriever(index_dir=staging_two).build(chunks_two)
+            publisher.publish(run_id="run-two", staging_dir=staging_two)
+
+            self.assertEqual(
+                runtime_dense.search(
+                    query_vector=np.array([0.0, 1.0], dtype=np.float32),
+                    top_k=1,
+                )[0].chunk.id,
+                "new",
+            )
+            self.assertEqual(runtime_sparse.search("beta", top_k=1)[0].id, "new")
 
     def test_auto_update_saves_runs_and_publishes_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,7 +390,7 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 ),
             ).execute(AutoIndexUpdateRequest(trigger="manual"))
             self.assertEqual(result.status, "succeeded")
-            self.assertTrue((config.app.index_dir / "dense_chunks.jsonl").exists())
+            self.assertTrue((resolve_current_index_dir(config.app.index_dir) / "dense_chunks.jsonl").exists())
             self.assertEqual(operations.runs[-1].metadata["source_results"][0]["changed"], 1)
             self.assertEqual(build.compacted, [("cache-key-1",)])
             self.assertEqual(
@@ -315,6 +398,41 @@ class AutoIndexUpdateTests(unittest.TestCase):
                     "cache_compaction"
                 ]["status"],
                 "succeeded",
+            )
+
+    def test_auto_update_does_not_rollback_published_index_when_side_effect_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            operations = _Operations()
+            build = _BuildWithFailingStagedCommit()
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=build,
+                operations=operations,
+                ingestion_service=_Ingestion(
+                    IngestionResult(
+                        source_kind="dummy",
+                        seen=1,
+                        changed=1,
+                        skipped=0,
+                        deleted=0,
+                        documents=1,
+                        chunks=1,
+                        secret_findings=0,
+                    )
+                ),
+            ).execute(AutoIndexUpdateRequest(trigger="manual"))
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertIsNotNone(build.commit_index_dir)
+            self.assertEqual(resolve_current_index_dir(config.app.index_dir), build.commit_index_dir)
+            self.assertTrue(
+                (resolve_current_index_dir(config.app.index_dir) / "dense_chunks.jsonl").exists()
+            )
+            self.assertTrue(operations.runs[-1].metadata["degraded"])
+            self.assertEqual(
+                operations.runs[-1].metadata["stage_results"]["staged_side_effect_commit"]["status"],
+                "failed",
             )
 
     def test_auto_update_extracts_events_from_ingestion_delta(self) -> None:
@@ -443,7 +561,13 @@ class AutoIndexUpdateTests(unittest.TestCase):
 
             self.assertEqual(result.status, "succeeded")
             self.assertEqual(len(builder.calls), 1)
-            self.assertTrue((config.app.index_dir / "member_profiles" / "guild-1.marker").exists())
+            self.assertTrue(
+                (
+                    resolve_current_index_dir(config.app.index_dir)
+                    / "member_profiles"
+                    / "guild-1.marker"
+                ).exists()
+            )
             self.assertEqual(result.seen, 2)
             self.assertEqual(result.changed, 2)
             self.assertEqual(

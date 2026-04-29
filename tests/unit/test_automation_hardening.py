@@ -64,6 +64,35 @@ class AutomationHardeningTests(unittest.TestCase):
             self.assertFalse(disabled.rules[0].enabled)
             self.assertTrue(enabled.rules[0].enabled)
 
+    def test_auto_index_default_rule_syncs_config_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = FileAutomationRepository(root_dir=root / "automation")
+            service = AutomationService(
+                repository=repository,
+                feature_flags=_flags(),
+                auto_index_cron="0 6 * * MON-FRI",
+                auto_index_enabled=True,
+                auto_index_timezone="Asia/Tokyo",
+            )
+            service.seed_defaults()
+            first = repository.get_rule("auto_index_daily")
+            self.assertEqual(first.trigger.params["timezone"], "Asia/Tokyo")  # type: ignore[union-attr]
+
+            updated = AutomationService(
+                repository=repository,
+                feature_flags=_flags(),
+                auto_index_cron="30 7 * * MON",
+                auto_index_enabled=False,
+                auto_index_timezone="UTC",
+            )
+            updated.seed_defaults()
+            rule = repository.get_rule("auto_index_daily")
+
+            self.assertFalse(rule.enabled)  # type: ignore[union-attr]
+            self.assertEqual(rule.trigger.params["cron"], "30 7 * * MON")  # type: ignore[union-attr]
+            self.assertEqual(rule.trigger.params["timezone"], "UTC")  # type: ignore[union-attr]
+
     def test_run_is_idempotent_and_has_no_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = _service(Path(tmp), mode="enabled")

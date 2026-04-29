@@ -9,16 +9,19 @@ class NotionLoader:
         *,
         api_token: str,
         database_ids: list[str],
+        page_ids: list[str] | None = None,
         ingestion_dir: Path,
     ) -> None:
         self._api_token = api_token
         self._database_ids = list(database_ids)
+        self._page_ids = list(page_ids or [])
         self._ingestion_dir = ingestion_dir
 
     def load(self) -> int:
         token = (self._api_token or "").strip()
         database_ids = [str(value).strip() for value in self._database_ids if str(value).strip()]
-        if not token or not database_ids:
+        page_ids = [str(value).strip() for value in self._page_ids if str(value).strip()]
+        if not token or (not database_ids and not page_ids):
             return 0
 
         from kumc_agent.infra.loaders.notion_impl import download_notion_database_pages
@@ -29,6 +32,7 @@ class NotionLoader:
             download_notion_database_pages(
                 api_token=token,
                 database_ids=database_ids,
+                page_ids=page_ids,
                 output_dir=output_dir,
                 skip_existing=True,
                 update_existing=True,

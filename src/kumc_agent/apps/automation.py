@@ -39,6 +39,7 @@ def build_automation_app_context(
         action_executor=_build_action_executor(base_dir=foundation.config.base_dir),
         auto_index_cron=_auto_index_cron_from_config(foundation.config.scheduler),
         auto_index_enabled=foundation.config.scheduler.auto_index_enabled,
+        auto_index_timezone=foundation.config.scheduler.auto_index_timezone,
         autonomous_agent_rules=_autonomous_agent_rules_from_config(foundation.config.autonomous_agent),
     )
     if seed_defaults:

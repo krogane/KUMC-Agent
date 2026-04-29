@@ -352,7 +352,10 @@ class IndexingService:
                 None,
             )
             if callable(build_from_ingestion_sources):
-                image_run = build_from_ingestion_sources(index_dir=self._runtime.app.index_dir)
+                image_run = build_from_ingestion_sources(
+                    index_dir=self._runtime.app.index_dir,
+                    commit_repository=False,
+                )
                 stage_results["image"] = getattr(image_run, "__dict__", {"status": "unknown"})
 
         return IndexBuildResult(
@@ -373,6 +376,14 @@ class IndexingService:
         if not self._embedding_cache_enabled():
             return {"status": "skipped", "reason": "cache_disabled"}
         return self._embedding_cache.compact(active_keys)
+
+    def commit_staged_side_effects(self, index_dir: Path) -> dict[str, object]:
+        results: dict[str, object] = {}
+        if self._image_asset_builder is not None:
+            commit = getattr(self._image_asset_builder, "commit_staged_assets", None)
+            if callable(commit):
+                results["image"] = commit(index_dir=index_dir)
+        return results
 
     def update(
         self,
@@ -1348,7 +1359,16 @@ class IndexingService:
 
         output_chunk_dir.mkdir(parents=True, exist_ok=True)
         expected_output_names: set[str] = set()
-        target_chars = max(80, self._runtime.minecraft_wiki_rag.chunking.summary_characters)
+        target_chars = max(
+            80,
+            self._runtime.minecraft_wiki_rag.chunking.summary_characters,
+        )
+        batch_size = max(
+            1,
+            int(self._runtime.minecraft_wiki_rag.chunking.summary_batch_size),
+        )
+        summary_jobs: list[tuple[Path, int, str, dict[str, object]]] = []
+        processed_paths: list[Path] = []
         for path in sorted(input_chunk_dir.glob("*.jsonl")):
             out_path = output_chunk_dir / path.name
             expected_output_names.add(out_path.name)
@@ -1358,8 +1378,8 @@ class IndexingService:
                 and (not update_existing or out_path.stat().st_mtime >= path.stat().st_mtime)
             ):
                 continue
+            processed_paths.append(out_path)
             chunks = load_chunks(path)
-            output_chunks: list[LegacyChunk] = []
             output_index = 0
             for chunk in chunks:
                 text = str(chunk.text or "").strip()
@@ -1371,18 +1391,54 @@ class IndexingService:
                     metadata["parent_chunk_id"] = parent_chunk_id
                 metadata["chunk_id"] = output_index
                 metadata["chunk_stage"] = "summary"
-                summary_text = self._build_minecraft_wiki_summary_text(
-                    text=text,
-                    metadata=metadata,
-                    target_chars=target_chars,
-                )
-                output_chunks.append(
-                    LegacyChunk(
-                        text=summary_text,
-                        metadata=metadata,
-                    )
-                )
+                summary_jobs.append((out_path, output_index, text, metadata))
                 output_index += 1
+
+        output_chunks_by_path: dict[Path, list[LegacyChunk]] = {
+            path: [] for path in processed_paths
+        }
+        for batch_start in range(0, len(summary_jobs), batch_size):
+            batch = summary_jobs[batch_start : batch_start + batch_size]
+            max_workers = max(1, min(len(batch), batch_size))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures: dict[
+                    Future[str],
+                    tuple[Path, int, str, dict[str, object]],
+                ] = {}
+                for out_path, output_index, text, metadata in batch:
+                    futures[
+                        executor.submit(
+                            self._build_minecraft_wiki_summary_text,
+                            text=text,
+                            metadata=metadata,
+                            target_chars=target_chars,
+                        )
+                    ] = (out_path, output_index, text, metadata)
+                for future in as_completed(futures):
+                    out_path, _output_index, text, metadata = futures[future]
+                    try:
+                        summary_text = future.result()
+                    except Exception:
+                        logger.exception(
+                            "Minecraft Wiki summary chunk worker failed. Fallback to truncation."
+                        )
+                        summary_text = self._fallback_minecraft_wiki_summary(
+                            text=text,
+                            metadata=metadata,
+                            target_chars=target_chars,
+                        )
+                    output_chunks_by_path.setdefault(out_path, []).append(
+                        LegacyChunk(
+                            text=summary_text,
+                            metadata=metadata,
+                        )
+                    )
+
+        for out_path in processed_paths:
+            output_chunks = output_chunks_by_path.get(out_path, [])
+            output_chunks.sort(
+                key=lambda chunk: int(chunk.metadata.get("chunk_id", 0) or 0)
+            )
             write_chunks(out_path, output_chunks)
         if sync_deleted:
             expected = expected_output_names
@@ -1748,30 +1804,12 @@ class IndexingService:
 
         stages = self._runtime.indexing.stages
         chunking = self._runtime.indexing.chunking
-        if stages.summary_enabled and (
-            not selected or "summary" in selected
-        ):
-            limit = max(32, int(chunking.summary_characters))
-            for idx, chunk in enumerate(first_chunks):
-                summary_text = self._build_summary_text(
-                    text=chunk.text,
-                    target_characters=limit,
-                )
-                if not summary_text:
-                    continue
-                metadata = dict(chunk.metadata)
-                metadata["chunk_stage"] = "summary"
-                metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
-                metadata["chunk_id"] = idx
-                summary_chunks.append(
-                    Chunk(
-                        id=stable_hash(f"{chunk.id}:summary:{summary_text[:256]}"),
-                        document_id=chunk.document_id,
-                        text=summary_text,
-                        index=idx,
-                        metadata=metadata,
-                    )
-                )
+        if stages.summary_enabled and (not selected or "summary" in selected):
+            summary_chunks = self._build_summary_chunks_for_first_chunks(
+                first_chunks=first_chunks,
+                target_characters=int(chunking.summary_characters),
+                include_index_in_hash=False,
+            )
 
         self._clear_dir_contents(self._first_rec_dir)
         self._clear_dir_contents(self._second_rec_dir)
@@ -2467,7 +2505,23 @@ class IndexingService:
             return self._load_stage_chunks(self._summary_dir)
 
         limit = max(32, target_characters)
-        batch_size = max(1, int(self._runtime.indexing.chunking.summary_batch_size))
+        chunks = self._build_summary_chunks_for_first_chunks(
+            first_chunks=first_chunks,
+            target_characters=limit,
+            include_index_in_hash=True,
+        )
+        self._write_stage_chunks(self._summary_dir, chunks)
+        return chunks
+
+    def _build_summary_chunks_for_first_chunks(
+        self,
+        *,
+        first_chunks: list[Chunk],
+        target_characters: int,
+        include_index_in_hash: bool,
+    ) -> list[Chunk]:
+        limit = max(32, target_characters)
+        batch_size = self._summary_batch_size()
         total_batches = (len(first_chunks) + batch_size - 1) // batch_size
         if total_batches > 1:
             logger.info(
@@ -2511,17 +2565,24 @@ class IndexingService:
             metadata["chunk_stage"] = "summary"
             metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
             metadata["chunk_id"] = idx
+            hash_seed = (
+                f"{chunk.id}:summary:{idx}:{summary[:64]}"
+                if include_index_in_hash
+                else f"{chunk.id}:summary:{summary[:256]}"
+            )
             chunks.append(
                 Chunk(
-                    id=stable_hash(f"{chunk.id}:summary:{idx}:{summary[:64]}"),
+                    id=stable_hash(hash_seed),
                     document_id=chunk.document_id,
                     text=summary,
                     index=idx,
                     metadata=metadata,
                 )
             )
-        self._write_stage_chunks(self._summary_dir, chunks)
         return chunks
+
+    def _summary_batch_size(self) -> int:
+        return max(1, int(self._runtime.indexing.chunking.summary_batch_size))
 
     def _build_summary_text(
         self,

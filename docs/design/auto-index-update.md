@@ -39,7 +39,7 @@
 | Task/Event | workflow repositoryのTask/Event正本だけを `task_event` indexへ投影し、削除済みTaskとcanceled Eventは除外する |
 | 削除・権限喪失 | `source_items/chunks.index_status` とFile fallbackの状態ログを検索index構築前に反映し、raw fileが残っていてもactive indexへ入れない |
 | 品質確認 | Dense/Sparse artifact load、chunk急減、smoke query、禁止status混入、画像/member/task_event index loadを検査する |
-| publish/rollback | staging成果物をpublishし、publish失敗時はprevious snapshotへrollbackして `metadata.rollback` に保存する |
+| publish/rollback | staging成果物を `data/index/releases/{snapshot_id}` にpublishし、`current.json` のatomic更新で公開する。publish失敗時はprevious snapshotへrollbackして `metadata.rollback` に保存する |
 | 通知 | 失敗・rollback時はadmin通知payloadを作り、operations repositoryの `ActionRun(action_type="indexing_notification")` として記録する |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。互換のために残る既存chunk pipelineは `src/kumc_agent/infra/indexing` の範囲で利用し、自動更新の公開可否は `features.indexing` と `features.ingestion` の状態で判断する。
@@ -90,9 +90,11 @@ flowchart TD
 
 - Postgres利用時はDB advisory lockまたは `indexing_runs` のrunning状態を使う。
 - Redis利用時はTTL付きlockを使う。
-- File fallback時は `data/index/.auto_index.lock` を使う。
+- File fallback時は `data/locks/auto_index.lock` を使い、publish対象の `data/index` から分離する。
 
 既存のindex更新中に新しい自動更新が来た場合、既定ではskipし、`IndexingRun(status="skipped")` として理由を保存する。admin手動の強制実行だけがlock待機またはcancelを選べる。
+
+File/Redis lock は実行中に heartbeat でleaseを延長する。`scheduler.auto_index_max_runtime_minutes` を超えた run は失敗扱いにし、TTL切れによる二重起動を防ぐ。
 
 ## 6. データモデル
 ### 6.1 IndexingRun
@@ -227,9 +229,9 @@ Dense indexは第2 Recursive ChunkとSummary Chunkを対象に構築する。Spa
 staging/publishされる `dense_embedding_manifest.jsonl` には、chunkごとの `embedding_text_hash`、provider、model、dimensions、source参照、metadata hashを保存する。本文そのものはcacheにもmanifestにも保存しない。
 
 ### 9.4 atomic publish
-更新中の成果物は `data/index/staging/{run_id}` に作成し、品質確認に通った後で `data/index` rootへpublishする。既存検索runtimeは `data/index` 直下の成果物を読むため、publish時に直前成果物を `data/index/previous/{snapshot_id}` へ退避し、`current.json` と `previous.json` にsnapshot情報を保存する。
+更新中の成果物は `data/index/staging/{run_id}` に作成し、品質確認に通った後で `data/index/releases/{snapshot_id}` へ完全な snapshot としてpublishする。検索runtimeは `data/index/current.json` が指す release directory を読む。`current.json` の更新は最後にatomic renameで行い、`previous.json` には直前成功snapshotを保存する。
 
-publish中に失敗した場合は `previous` snapshotからroot成果物を復元し、`IndexingRun.metadata.rollback` に結果を保存する。
+publish中に失敗した場合は `previous` snapshotへ `current.json` を戻し、`IndexingRun.metadata.rollback` に結果を保存する。root artifact の逐次削除・逐次コピーは行わない。
 
 ## 10. 品質確認
 更新後に小規模なsmoke checkを実行する。
@@ -251,6 +253,7 @@ publish中に失敗した場合は `previous` snapshotからroot成果物を復�
 - `current`: 現在公開中
 - `previous`: 直前に成功したsnapshot
 - `staging/{run_id}`: 更新中
+- `releases/{snapshot_id}`: 公開可能な完全snapshot
 
 rollbackは `current` pointerを `previous` へ戻す。rollback後、`IndexingRun.status` は `rolled_back` または `failed` とし、`metadata.rollback` に理由、対象snapshot、品質失敗内容を保存する。
 
