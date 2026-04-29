@@ -29,6 +29,10 @@ indexing:
     enabled: true
     compact_after_publish: true
     force_reembed_on_full_rebuild: true
+  sheets_quality:
+    fail_fast: false
+    max_empty_row_ratio: 0.8
+    min_non_empty_cells: 1
 
 minecraft_wiki_rag:
   chunking:

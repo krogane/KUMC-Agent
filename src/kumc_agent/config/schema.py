@@ -488,11 +488,19 @@ class IndexingEmbeddingCacheSection:
 
 
 @dataclass(frozen=True)
+class IndexingSheetsQualitySection:
+    fail_fast: bool
+    max_empty_row_ratio: float
+    min_non_empty_cells: int
+
+
+@dataclass(frozen=True)
 class IndexingSection:
     chunking: IndexingChunkingSection
     stages: IndexingStagesSection
     refresh: IndexingRefreshSection
     embedding_cache: IndexingEmbeddingCacheSection
+    sheets_quality: IndexingSheetsQualitySection
 
 
 @dataclass(frozen=True)

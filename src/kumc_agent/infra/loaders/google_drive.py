@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleDriveLoader:
@@ -42,12 +45,15 @@ class GoogleDriveLoader:
 
         docs_dir = self._ingestion_dir / "docs"
         sheets_dir = self._ingestion_dir / "sheets"
+        sheets_structured_dir = self._ingestion_dir / "sheets_structured"
         docs_dir.mkdir(parents=True, exist_ok=True)
         sheets_dir.mkdir(parents=True, exist_ok=True)
+        sheets_structured_dir.mkdir(parents=True, exist_ok=True)
         docs_count, sheets_count = download_drive_markdown(
             drive_folder_id=self._folder_id,
             docs_dir=docs_dir,
             sheets_dir=sheets_dir,
+            sheets_structured_dir=sheets_structured_dir,
             google_application_credentials=self._credentials_path,
             pdf_ocr_model_path=self._pdf_ocr_model_path,
             drive_max_files=self._max_files,
@@ -66,4 +72,14 @@ class GoogleDriveLoader:
             update_existing=True,
             sync_deleted=True,
         )
+        try:
+            from kumc_agent.infra.loaders.sheets_profile import write_sheets_profile
+
+            write_sheets_profile(
+                sheets_dir=sheets_dir,
+                structured_sheets_dir=sheets_structured_dir,
+                output_path=self._ingestion_dir / "sheets_profile.json",
+            )
+        except Exception:
+            logger.exception("Failed to write Sheets raw profile.")
         return int(docs_count) + int(sheets_count)

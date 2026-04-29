@@ -135,17 +135,7 @@ Docsは通常のMarkdownテキストとして `recursive_chunk_dir()` に渡さ�
 
 ## 5. データから見えた問題点
 
-### 5.1 保存先契約が `data/raw/docs` と `data/ingestion/docs` で分裂している
-
-調査対象の実データは `data/raw/docs` にあるが、現行 `GoogleDriveLoader` と `IndexingService` は `config.app.ingestion_dir`、つまり既定では `data/ingestion/docs` を正規入力として扱う。
-
-影響:
-
-- `data/raw/docs` を手元で調査しても、現行indexが同じデータを読んでいるとは限らない。
-- raw監査、ingestion repository、index更新、rollbackのどれが正本か判断しづらい。
-- 過去取得データを再監査・移行する導線がない。
-
-### 5.2 画像主体のPDF/PPTXが短文Markdownとして保存される
+### 5.1 画像主体のPDF/PPTXが短文Markdownとして保存される
 
 PDFは74件中40件、PPTXは37件中21件が1,000 bytes未満だった。例として、次のような本文が存在した。
 
@@ -159,7 +149,7 @@ PDFは74件中40件、PPTXは37件中21件が1,000 bytes未満だった。例と
 - 見た目では情報があるポスター・掲示・スライドでも、本文indexでは内容をほぼ検索できない。
 - 画像検索側に画像artifactがあっても、RAG本文側のcitationと結びつかない。
 
-### 5.3 抽出が構造を保持していない
+### 5.2 抽出が構造を保持していない
 
 DOCXは段落テキストのみ、PPTXはテキストノードのみ、PDFはページ本文のみを保存する。表、箇条書き階層、図表、脚注、ページ内位置、スライド内の画像と周辺文脈はraw本文に残らない。
 
@@ -169,7 +159,7 @@ DOCXは段落テキストのみ、PPTXはテキストノードのみ、PDFはペ
 - スライド資料ではページ単位の視覚情報とテキスト情報が分断される。
 - PDFのOCR対象が「テキスト抽出が完全に空のページ」に限られるため、ページ番号だけ抽出できた画像主体ページはOCRされない。
 
-### 5.4 metadataがファイル単位に偏っている
+### 5.3 metadataがファイル単位に偏っている
 
 現在のmetadataはDriveファイル単位の追跡には十分だが、index投入可否や品質監査に必要な情報を持たない。
 
@@ -179,7 +169,7 @@ DOCXは段落テキストのみ、PPTXはテキストノードのみ、PDFはペ
 - `redaction_policy=deny`、`index_status=quarantined`、`permission_lost` のような既存アクセスフィルタ用metadataをraw段階で付けられない。
 - Drive ACL、共有範囲、削除・権限変更の検知結果をchunk側へ渡せない。
 
-### 5.5 重複・派生資料をまとめる情報がない
+### 5.4 重複・派生資料をまとめる情報がない
 
 今回のデータには `KU匠vol2.pdf` が完全同一本文で2ファイル存在した。また、同じ掲示物や資料がPDF/PPTX/DOCXの別形式で存在する例も多い。
 
@@ -189,7 +179,7 @@ DOCXは段落テキストのみ、PPTXはテキストノードのみ、PDFはペ
 - PDF版とPPTX版のどちらをcitationに出すべきか判断できない。
 - 「編集元」「配布用PDF」「画像化された掲示」の関係を後から追跡しづらい。
 
-### 5.6 品質ゲートがない
+### 5.5 品質ゲートがない
 
 保存時は `text.strip()` が空かどうかだけで判定している。chunk化・index publish前にも、Docs rawに特化した品質監査はない。
 
@@ -271,17 +261,6 @@ PDF、PPTX、DOCX、Google Docsを同じMarkdown文字列へ潰すのではな�
 - ポスター・掲示・写真中心: 画像検索へ優先投入し、RAG本文には資料名・Driveパス・OCR結果だけを入れる
 - 同一本文の重複: canonical sourceへ集約し、別形式はvariant metadataとして保持する
 
-### 方針F: 現行 `data/ingestion` と過去 `data/raw` を接続する
-
-改善対象の実装は `config.app.ingestion_dir` を正本にする。一方、既存の `data/raw/docs` は過去取得データの監査・移行対象として扱えるようにする。
-
-実装上は次を用意する。
-
-- 監査コマンドの `--raw-dir`
-- `data/raw/docs` から `data/ingestion/docs` またはingestion repositoryへ移行するdry-run
-- stale raw検知
-- sync_deleted時のmanifest出力
-
 ## 7. 実装計画
 
 ### Phase 1: Docs raw監査コマンドを追加する
@@ -294,7 +273,7 @@ PDF、PPTX、DOCX、Google Docsを同じMarkdown文字列へ潰すのではな�
 
 受け入れ条件:
 
-- `data/raw/docs` と `config.app.ingestion_dir / "docs"` の両方を検査できる。
+- `config.app.ingestion_dir / "docs"` を検査できる。
 - 本文・metadata対応、MIME別件数、短文率、重複、画像artifact連携、source_date推定結果を出せる。
 - 監査結果を `metadata` 配下に入れたCLI JSON payloadとして返せる。
 
@@ -428,14 +407,13 @@ PDF、PPTX、DOCX、Google Docsを同じMarkdown文字列へ潰すのではな�
 - `index_status=quarantined` が検索対象から除外される。
 - `page_number` / `slide_number` がchunk metadataとcitationに残る。
 - content hash重複がvariantとして検出される。
-- `--raw-dir data/raw/docs` と既定 `data/ingestion/docs` の両方で監査できる。
+- `data/ingestion/docs` で監査できる。
 
 検証コマンド例:
 
 ```bash
 PYTHONPATH=src app/.venv/bin/python -m unittest tests.unit.test_google_drive_docs_audit
 PYTHONPATH=src app/.venv/bin/python -m unittest tests.unit.test_indexing_docs_quality
-PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest audit --source docs --raw-dir data/raw/docs --json
 ```
 
 ドキュメント更新候補:
@@ -450,7 +428,6 @@ PYTHONPATH=src app/.venv/bin/python -m kumc_agent.cli ingest audit --source docs
 
 この改善は、次の状態をもって完了とする。
 
-- `data/raw/docs` と `config.app.ingestion_dir / "docs"` のDocs rawを同じ基準で監査できる。
 - 本文・metadata欠落、短文率、重複、画像主体資料、source_date不明、ACL/visibility不足を機械的に検出できる。
 - raw `.md` は証跡として残しつつ、検索用にはページ・スライド・表・画像参照を持つ正規化artifactを使える。
 - PDF/PPTX/DOCX/Google Docsのchunk metadataに、少なくとも `drive_file_id`、`drive_file_name`、`drive_file_path`、`source_date`、`page_number` または `slide_number`、`quality_flags`、`index_status` が入る。

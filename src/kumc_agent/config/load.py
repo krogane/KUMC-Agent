@@ -38,6 +38,7 @@ from kumc_agent.config.schema import (
     IndexingChunkingSection,
     IndexingRefreshSection,
     IndexingSection,
+    IndexingSheetsQualitySection,
     IndexingStagesSection,
     IntegrationCraftersColonySection,
     IntegrationDiscordSection,
@@ -839,6 +840,9 @@ def _to_runtime_config(
     indexing_embedding_cache = indexing.get("embedding_cache", {})
     if not isinstance(indexing_embedding_cache, dict):
         indexing_embedding_cache = {}
+    indexing_sheets_quality = indexing.get("sheets_quality", {})
+    if not isinstance(indexing_sheets_quality, dict):
+        indexing_sheets_quality = {}
     ops_ragas_metrics = ops.get("ragas_metrics", {})
     database = infrastructure.get("database", {})
     redis = infrastructure.get("redis", {})
@@ -1821,6 +1825,15 @@ def _to_runtime_config(
                         "force_reembed_on_full_rebuild",
                         True,
                     )
+                ),
+            ),
+            sheets_quality=IndexingSheetsQualitySection(
+                fail_fast=bool(indexing_sheets_quality.get("fail_fast", False)),
+                max_empty_row_ratio=float(
+                    indexing_sheets_quality.get("max_empty_row_ratio", 0.8)
+                ),
+                min_non_empty_cells=int(
+                    indexing_sheets_quality.get("min_non_empty_cells", 1)
                 ),
             ),
         ),

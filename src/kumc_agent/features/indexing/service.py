@@ -113,6 +113,7 @@ class IndexingService:
         self._summary_dir = self._chunks_root / "summary_chunk"
         self._ingestion_docs_dir = self._ingestion_dir / "docs"
         self._ingestion_sheets_dir = self._ingestion_dir / "sheets"
+        self._ingestion_sheets_structured_dir = self._ingestion_dir / "sheets_structured"
         self._ingestion_messages_dir = self._ingestion_dir / "messages"
         self._ingestion_x_dir = self._ingestion_dir / "x"
         self._ingestion_vc_dir = self._ingestion_dir / "vc"
@@ -253,6 +254,29 @@ class IndexingService:
         minecraft_wiki_quality_payload = self._minecraft_wiki_quality_payload(
             index_chunks=index_chunks
         )
+        from kumc_agent.usecases.indexing.sheets_quality import (
+            build_sheets_quality_payload,
+        )
+
+        sheets_quality_cfg = self._runtime.indexing.sheets_quality
+        sheets_quality_payload = build_sheets_quality_payload(
+            sheets_dir=self._ingestion_sheets_dir,
+            structured_sheets_dir=self._ingestion_sheets_structured_dir,
+            fail_fast=sheets_quality_cfg.fail_fast,
+            max_empty_row_ratio=sheets_quality_cfg.max_empty_row_ratio,
+            min_non_empty_cells=sheets_quality_cfg.min_non_empty_cells,
+        )
+        if not bool(sheets_quality_payload.get("can_continue", True)):
+            metadata = sheets_quality_payload.get("metadata")
+            warnings: list[str] = []
+            if isinstance(metadata, dict):
+                raw_warnings = metadata.get("warnings")
+                if isinstance(raw_warnings, list):
+                    warnings = [str(item) for item in raw_warnings]
+            raise RuntimeError(
+                "Sheets quality gate failed: "
+                + (", ".join(warnings) if warnings else "unknown")
+            )
         if (
             minecraft_wiki_quality_payload is not None
             and not bool(minecraft_wiki_quality_payload.get("can_continue", True))
@@ -305,6 +329,7 @@ class IndexingService:
         }
         if minecraft_wiki_quality_payload is not None:
             stage_results["minecraft_wiki_quality"] = minecraft_wiki_quality_payload
+        stage_results["sheets_quality"] = sheets_quality_payload
         stage_results["embedding"] = dense_embeddings.metadata
         if self._image_asset_builder is not None:
             build_from_ingestion_sources = getattr(
@@ -632,6 +657,7 @@ class IndexingService:
         for path in (
             self._ingestion_docs_dir,
             self._ingestion_sheets_dir,
+            self._ingestion_sheets_structured_dir,
             self._ingestion_messages_dir,
             self._ingestion_x_dir,
             self._ingestion_vc_dir,
@@ -819,6 +845,7 @@ class IndexingService:
             message_chunk_jsonl_dir,
             recursive_chunk_dir,
             recursive_chunk_jsonl_dir,
+            sheets_chunk_dir,
             sparse_chunk_jsonl_dir,
             summery_chunk_jsonl_dir,
         )
@@ -866,15 +893,14 @@ class IndexingService:
                 update_existing=refresh.update_first_recursive_chunk_data,
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
-            recursive_chunk_dir(
+            sheets_chunk_dir(
                 ingestion_data_dir=self._ingestion_sheets_dir,
+                structured_data_dir=self._ingestion_sheets_structured_dir,
                 chunk_dir=self._first_rec_sheets_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
                 separators=SHEETS_SEPARATORS,
-                source_type="sheets",
                 stage="first_recursive",
-                file_extensions=(".csv",),
                 skip_existing=not refresh.clear_first_recursive_chunk_data,
                 update_existing=refresh.update_first_recursive_chunk_data,
                 sync_deleted=refresh.update_first_recursive_chunk_data,
@@ -2753,6 +2779,7 @@ class IndexingService:
         for path in (
             self._ingestion_docs_dir,
             self._ingestion_sheets_dir,
+            self._ingestion_sheets_structured_dir,
             self._ingestion_messages_dir,
             self._ingestion_x_dir,
             self._ingestion_vc_dir,

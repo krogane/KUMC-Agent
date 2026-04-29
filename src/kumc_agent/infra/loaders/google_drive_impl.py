@@ -63,6 +63,16 @@ class DriveFile:
     modified_time: str
 
 
+@dataclass(frozen=True)
+class SpreadsheetWorksheet:
+    sheet_id: str
+    title: str
+    index: int
+    row_count: int | None
+    column_count: int | None
+    values: list[list[str]]
+
+
 def _extract_drive_file_id(filename: str) -> str | None:
     if FILE_ID_SEPARATOR not in filename:
         return None
@@ -98,6 +108,17 @@ def _build_drive_service(creds: Any) -> Any:
         ) from e
 
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def _build_sheets_service(creds: Any) -> Any:
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as e:
+        raise RuntimeError(
+            "google-api-python-client is required for Google Sheets access."
+        ) from e
+
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def _list_drive_files(
@@ -225,6 +246,106 @@ def _download_file_bytes(
     )
 
 
+def _google_sheet_range(sheet_name: str) -> str:
+    escaped = sheet_name.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _download_google_sheet_worksheets(
+    sheets_service: Any,
+    *,
+    drive_file: DriveFile,
+    max_retries: int,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+    backoff_multiplier: float,
+) -> list[SpreadsheetWorksheet]:
+    spreadsheet = _execute_google_api_request(
+        lambda: sheets_service.spreadsheets().get(
+            spreadsheetId=drive_file.file_id,
+            fields="sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))",
+        ),
+        file_id=drive_file.file_id,
+        operation_name="sheets.get",
+        max_retries=max_retries,
+        initial_delay_seconds=initial_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        backoff_multiplier=backoff_multiplier,
+    )
+    sheet_items = spreadsheet.get("sheets", []) if isinstance(spreadsheet, dict) else []
+    properties: list[dict[str, Any]] = []
+    for fallback_index, item in enumerate(sheet_items):
+        if not isinstance(item, dict):
+            continue
+        props = item.get("properties")
+        if not isinstance(props, dict):
+            continue
+        title = str(props.get("title") or "").strip()
+        if not title:
+            continue
+        grid = props.get("gridProperties")
+        grid = grid if isinstance(grid, dict) else {}
+        properties.append(
+            {
+                "sheet_id": str(props.get("sheetId") or ""),
+                "title": title,
+                "index": int(props.get("index", fallback_index) or fallback_index),
+                "row_count": _optional_int(grid.get("rowCount")),
+                "column_count": _optional_int(grid.get("columnCount")),
+            }
+        )
+    properties.sort(key=lambda value: int(value["index"]))
+    if not properties:
+        return []
+
+    ranges = [_google_sheet_range(str(prop["title"])) for prop in properties]
+    values_payload = _execute_google_api_request(
+        lambda: sheets_service.spreadsheets().values().batchGet(
+            spreadsheetId=drive_file.file_id,
+            ranges=ranges,
+            majorDimension="ROWS",
+            valueRenderOption="FORMATTED_VALUE",
+            dateTimeRenderOption="FORMATTED_STRING",
+        ),
+        file_id=drive_file.file_id,
+        operation_name="sheets.values.batchGet",
+        max_retries=max_retries,
+        initial_delay_seconds=initial_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        backoff_multiplier=backoff_multiplier,
+    )
+    value_ranges = values_payload.get("valueRanges", []) if isinstance(values_payload, dict) else []
+    worksheets: list[SpreadsheetWorksheet] = []
+    for index, prop in enumerate(properties):
+        values: list[list[str]] = []
+        if index < len(value_ranges) and isinstance(value_ranges[index], dict):
+            raw_values = value_ranges[index].get("values", [])
+            if isinstance(raw_values, list):
+                for row in raw_values:
+                    if isinstance(row, list):
+                        values.append([str(cell or "") for cell in row])
+        worksheets.append(
+            SpreadsheetWorksheet(
+                sheet_id=str(prop["sheet_id"]),
+                title=str(prop["title"]),
+                index=int(prop["index"]),
+                row_count=prop["row_count"] if isinstance(prop["row_count"], int) else None,
+                column_count=prop["column_count"] if isinstance(prop["column_count"], int) else None,
+                values=values,
+            )
+        )
+    return worksheets
+
+
 def _drive_error_status_code(exc: Exception) -> int | None:
     response = getattr(exc, "resp", None)
     status = getattr(response, "status", None)
@@ -291,6 +412,56 @@ def _is_retryable_drive_exception(
         status = _drive_error_status_code(exc)
         return status == 429 or (status is not None and status >= 500)
     return isinstance(exc, (TimeoutError, ConnectionError, OSError))
+
+
+def _execute_google_api_request(
+    request_builder: Callable[[], Any],
+    *,
+    file_id: str,
+    operation_name: str,
+    max_retries: int = 3,
+    initial_delay_seconds: float = 0.5,
+    max_delay_seconds: float = 8.0,
+    backoff_multiplier: float = 2.0,
+) -> Any:
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        HttpError = Exception  # type: ignore[assignment]
+
+    retries = max(0, int(max_retries))
+    delay = max(0.0, float(initial_delay_seconds))
+    max_delay = max(0.0, float(max_delay_seconds))
+    multiplier = max(1.0, float(backoff_multiplier))
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return request_builder().execute()
+        except Exception as exc:
+            if (
+                not _is_retryable_drive_exception(exc, http_error_type=HttpError)
+                or attempt >= attempts
+            ):
+                raise
+            sleep_seconds = min(delay, max_delay) if max_delay > 0 else delay
+            logger.warning(
+                (
+                    "Google API %s failed for file %s (status=%s, attempt %d/%d). "
+                    "Retrying in %.2fs."
+                ),
+                operation_name,
+                file_id,
+                _drive_error_status_code(exc),
+                attempt,
+                attempts,
+                sleep_seconds,
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+            if delay > 0:
+                next_delay = delay * multiplier
+                delay = min(next_delay, max_delay) if max_delay > 0 else next_delay
+    raise RuntimeError(f"Unreachable retry loop while executing {operation_name}.")
 
 
 def _download_drive_bytes_with_retry(
@@ -424,7 +595,7 @@ def _xlsx_cell_value(
     return value
 
 
-def _extract_xlsx_csv_text(xlsx_bytes: bytes) -> str:
+def _extract_xlsx_worksheets(xlsx_bytes: bytes) -> list[SpreadsheetWorksheet]:
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as archive:
         shared_strings = _xlsx_shared_strings(archive)
@@ -446,9 +617,9 @@ def _extract_xlsx_csv_text(xlsx_bytes: bytes) -> str:
             key=_sheet_xml_sort_key,
         )
         if not sheet_xml_paths:
-            return ""
+            return []
 
-        sections: list[str] = []
+        worksheets: list[SpreadsheetWorksheet] = []
         for idx, sheet_path in enumerate(sheet_xml_paths):
             sheet_root = ET.fromstring(archive.read(sheet_path))
             sheet_name = (
@@ -475,17 +646,41 @@ def _extract_xlsx_csv_text(xlsx_bytes: bytes) -> str:
                     continue
                 rows.append([row_values.get(i, "") for i in range(1, max_col + 1)])
 
-            sheet_buffer = io.StringIO()
-            csv_writer = writer(sheet_buffer)
-            for row in rows:
-                csv_writer.writerow(row)
-            csv_body = sheet_buffer.getvalue().rstrip()
-            if csv_body:
-                sections.append(f"# sheet: {sheet_name}\n{csv_body}")
-            else:
-                sections.append(f"# sheet: {sheet_name}")
+            worksheets.append(
+                SpreadsheetWorksheet(
+                    sheet_id=str(idx),
+                    title=sheet_name,
+                    index=idx,
+                    row_count=len(rows),
+                    column_count=max((len(row) for row in rows), default=0),
+                    values=rows,
+                )
+            )
 
-        return "\n\n".join(sections).strip() + "\n"
+        return worksheets
+
+
+def _extract_xlsx_csv_text(xlsx_bytes: bytes) -> str:
+    return _worksheets_to_csv_text(_extract_xlsx_worksheets(xlsx_bytes))
+
+
+def _rows_to_csv_text(rows: list[list[str]]) -> str:
+    sheet_buffer = io.StringIO()
+    csv_writer = writer(sheet_buffer)
+    for row in rows:
+        csv_writer.writerow(row)
+    return sheet_buffer.getvalue().rstrip()
+
+
+def _worksheets_to_csv_text(worksheets: list[SpreadsheetWorksheet]) -> str:
+    sections: list[str] = []
+    for worksheet in worksheets:
+        csv_body = _rows_to_csv_text(worksheet.values)
+        if csv_body:
+            sections.append(f"# sheet: {worksheet.title}\n{csv_body}")
+        else:
+            sections.append(f"# sheet: {worksheet.title}")
+    return "\n\n".join(sections).strip() + "\n" if sections else ""
 
 
 def _extract_docx_text(docx_bytes: bytes) -> str:
@@ -1261,10 +1456,97 @@ def _drive_metadata_payload(drive_file: DriveFile) -> dict[str, str]:
     }
 
 
-def _write_drive_metadata(out_path: Path, drive_file: DriveFile) -> None:
+def _write_drive_metadata(
+    out_path: Path,
+    drive_file: DriveFile,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
     metadata = _drive_metadata_payload(drive_file)
+    if extra_metadata:
+        metadata.update(extra_metadata)
     meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
     meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+
+
+def _has_structured_sheet_outputs(
+    *,
+    sheets_structured_dir: Path | None,
+    drive_file: DriveFile,
+) -> bool:
+    if sheets_structured_dir is None or not sheets_structured_dir.exists():
+        return False
+    return any(
+        path.is_file()
+        for path in sheets_structured_dir.glob(
+            f"{drive_file.file_id}{FILE_ID_SEPARATOR}*.jsonl"
+        )
+    )
+
+
+def _structured_sheet_output_path(
+    *,
+    sheets_structured_dir: Path,
+    drive_file: DriveFile,
+    worksheet: SpreadsheetWorksheet,
+) -> Path:
+    safe_sheet_name = sanitize_filename(worksheet.title)
+    return sheets_structured_dir / (
+        f"{drive_file.file_id}{FILE_ID_SEPARATOR}"
+        f"{worksheet.index:03d}{FILE_ID_SEPARATOR}{safe_sheet_name}.jsonl"
+    )
+
+
+def _write_structured_sheet_outputs(
+    *,
+    sheets_structured_dir: Path | None,
+    drive_file: DriveFile,
+    worksheets: list[SpreadsheetWorksheet],
+) -> None:
+    if sheets_structured_dir is None:
+        return
+    ensure_dir(sheets_structured_dir)
+    from kumc_agent.infra.indexing.sheets_normalizer import (
+        write_normalized_worksheet_jsonl,
+    )
+
+    base_metadata = _drive_metadata_payload(drive_file)
+    for worksheet in worksheets:
+        out_path = _structured_sheet_output_path(
+            sheets_structured_dir=sheets_structured_dir,
+            drive_file=drive_file,
+            worksheet=worksheet,
+        )
+        chunks = write_normalized_worksheet_jsonl(
+            output_path=out_path,
+            rows=worksheet.values,
+            base_metadata=base_metadata,
+            sheet_name=worksheet.title,
+            sheet_index=worksheet.index,
+            sheet_id=worksheet.sheet_id,
+            source_file_name=out_path.name,
+            grid_row_count=worksheet.row_count,
+            grid_column_count=worksheet.column_count,
+        )
+        first_profile = (
+            chunks[0].metadata.get("table_profile")
+            if chunks and isinstance(chunks[0].metadata, dict)
+            else {}
+        )
+        _write_drive_metadata(
+            out_path,
+            drive_file,
+            extra_metadata={
+                "structured_format": "normalized_sheet_rows_jsonl",
+                "sheet_id": worksheet.sheet_id,
+                "sheet_name": worksheet.title,
+                "sheet_index": worksheet.index,
+                "grid_row_count": worksheet.row_count,
+                "grid_column_count": worksheet.column_count,
+                "record_count": len(chunks),
+                "table_profile": first_profile if isinstance(first_profile, dict) else {},
+            },
+        )
 
 
 def _strip_drive_image_placeholders(text: str) -> str:
@@ -1277,6 +1559,7 @@ def download_drive_markdown(
     drive_folder_id: str,
     docs_dir: Path,
     sheets_dir: Path,
+    sheets_structured_dir: Path | None = None,
     google_application_credentials: str,
     pdf_ocr_model_path: str,
     drive_max_files: int | None = None,
@@ -1291,11 +1574,14 @@ def download_drive_markdown(
 ) -> tuple[int, int]:
     ensure_dir(docs_dir)
     ensure_dir(sheets_dir)
+    if sheets_structured_dir is not None:
+        ensure_dir(sheets_structured_dir)
 
     creds = _build_google_credentials(
         application_credentials=google_application_credentials,
     )
     drive_service = _build_drive_service(creds)
+    sheets_service: Any | None = None
 
     drive_files = _list_drive_files(
         drive_service, drive_folder_id, max_files=drive_max_files
@@ -1338,6 +1624,12 @@ def download_drive_markdown(
             extension=".csv",
             valid_file_ids=valid_sheet_ids,
         )
+        if sheets_structured_dir is not None:
+            _cleanup_missing_drive_files(
+                out_dir=sheets_structured_dir,
+                extension=".jsonl",
+                valid_file_ids=valid_sheet_ids,
+            )
         _cleanup_missing_drive_image_files(
             out_dir=images_dir,
             valid_file_ids=valid_image_ids,
@@ -1484,7 +1776,14 @@ def download_drive_markdown(
                     _cleanup_drive_duplicates(
                         out_dir=sheets_dir, drive_file=drive_file, keep_path=out_path
                     )
-                    if skip_existing and out_path.exists():
+                    structured_missing = (
+                        sheets_structured_dir is not None
+                        and not _has_structured_sheet_outputs(
+                            sheets_structured_dir=sheets_structured_dir,
+                            drive_file=drive_file,
+                        )
+                    )
+                    if skip_existing and out_path.exists() and not structured_missing:
                         if not update_existing:
                             logger.info("Skip download (exists): %s", out_path.name)
                             continue
@@ -1492,13 +1791,39 @@ def download_drive_markdown(
                             logger.info("Skip download (up-to-date): %s", out_path.name)
                             continue
                     if drive_file.mime_type == DRIVE_SHEET_MIME:
-                        csv_bytes = _download_export_bytes(
-                            drive_service,
-                            file_id=drive_file.file_id,
-                            mime_type="text/csv",
-                            **download_retry_options,
-                        )
-                        csv_text = csv_bytes.decode("utf-8", errors="replace")
+                        worksheets: list[SpreadsheetWorksheet] = []
+                        if sheets_structured_dir is not None:
+                            try:
+                                if sheets_service is None:
+                                    sheets_service = _build_sheets_service(creds)
+                                worksheets = _download_google_sheet_worksheets(
+                                    sheets_service,
+                                    drive_file=drive_file,
+                                    **download_retry_options,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    (
+                                        "Failed to fetch spreadsheet tabs through "
+                                        "Sheets API; falling back to Drive CSV export: %s"
+                                    ),
+                                    drive_file.path,
+                                )
+                        if worksheets:
+                            csv_text = _worksheets_to_csv_text(worksheets)
+                            _write_structured_sheet_outputs(
+                                sheets_structured_dir=sheets_structured_dir,
+                                drive_file=drive_file,
+                                worksheets=worksheets,
+                            )
+                        else:
+                            csv_bytes = _download_export_bytes(
+                                drive_service,
+                                file_id=drive_file.file_id,
+                                mime_type="text/csv",
+                                **download_retry_options,
+                            )
+                            csv_text = csv_bytes.decode("utf-8", errors="replace")
                     elif drive_file.mime_type in DRIVE_EXCEL_MIMES:
                         if drive_file.mime_type == "application/vnd.ms-excel":
                             logger.warning(
@@ -1511,7 +1836,13 @@ def download_drive_markdown(
                             file_id=drive_file.file_id,
                             **download_retry_options,
                         )
-                        csv_text = _extract_xlsx_csv_text(xlsx_bytes)
+                        worksheets = _extract_xlsx_worksheets(xlsx_bytes)
+                        csv_text = _worksheets_to_csv_text(worksheets)
+                        _write_structured_sheet_outputs(
+                            sheets_structured_dir=sheets_structured_dir,
+                            drive_file=drive_file,
+                            worksheets=worksheets,
+                        )
                     else:
                         continue
                     if not csv_text.strip():

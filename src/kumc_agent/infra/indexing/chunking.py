@@ -51,6 +51,16 @@ _METADATA_KEYS = (
     "drive_mime_type",
     "drive_file_path",
     "drive_file_id",
+    "sheet_id",
+    "sheet_name",
+    "sheet_index",
+    "row_range",
+    "column_range",
+    "table_kind",
+    "table_profile",
+    "normalization_status",
+    "sensitivity",
+    "sensitivity_findings",
     "hatenablog_title",
     "hatenablog_created_at",
     "hatenablog_url",
@@ -112,6 +122,17 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "drive_file_name",
         "drive_path",
         "drive_mime_type",
+        "drive_modified_time",
+        "sheet_id",
+        "sheet_name",
+        "sheet_index",
+        "row_range",
+        "column_range",
+        "table_kind",
+        "table_profile",
+        "normalization_status",
+        "sensitivity",
+        "sensitivity_findings",
         "hatenablog_title",
         "hatenablog_created_at",
         "hatenablog_url",
@@ -148,9 +169,11 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
             metadata[key] = value
         elif isinstance(value, bool):
             metadata[key] = value
-        elif key in {"minecraft_wiki_aliases"} and isinstance(value, list):
+        elif key in {"minecraft_wiki_aliases", "sensitivity_findings"} and isinstance(value, list):
             metadata[key] = value
-        elif key == "access_scope" and isinstance(value, dict):
+        elif key in {"access_scope", "table_profile", "sensitivity"} and isinstance(value, dict):
+            metadata[key] = value
+        elif key == "sheet_index" and isinstance(value, int):
             metadata[key] = value
     return metadata
 
@@ -544,6 +567,149 @@ def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) 
                 sidecar.name,
                 exc,
             )
+
+
+def sheets_chunk_dir(
+    *,
+    ingestion_data_dir: Path,
+    structured_data_dir: Path | None,
+    chunk_dir: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+    separators: Sequence[str],
+    stage: str,
+    skip_existing: bool = False,
+    update_existing: bool = True,
+    sync_deleted: bool = False,
+) -> None:
+    ensure_dir(chunk_dir)
+    if not ingestion_data_dir.exists():
+        raise FileNotFoundError(
+            f"Ingestion source directory does not exist: {ingestion_data_dir}"
+        )
+
+    structured_files = (
+        sorted(structured_data_dir.glob("*.jsonl"), key=lambda path: str(path))
+        if structured_data_dir is not None and structured_data_dir.exists()
+        else []
+    )
+    csv_files = sorted(ingestion_data_dir.rglob("*.csv"), key=lambda path: str(path))
+    structured_drive_ids = {
+        drive_file_id
+        for path in structured_files
+        if (drive_file_id := _extract_drive_file_id(path.name))
+    }
+    fallback_csv_files = [
+        path
+        for path in csv_files
+        if (_extract_drive_file_id(path.name) or "") not in structured_drive_ids
+    ]
+    if not structured_files and not fallback_csv_files:
+        if sync_deleted:
+            _cleanup_stale_jsonl_outputs(output_dir=chunk_dir, expected_names=set())
+        logger.warning("No Sheets files found under %s", ingestion_data_dir)
+        return
+
+    splitter = _build_splitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=separators,
+    )
+    expected_output_names: set[str] = set()
+
+    for path in structured_files:
+        out_path = chunk_dir / path.name
+        expected_output_names.add(out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="sheets structured chunking",
+        ):
+            continue
+        from kumc_agent.infra.indexing.sheets_normalizer import (
+            load_structured_sheet_chunks,
+        )
+
+        output_chunks = _split_sheet_chunks_for_stage(
+            chunks=load_structured_sheet_chunks(path),
+            splitter=splitter,
+            stage=stage,
+        )
+        write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+        logger.info(
+            "Sheets structured chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+    for path in fallback_csv_files:
+        rel_path = path.relative_to(ingestion_data_dir)
+        safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
+        out_path = chunk_dir / f"{safe_rel}.jsonl"
+        expected_output_names.add(out_path.name)
+        if _should_skip_existing_output(
+            output_path=out_path,
+            input_path=path,
+            skip_existing=skip_existing,
+            update_existing=update_existing,
+            action_label="sheets csv normalization",
+        ):
+            continue
+        from kumc_agent.infra.indexing.sheets_normalizer import normalize_csv_file
+
+        drive_metadata = _load_drive_metadata(path)
+        normalized_chunks = normalize_csv_file(path, base_metadata=drive_metadata)
+        output_chunks = _split_sheet_chunks_for_stage(
+            chunks=normalized_chunks,
+            splitter=splitter,
+            stage=stage,
+        )
+        write_chunks(out_path, output_chunks)
+        _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=path)
+        logger.info(
+            "Sheets CSV normalized chunked (%s) %s -> %s (%d chunks)",
+            stage,
+            path.name,
+            out_path.name,
+            len(output_chunks),
+        )
+
+    if sync_deleted:
+        _cleanup_stale_jsonl_outputs(
+            output_dir=chunk_dir,
+            expected_names=expected_output_names,
+        )
+
+
+def _split_sheet_chunks_for_stage(
+    *,
+    chunks: Sequence[Chunk],
+    splitter: RecursiveCharacterTextSplitter,
+    stage: str,
+) -> list[Chunk]:
+    output_chunks: list[Chunk] = []
+    output_index = 0
+    for chunk in chunks:
+        source_text = chunk.text
+        if not source_text:
+            continue
+        base_metadata = dict(chunk.metadata)
+        base_metadata.setdefault("source_type", "sheets")
+        base_metadata.setdefault("source_date", SOURCE_DATE_UNKNOWN)
+        base_metadata.pop("chunk_id", None)
+        docs = splitter.split_text(source_text)
+        for doc in docs:
+            metadata = dict(base_metadata)
+            metadata["chunk_id"] = output_index
+            metadata = _with_stage(metadata, stage)
+            output_chunks.append(Chunk(text=doc, metadata=metadata))
+            output_index += 1
+    return output_chunks
 
 
 def recursive_chunk_dir(
