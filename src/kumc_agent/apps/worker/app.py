@@ -125,11 +125,14 @@ def _dispatch_job(
             scopes = tuple(str(value) for value in scopes_raw if str(value).strip())
         else:
             scopes = tuple()
-        dry_run = (
-            bool(payload.get("dry_run"))
-            if "dry_run" in payload
-            else app.autonomous_agent.config.dry_run
-        )
+        dry_run = bool(payload.get("dry_run")) if "dry_run" in payload else None
+        role_ids_raw = payload.get("role_ids") or payload.get("role_id") or ()
+        if isinstance(role_ids_raw, str):
+            role_ids = tuple(part.strip() for part in role_ids_raw.split(",") if part.strip())
+        elif isinstance(role_ids_raw, (list, tuple)):
+            role_ids = tuple(str(value) for value in role_ids_raw if str(value).strip())
+        else:
+            role_ids = tuple()
         response = app.autonomous_agent.run(
             AutonomousAgentRequest(
                 trigger=str(payload.get("trigger") or "worker"),
@@ -138,9 +141,10 @@ def _dispatch_job(
                 dry_run=dry_run,
                 idempotency_key=str(payload.get("idempotency_key") or ""),
                 access=AccessContext(
-                    user_id=str(payload.get("user_id") or "worker"),
+                    user_id=str(payload.get("user_id") or ""),
                     guild_id=str(payload.get("guild_id") or ""),
-                    is_admin=bool(payload.get("admin", True)),
+                    role_ids=role_ids,
+                    is_admin=bool(payload.get("admin", False)),
                 ),
                 metadata={"frontend": "worker"},
             )

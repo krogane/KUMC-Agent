@@ -8,8 +8,10 @@ from kumc_agent.domain.models.autonomous_agent import (
     AutonomousAgentSnapshot,
     SnapshotItem,
 )
+from kumc_agent.domain.models.retrieval import Citation
 from kumc_agent.infra.agentic import AgentTraceRepository
 from kumc_agent.infra.automation import AutomationRepository
+from kumc_agent.infra.ingestion.repository import IngestionRepository
 from kumc_agent.infra.minecraft import ServerOperationRepository
 from kumc_agent.infra.workflow import WorkflowRepository
 
@@ -22,6 +24,7 @@ class SnapshotCollectorConfig:
     event_lookahead_days: int = 7
     stale_task_hours: int = 72
     recent_run_limit: int = 20
+    rag_delta_lookback_hours: int = 24
 
 
 class AutonomousSnapshotCollector:
@@ -32,12 +35,14 @@ class AutonomousSnapshotCollector:
         automation_repository: AutomationRepository | None = None,
         agent_trace_repository: AgentTraceRepository | None = None,
         server_operation_repository: ServerOperationRepository | None = None,
+        ingestion_repository: IngestionRepository | None = None,
         config: SnapshotCollectorConfig | None = None,
     ) -> None:
         self.workflow_repository = workflow_repository
         self.automation_repository = automation_repository
         self.agent_trace_repository = agent_trace_repository
         self.server_operation_repository = server_operation_repository
+        self.ingestion_repository = ingestion_repository
         self.config = config or SnapshotCollectorConfig()
 
     def collect(self, *, scopes: tuple[str, ...], now: datetime | None = None) -> AutonomousAgentSnapshot:
@@ -105,6 +110,14 @@ class AutonomousSnapshotCollector:
                 warnings.append(f"events_collector_failed:{type(exc).__name__}")
 
         rag_delta: tuple[SnapshotItem, ...] = tuple()
+        if "rag_delta" in scope_set:
+            if self.ingestion_repository is None:
+                warnings.append("rag_delta_repository_unconfigured")
+            else:
+                try:
+                    rag_delta = tuple(self._collect_rag_delta(current))
+                except Exception as exc:
+                    warnings.append(f"rag_delta_collector_failed:{type(exc).__name__}")
 
         if "server_ops" in scope_set:
             if self.server_operation_repository is None:
@@ -154,7 +167,10 @@ class AutonomousSnapshotCollector:
                         metadata={
                             "notification_target_refs": list(
                                 run.metadata.get("notification_target_refs") or []
-                            )
+                            ),
+                            "updated_at": (run.updated_at or run.created_at).isoformat()
+                            if (run.updated_at or run.created_at)
+                            else "",
                         },
                     )
                     for run in self.agent_trace_repository.latest_runs(limit=self.config.recent_run_limit)
@@ -265,6 +281,77 @@ class AutonomousSnapshotCollector:
                 )
         return upcoming, missing, without_tasks
 
+    def _collect_rag_delta(self, now: datetime) -> list[SnapshotItem]:
+        assert self.ingestion_repository is not None
+        since = now - timedelta(hours=max(1, int(self.config.rag_delta_lookback_hours)))
+        by_source: dict[str, dict[str, Any]] = {}
+        for chunk in self.ingestion_repository.load_active_chunks():
+            metadata = dict(chunk.metadata)
+            changed_at = _changed_at(metadata)
+            if changed_at is None or changed_at < since:
+                continue
+            source_item_id = str(
+                metadata.get("source_item_id")
+                or metadata.get("source_id")
+                or chunk.document_id
+            )
+            if not source_item_id:
+                continue
+            source_kind = str(metadata.get("source_kind") or metadata.get("source_type") or "")
+            external_id = str(metadata.get("external_id") or source_item_id)
+            title = str(metadata.get("source_title") or metadata.get("title") or external_id)
+            url = str(metadata.get("canonical_url") or metadata.get("url") or "")
+            current = by_source.setdefault(
+                source_item_id,
+                {
+                    "id": source_item_id,
+                    "title": title,
+                    "source_kind": source_kind,
+                    "external_id": external_id,
+                    "url": url,
+                    "changed_at": changed_at,
+                    "chunks": [],
+                    "citations": [],
+                },
+            )
+            if changed_at > current["changed_at"]:
+                current["changed_at"] = changed_at
+            current["chunks"].append(chunk.text)
+            current["citations"].append(
+                Citation(
+                    source_item_id=source_item_id,
+                    chunk_id=chunk.id,
+                    label=title,
+                    url=url,
+                    quote=_compact(chunk.text, 220),
+                    access_scope=dict(metadata.get("access_scope") or {}),
+                    metadata={
+                        "source_kind": source_kind,
+                        "external_id": external_id,
+                    },
+                )
+            )
+        items: list[SnapshotItem] = []
+        for payload in sorted(by_source.values(), key=lambda item: item["changed_at"], reverse=True)[:20]:
+            chunks = [str(text) for text in payload["chunks"][:3]]
+            items.append(
+                _item(
+                    "rag_delta",
+                    str(payload["id"]),
+                    str(payload["title"]),
+                    summary=_compact(" / ".join(chunks), 500),
+                    status="changed",
+                    metadata={
+                        "source_kind": payload["source_kind"],
+                        "external_id": payload["external_id"],
+                        "changed_at": payload["changed_at"].isoformat(),
+                        "chunk_count": len(payload["chunks"]),
+                    },
+                    citations=tuple(payload["citations"][:3]),
+                )
+            )
+        return items
+
 
 def _item(
     kind: str,
@@ -277,6 +364,7 @@ def _item(
     starts_at: datetime | None = None,
     risk: str = "low",
     metadata: dict[str, Any] | None = None,
+    citations: tuple[Citation, ...] = tuple(),
 ) -> SnapshotItem:
     return SnapshotItem(
         id=str(item_id),
@@ -287,6 +375,7 @@ def _item(
         due_at=due_at,
         starts_at=starts_at,
         risk=risk,
+        citations=citations,
         metadata=dict(metadata or {}),
     )
 
@@ -295,3 +384,43 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _changed_at(metadata: dict[str, Any]) -> datetime | None:
+    for key in (
+        "updated_at",
+        "source_updated_at",
+        "created_at",
+        "source_created_at",
+        "published_at",
+        "message_timestamp",
+        "hatenablog_updated_at",
+        "hatenablog_created_at",
+        "indexed_at",
+        "ingested_at",
+    ):
+        value = metadata.get(key)
+        if value:
+            parsed = _parse_datetime(value)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return _aware(value)
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return _aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _compact(text: str, limit: int) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."

@@ -685,7 +685,7 @@ def main() -> None:
                 trigger=args.trigger,
                 slot=args.slot,
                 scopes=tuple(args.scope or ()),
-                dry_run=bool(args.dry_run or app.autonomous_agent.config.dry_run),
+                dry_run=True if args.dry_run else None,
                 idempotency_key=args.idempotency_key,
                 access=AccessContext(
                     user_id=args.user_id or "cli",

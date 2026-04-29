@@ -9,6 +9,30 @@ autonomous_agent:
     tasks: 2
     events: 7
   duplicate_suppression_hours: 24
+  rag_delta_lookback_hours: 24
+  access:
+    system_user_id: "system"
+    guild_id: ""
+    role_ids: []
+    is_admin: false
+  planner:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    openai_model: "gpt-5.2"
+    prompt_name: "autonomous_agent_planner"
+    temperature: 0.0
+    max_output_tokens: 2048
+    max_retries: 2
+  verifier:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    openai_model: "gpt-5.2"
+    prompt_name: "autonomous_agent_verifier"
+    temperature: 0.0
+    max_output_tokens: 2048
+    max_retries: 2
   budget:
     max_steps: 10
     max_search_calls: 6

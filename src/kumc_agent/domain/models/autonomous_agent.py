@@ -13,9 +13,9 @@ class AutonomousAgentRequest:
     trigger: str = "manual"
     slot: str = "manual"
     scopes: tuple[str, ...] = tuple()
-    dry_run: bool = True
+    dry_run: bool | None = None
     idempotency_key: str = ""
-    access: AccessContext = field(default_factory=lambda: AccessContext(user_id="system"))
+    access: AccessContext = field(default_factory=AccessContext)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -145,9 +145,14 @@ class AutonomousAgentResponse:
     status: str
     text: str
     detail_markdown: str = ""
+    proposals: tuple[dict[str, Any], ...] = tuple()
     notification_proposals: tuple[NotificationProposal, ...] = tuple()
     approval_requests: tuple[ApprovalRequestProposal, ...] = tuple()
     candidate_refs: tuple[str, ...] = tuple()
+    task_candidates: tuple[dict[str, Any], ...] = tuple()
+    event_candidates: tuple[dict[str, Any], ...] = tuple()
+    automation_runs: tuple[dict[str, Any], ...] = tuple()
+    server_operations: tuple[dict[str, Any], ...] = tuple()
     warnings: tuple[str, ...] = tuple()
     run: AgentRun | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -157,9 +162,14 @@ class AutonomousAgentResponse:
             "status": self.status,
             "text": self.text,
             "detail_markdown": self.detail_markdown,
+            "proposals": _dump_items(self.proposals),
             "notification_proposals": _dump_items(self.notification_proposals),
             "approval_requests": _dump_items(self.approval_requests),
             "candidate_refs": list(self.candidate_refs),
+            "task_candidates": _dump_items(self.task_candidates),
+            "event_candidates": _dump_items(self.event_candidates),
+            "automation_runs": _dump_items(self.automation_runs),
+            "server_operations": _dump_items(self.server_operations),
             "warnings": list(self.warnings),
             "metadata": dict(self.metadata),
         }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -9,8 +9,11 @@ from kumc_agent.domain.models.agentic import AgentRun, AgentStep
 from kumc_agent.domain.models.audit import AuditEvent
 from kumc_agent.domain.models.automation import AutomationRun
 from kumc_agent.domain.models.autonomous_agent import (
+    AutonomousDecision,
     AutonomousAgentRequest,
     AutonomousAgentResponse,
+    AutonomousPlan,
+    AutonomousToolResult,
     autonomous_budget_from_config,
 )
 from kumc_agent.domain.models.retrieval import AccessContext
@@ -42,6 +45,10 @@ class AutonomousAgentServiceConfig:
     lookahead_days: dict[str, int] | None = None
     duplicate_suppression_hours: int = 24
     budget: object | None = None
+    system_user_id: str = "system"
+    system_guild_id: str = ""
+    system_role_ids: tuple[str, ...] = tuple()
+    system_is_admin: bool = False
 
 
 class AutonomousAgentService:
@@ -67,9 +74,9 @@ class AutonomousAgentService:
         self.audit_log = audit_log
 
     def run(self, request: AutonomousAgentRequest) -> AutonomousAgentResponse:
-        access = _system_access(request.access)
+        access = self._system_access(request.access)
         scopes = request.scopes or self.config.scopes
-        dry_run = self.config.dry_run if request.dry_run is True else bool(request.dry_run)
+        dry_run = self.config.dry_run if request.dry_run is None else bool(request.dry_run)
         lookahead = dict(self.config.lookahead_days or {})
         idempotency_key = request.idempotency_key.strip() or build_autonomous_idempotency_key(
             AutonomousIdempotencyInput(
@@ -83,6 +90,13 @@ class AutonomousAgentService:
         )
         existing = self.automation_repository.get_run_by_idempotency_key(idempotency_key)
         if existing is not None:
+            self._audit(
+                "autonomous_agent.duplicate",
+                access,
+                "duplicate",
+                existing.id,
+                {"idempotency_key": idempotency_key, "existing_status": existing.status},
+            )
             return AutonomousAgentResponse(
                 status="duplicate",
                 text=f"同じ自律エージェントrunは記録済みです: {existing.id}",
@@ -91,6 +105,36 @@ class AutonomousAgentService:
                     "duplicate": True,
                     "existing_run_id": existing.id,
                     "idempotency_key": idempotency_key,
+                },
+            )
+
+        if not self.config.enabled and request.trigger in {"automation", "schedule"}:
+            history_id = str(uuid4())
+            self._record_history(
+                request=request,
+                status="blocked",
+                idempotency_key=idempotency_key,
+                run_id="",
+                warnings=("autonomous_agent_disabled",),
+                dry_run=dry_run,
+                history_id=history_id,
+                metadata={"blocked_reason": "autonomous_agent_disabled"},
+            )
+            self._audit(
+                "autonomous_agent.blocked",
+                access,
+                "blocked",
+                idempotency_key,
+                {"reason": "autonomous_agent_disabled"},
+            )
+            return AutonomousAgentResponse(
+                status="blocked",
+                text="自律エージェントは設定で無効化されています。",
+                warnings=("autonomous_agent_disabled",),
+                metadata={
+                    "idempotency_key": idempotency_key,
+                    "dry_run": dry_run,
+                    "blocked": True,
                 },
             )
 
@@ -111,6 +155,17 @@ class AutonomousAgentService:
                 },
             )
         )
+        history_id = str(uuid4())
+        self._record_history(
+            request=request,
+            status="running",
+            idempotency_key=idempotency_key,
+            run_id=run.id,
+            warnings=tuple(),
+            dry_run=dry_run,
+            history_id=history_id,
+            metadata={"reservation": True},
+        )
         try:
             response = self._run_started(
                 run=run,
@@ -119,6 +174,7 @@ class AutonomousAgentService:
                 scopes=scopes,
                 dry_run=dry_run,
                 idempotency_key=idempotency_key,
+                history_id=history_id,
             )
         except Exception as exc:
             failed_run = self.trace_repository.save_run(
@@ -139,6 +195,8 @@ class AutonomousAgentService:
                 run_id=failed_run.id,
                 warnings=(f"autonomous_agent_failed:{type(exc).__name__}",),
                 dry_run=dry_run,
+                history_id=history_id,
+                metadata={"error_type": type(exc).__name__, "error": str(exc)},
             )
             self._audit("autonomous_agent.failed", access, "failed", failed_run.id, {"error": str(exc)})
             return AutonomousAgentResponse(
@@ -159,69 +217,113 @@ class AutonomousAgentService:
         scopes: tuple[str, ...],
         dry_run: bool,
         idempotency_key: str,
+        history_id: str,
     ) -> AutonomousAgentResponse:
+        started_at = datetime.now(UTC)
         snapshot = self.snapshot_collector.collect(scopes=scopes)
-        plan = self.planner.plan(snapshot)
-        self._save_step(
-            run.id,
-            "PLAN",
-            input_payload={"snapshot": snapshot},
-            output_payload={"plan": plan},
-        )
-        self._audit(
-            "autonomous_agent.plan",
-            access,
-            "succeeded",
-            run.id,
-            {"target_refs": list(plan.target_refs), "checks": len(plan.checks)},
-        )
-
-        tool_results = []
         max_steps = max(0, int(run.budget.max_steps))
-        for query in plan.required_queries[:max_steps]:
-            result = self.adapter.run_query(query, access=access, dry_run=dry_run)
-            tool_results.append(result)
+        max_search_calls = max(0, int(run.budget.max_search_calls))
+        max_replans = max(0, int(run.budget.max_replans))
+        max_latency_seconds = max(0.0, float(run.budget.max_latency_seconds))
+        replan_count = 0
+        search_calls = 0
+        tool_step_count = 0
+        all_tool_results: list[AutonomousToolResult] = []
+        plan: AutonomousPlan | None = None
+        decision: AutonomousDecision | None = None
+        budget_warnings: list[str] = []
+
+        while True:
+            plan = self.planner.plan(snapshot)
             self._save_step(
                 run.id,
-                "TOOL",
-                input_payload={"query": query},
-                output_payload={"result": result},
-                status=result.status,
+                "PLAN",
+                input_payload={"snapshot": snapshot, "replan_count": replan_count},
+                output_payload={"plan": plan},
             )
             self._audit(
-                "autonomous_agent.tool",
+                "autonomous_agent.plan",
                 access,
-                result.status,
+                "succeeded",
                 run.id,
-                {"query_id": query.id, "target_refs": list(query.target_refs)},
+                {
+                    "target_refs": list(plan.target_refs),
+                    "checks": len(plan.checks),
+                    "queries": len(plan.required_queries),
+                    "replan_count": replan_count,
+                },
             )
-        budget_warnings: tuple[str, ...] = tuple()
-        if len(plan.required_queries) > max_steps:
-            budget_warnings = ("budget_max_steps_exceeded",)
 
-        decision = self.verifier.verify(plan=plan, tool_results=tuple(tool_results))
-        if budget_warnings:
-            decision = replace(
-                decision,
-                warnings=tuple(dict.fromkeys([*decision.warnings, *budget_warnings])),
+            iteration_results: list[AutonomousToolResult] = []
+            for query in plan.required_queries:
+                if max_latency_seconds and (datetime.now(UTC) - started_at).total_seconds() >= max_latency_seconds:
+                    budget_warnings.append("budget_max_latency_seconds_exceeded")
+                    break
+                if tool_step_count >= max_steps:
+                    budget_warnings.append("budget_max_steps_exceeded")
+                    break
+                if search_calls >= max_search_calls:
+                    budget_warnings.append("budget_max_search_calls_exceeded")
+                    break
+                result = self.adapter.run_query(query, access=access, dry_run=dry_run)
+                iteration_results.append(result)
+                all_tool_results.append(result)
+                search_calls += 1
+                tool_step_count += 1
+                self._save_step(
+                    run.id,
+                    "TOOL",
+                    input_payload={"query": query, "replan_count": replan_count},
+                    output_payload={"result": result},
+                    status=result.status,
+                )
+                self._audit(
+                    "autonomous_agent.tool",
+                    access,
+                    result.status,
+                    run.id,
+                    {
+                        "query_id": query.id,
+                        "target_refs": list(query.target_refs),
+                        "side_effects": result.metadata.get("side_effects", "none"),
+                    },
+                )
+
+            decision = self.verifier.verify(plan=plan, tool_results=tuple(iteration_results))
+            if budget_warnings:
+                decision = replace(
+                    decision,
+                    warnings=tuple(dict.fromkeys([*decision.warnings, *budget_warnings])),
+                )
+            self._save_step(
+                run.id,
+                "VERIFY",
+                input_payload={
+                    "plan": plan,
+                    "tool_results": tuple(iteration_results),
+                    "replan_count": replan_count,
+                },
+                output_payload={"decision": decision},
             )
-        self._save_step(
-            run.id,
-            "VERIFY",
-            input_payload={"plan": plan, "tool_results": tuple(tool_results)},
-            output_payload={"decision": decision},
-        )
-        self._audit(
-            "autonomous_agent.verify",
-            access,
-            decision.decision,
-            run.id,
-            {
-                "notification_ids": [proposal.id for proposal in decision.notification_proposals],
-                "approval_request_ids": [proposal.id for proposal in decision.approval_requests],
-                "candidate_refs": list(decision.candidate_refs),
-            },
-        )
+            self._audit_verify(access=access, run_id=run.id, decision=decision, replan_count=replan_count)
+
+            if (
+                decision.decision == "retry_search"
+                and replan_count < max_replans
+                and search_calls < max_search_calls
+                and tool_step_count < max_steps
+            ):
+                replan_count += 1
+                continue
+            if decision.decision == "retry_search" and replan_count >= max_replans:
+                decision = replace(
+                    decision,
+                    warnings=tuple(dict.fromkeys([*decision.warnings, "budget_max_replans_exceeded"])),
+                )
+            break
+
+        assert plan is not None
+        assert decision is not None
 
         status = _status_from_decision(decision.decision, warnings=decision.warnings)
         notification_target_refs = tuple(
@@ -231,6 +333,9 @@ class AutonomousAgentService:
                 for ref in proposal.target_refs
             )
         )
+        elapsed_seconds = (datetime.now(UTC) - started_at).total_seconds()
+        typed_refs = _typed_result_refs(all_tool_results)
+        proposals = _proposal_payloads(decision)
         final_run = self.trace_repository.save_run(
             replace(
                 run,
@@ -243,10 +348,19 @@ class AutonomousAgentService:
                         "approval_requests": decision.approval_requests,
                         "candidate_refs": list(decision.candidate_refs),
                         "notification_target_refs": list(notification_target_refs),
+                        "task_candidates": typed_refs["task_candidates"],
+                        "event_candidates": typed_refs["event_candidates"],
+                        "automation_runs": typed_refs["automation_runs"],
+                        "server_operations": typed_refs["server_operations"],
+                        "replan_count": replan_count,
+                        "search_calls": search_calls,
+                        "elapsed_seconds": elapsed_seconds,
+                        "cost_usd": 0.0,
                     }
                 ),
             )
         )
+        self._audit_proposals(access=access, run_id=final_run.id, decision=decision)
         self._record_history(
             request=request,
             status=status,
@@ -254,14 +368,33 @@ class AutonomousAgentService:
             run_id=final_run.id,
             warnings=decision.warnings,
             dry_run=dry_run,
+            history_id=history_id,
+            metadata={
+                "notification_proposals": decision.notification_proposals,
+                "approval_requests": decision.approval_requests,
+                "candidate_refs": list(decision.candidate_refs),
+                "task_candidates": typed_refs["task_candidates"],
+                "event_candidates": typed_refs["event_candidates"],
+                "automation_runs": typed_refs["automation_runs"],
+                "server_operations": typed_refs["server_operations"],
+                "replan_count": replan_count,
+                "search_calls": search_calls,
+                "elapsed_seconds": elapsed_seconds,
+                "cost_usd": 0.0,
+            },
         )
         return AutonomousAgentResponse(
             status=status,
             text=_response_text(status, decision),
             detail_markdown=_detail_markdown(plan, decision),
+            proposals=tuple(proposals),
             notification_proposals=decision.notification_proposals,
             approval_requests=decision.approval_requests,
             candidate_refs=decision.candidate_refs,
+            task_candidates=tuple(typed_refs["task_candidates"]),
+            event_candidates=tuple(typed_refs["event_candidates"]),
+            automation_runs=tuple(typed_refs["automation_runs"]),
+            server_operations=tuple(typed_refs["server_operations"]),
             warnings=decision.warnings,
             run=final_run,
             metadata={
@@ -270,6 +403,10 @@ class AutonomousAgentService:
                 "idempotency_key": idempotency_key,
                 "decision": decision.decision,
                 "dry_run": dry_run,
+                "search_calls": search_calls,
+                "replan_count": replan_count,
+                "elapsed_seconds": elapsed_seconds,
+                "cost_usd": 0.0,
             },
         )
 
@@ -302,20 +439,93 @@ class AutonomousAgentService:
         run_id: str,
         warnings: tuple[str, ...],
         dry_run: bool,
+        history_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.automation_repository.save_run(
             AutomationRun(
+                id=history_id or str(uuid4()),
                 rule_id="autonomous_agent",
                 trigger_key=f"{request.trigger}:{request.slot}",
                 mode="dry_run" if dry_run else "approval_required",
                 status=status,
                 idempotency_key=idempotency_key,
                 warnings=warnings,
-                metadata={
-                    "agent_run_id": run_id,
-                    "side_effects": "none",
+                metadata=sanitize_autonomous_metadata(
+                    {
+                        "agent_run_id": run_id,
+                        "side_effects": "none",
+                        **(metadata or {}),
+                    }
+                ),
+            )
+        )
+
+    def _audit_verify(
+        self,
+        *,
+        access: AccessContext,
+        run_id: str,
+        decision: AutonomousDecision,
+        replan_count: int,
+    ) -> None:
+        self._audit(
+            "autonomous_agent.verify",
+            access,
+            decision.decision,
+            run_id,
+            {
+                "notification_ids": [proposal.id for proposal in decision.notification_proposals],
+                "approval_request_ids": [proposal.id for proposal in decision.approval_requests],
+                "candidate_refs": list(decision.candidate_refs),
+                "missing": list(decision.missing),
+                "conflicts": list(decision.conflicts),
+                "replan_count": replan_count,
+                "decision_metadata": decision.metadata,
+            },
+        )
+
+    def _audit_proposals(
+        self,
+        *,
+        access: AccessContext,
+        run_id: str,
+        decision: AutonomousDecision,
+    ) -> None:
+        for proposal in decision.notification_proposals:
+            self._audit(
+                "autonomous_agent.proposal",
+                access,
+                "notification_proposed",
+                run_id,
+                {
+                    "proposal_id": proposal.id,
+                    "target_refs": list(proposal.target_refs),
+                    "risk": proposal.risk,
                 },
             )
+        for proposal in decision.approval_requests:
+            self._audit(
+                "autonomous_agent.proposal",
+                access,
+                "approval_proposed",
+                run_id,
+                {
+                    "proposal_id": proposal.id,
+                    "target_type": proposal.target_type,
+                    "target_id": proposal.target_id,
+                    "risk": proposal.risk,
+                },
+            )
+
+    def _system_access(self, access: AccessContext) -> AccessContext:
+        if access.user_id:
+            return access
+        return AccessContext(
+            user_id=self.config.system_user_id or "system",
+            guild_id=access.guild_id or self.config.system_guild_id,
+            role_ids=access.role_ids or self.config.system_role_ids,
+            is_admin=bool(access.is_admin or self.config.system_is_admin),
         )
 
     def _audit(
@@ -342,20 +552,64 @@ class AutonomousAgentService:
         )
 
 
-def _system_access(access: AccessContext) -> AccessContext:
-    if access.user_id:
-        return access
-    return AccessContext(
-        user_id="system",
-        guild_id=access.guild_id,
-        role_ids=access.role_ids,
-        is_admin=access.is_admin,
-    )
-
-
 def _dict_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = sanitize_autonomous_payload(payload)
     return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _typed_result_refs(results: list[AutonomousToolResult]) -> dict[str, list[dict[str, Any]]]:
+    payload: dict[str, list[dict[str, Any]]] = {
+        "task_candidates": [],
+        "event_candidates": [],
+        "automation_runs": [],
+        "server_operations": [],
+    }
+    for result in results:
+        for key in payload:
+            value = result.metadata.get(key)
+            if isinstance(value, list):
+                payload[key].extend(
+                    item
+                    for item in value
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                )
+    for key, values in payload.items():
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for value in values:
+            item_id = str(value.get("id") or "")
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            unique.append(dict(value))
+        payload[key] = unique
+    return payload
+
+
+def _proposal_payloads(decision: AutonomousDecision) -> list[dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
+    for proposal in decision.notification_proposals:
+        proposals.append(
+            {
+                "id": proposal.id,
+                "type": "notification",
+                "status": proposal.status,
+                "target_refs": list(proposal.target_refs),
+                "risk": proposal.risk,
+            }
+        )
+    for proposal in decision.approval_requests:
+        proposals.append(
+            {
+                "id": proposal.id,
+                "type": "approval_request",
+                "status": proposal.status,
+                "target_type": proposal.target_type,
+                "target_id": proposal.target_id,
+                "risk": proposal.risk,
+            }
+        )
+    return proposals
 
 
 def _status_from_decision(decision: str, *, warnings: tuple[str, ...]) -> str:

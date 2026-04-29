@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kumc_agent.apps.foundation import build_foundation_app_context
-from kumc_agent.domain.models.automation import ActionSpecRef
+from kumc_agent.domain.models.automation import ActionSpecRef, AutomationRule, TriggerSpec
 from kumc_agent.features.automation import AutomationService
 from kumc_agent.features.hardening import ProductionReadinessService
 from kumc_agent.infra.automation import build_automation_repository
@@ -39,6 +39,7 @@ def build_automation_app_context(
         action_executor=_build_action_executor(base_dir=foundation.config.base_dir),
         auto_index_cron=_auto_index_cron_from_config(foundation.config.scheduler),
         auto_index_enabled=foundation.config.scheduler.auto_index_enabled,
+        autonomous_agent_rules=_autonomous_agent_rules_from_config(foundation.config.autonomous_agent),
     )
     if seed_defaults:
         automation.seed_defaults()
@@ -58,10 +59,63 @@ def _auto_index_cron_from_config(scheduler) -> str:
     return f"{int(minute)} {int(hour)} * * {day_expr or '*'}"
 
 
+def _autonomous_agent_rules_from_config(config) -> tuple[AutomationRule, ...]:
+    rules: list[AutomationRule] = []
+    for slot in config.schedule_times:
+        cron = _daily_cron(str(slot))
+        if not cron:
+            continue
+        rule_id = f"autonomous_agent_{str(slot).replace(':', '')}"
+        rules.append(
+            AutomationRule(
+                id=rule_id,
+                name=f"自律エージェント {slot}",
+                enabled=bool(config.enabled),
+                trigger=TriggerSpec(
+                    "schedule_cron",
+                    {
+                        "cron": cron,
+                        "timezone": config.timezone,
+                        "slot": str(slot),
+                    },
+                ),
+                actions=(
+                    ActionSpecRef(
+                        "autonomous_agent_run",
+                        target="autonomous_agent",
+                        payload={
+                            "trigger": "automation",
+                            "slot": str(slot),
+                            "scopes": list(config.scopes),
+                            "dry_run": bool(config.dry_run),
+                        },
+                        risk_level="low",
+                        approval_required=False,
+                    ),
+                ),
+                mode="auto_run",
+                risk_level="low",
+                created_by_user_id="system",
+                approved_by_user_id="system",
+                metadata={"source": "autonomous_agent.schedule_times"},
+            )
+        )
+    return tuple(rules)
+
+
+def _daily_cron(slot: str) -> str:
+    try:
+        hour, minute = slot.split(":", 1)
+        return f"{int(minute)} {int(hour)} * * *"
+    except (ValueError, TypeError):
+        return ""
+
+
 def _build_action_executor(*, base_dir: Path):
     def _execute(action: ActionSpecRef) -> dict[str, object]:
         worker_job_types = {
             "auto_index_update",
+            "autonomous_agent_run",
             "task_due_reminder",
             "task_approval_batch",
             "event_reminder",
@@ -87,6 +141,8 @@ def _build_action_executor(*, base_dir: Path):
                 "side_effects": (
                     "indexing_snapshot_publish"
                     if action.action_type == "auto_index_update"
+                    else "none"
+                    if action.action_type == "autonomous_agent_run"
                     else "worker_action"
                 )
             },

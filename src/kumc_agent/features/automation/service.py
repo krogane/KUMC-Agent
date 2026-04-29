@@ -26,6 +26,7 @@ _VALID_MODES = {"dry_run", "approval_required", "auto_run"}
 _HIGH_RISKS = {"high", "critical"}
 _AUTO_RUN_ALLOWLIST = {
     "auto_index_update",
+    "autonomous_agent_run",
     "ingest_backfill",
     "task_due_reminder",
     "weekly_summary_draft",
@@ -50,6 +51,7 @@ class AutomationService:
         action_executor: Callable[[ActionSpecRef], dict[str, object]] | None = None,
         auto_index_cron: str = "0 6 * * MON-FRI",
         auto_index_enabled: bool = True,
+        autonomous_agent_rules: tuple[AutomationRule, ...] = tuple(),
     ) -> None:
         self.repository = repository
         self.feature_flags = feature_flags
@@ -58,17 +60,21 @@ class AutomationService:
         self.action_executor = action_executor
         self.auto_index_cron = auto_index_cron
         self.auto_index_enabled = auto_index_enabled
+        self.autonomous_agent_rules = autonomous_agent_rules
 
     def seed_defaults(self) -> tuple[AutomationRule, ...]:
-        if self.repository.list_rules():
-            return tuple(self.repository.list_rules())
+        existing = {rule.id for rule in self.repository.list_rules()}
         stored = [
             self.repository.save_rule(rule)
             for rule in _default_rules(
                 auto_index_cron=self.auto_index_cron,
                 auto_index_enabled=self.auto_index_enabled,
+                autonomous_agent_rules=self.autonomous_agent_rules,
             )
+            if rule.id not in existing
         ]
+        if not stored:
+            return tuple(self.repository.list_rules())
         self._audit(
             "automation.seed_defaults",
             AccessContext(user_id="system", is_admin=True),
@@ -76,7 +82,7 @@ class AutomationService:
             "automation_rules",
             metadata={"count": len(stored)},
         )
-        return tuple(stored)
+        return tuple(self.repository.list_rules())
 
     def list_rules(self) -> AutomationResponse:
         rules = tuple(self.repository.list_rules() or self.seed_defaults())
@@ -402,6 +408,7 @@ def _default_rules(
     *,
     auto_index_cron: str = "0 6 * * MON-FRI",
     auto_index_enabled: bool = True,
+    autonomous_agent_rules: tuple[AutomationRule, ...] = tuple(),
 ) -> tuple[AutomationRule, ...]:
     return (
         AutomationRule(
@@ -546,6 +553,7 @@ def _default_rules(
             risk_level="high",
             created_by_user_id="system",
         ),
+        *autonomous_agent_rules,
     )
 
 

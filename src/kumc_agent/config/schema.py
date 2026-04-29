@@ -106,6 +106,26 @@ class AutonomousAgentBudgetSection:
 
 
 @dataclass(frozen=True)
+class AutonomousAgentLLMSection:
+    enabled: bool
+    provider: str
+    gemini_model: str
+    openai_model: str
+    prompt_name: str
+    temperature: float
+    max_output_tokens: int
+    max_retries: int
+
+
+@dataclass(frozen=True)
+class AutonomousAgentAccessSection:
+    system_user_id: str
+    guild_id: str
+    role_ids: list[str]
+    is_admin: bool
+
+
+@dataclass(frozen=True)
 class AutonomousAgentSection:
     enabled: bool
     schedule_times: list[str]
@@ -116,6 +136,10 @@ class AutonomousAgentSection:
     lookahead_days: AutonomousAgentLookaheadSection
     duplicate_suppression_hours: int
     budget: AutonomousAgentBudgetSection
+    planner: AutonomousAgentLLMSection
+    verifier: AutonomousAgentLLMSection
+    access: AutonomousAgentAccessSection
+    rag_delta_lookback_hours: int
 
 
 @dataclass(frozen=True)

@@ -162,7 +162,14 @@ class PostgresAutomationRepository:
                       action_plan, warnings, metadata, created_at
                     )
                     values (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
-                    on conflict (idempotency_key) do nothing
+                    on conflict (idempotency_key) do update set
+                      rule_id = excluded.rule_id,
+                      trigger_key = excluded.trigger_key,
+                      mode = excluded.mode,
+                      status = excluded.status,
+                      action_plan = excluded.action_plan,
+                      warnings = excluded.warnings,
+                      metadata = excluded.metadata
                     """,
                     (
                         payload["id"],

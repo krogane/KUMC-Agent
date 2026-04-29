@@ -84,7 +84,9 @@ flowchart TD
 
 ## 5. 実行タイミング
 ### 5.1 起動方式
-自律エージェントは1日にn回、自動で起動する。初期実装ではworkerから明示的に `job_type="autonomous_agent_run"` を実行できるようにし、scheduler連携時に同じserviceを呼び出す。
+自律エージェントは1日にn回、自動で起動する。`schedule_times` は自動インデックス更新と同じく Automation default rule に展開し、`schedule_cron` trigger から worker の `job_type="autonomous_agent_run"` を呼び出す。CLI手動実行、worker手動実行、Automation/scheduler経由実行はいずれも同じ `AutonomousAgentService` を呼ぶ。
+
+`enabled=false` の場合、Automation/schedule経由runは `blocked` として履歴と監査に記録し、PLAN/TOOLは実行しない。CLI手動runは検証用途として実行できる。
 
 起動時刻は `.env` ではなく `configs/main/autonomous_agent.yaml` に保存する。トークン、APIキー、DB接続情報などを追加する場合だけ `.env` / `.env.example` を更新する。
 
@@ -101,6 +103,25 @@ autonomous_agent:
   lookahead_days:
     tasks: 2
     events: 7
+  duplicate_suppression_hours: 24
+  rag_delta_lookback_hours: 24
+  access:
+    system_user_id: "system"
+    guild_id: ""
+    role_ids: []
+    is_admin: false
+  planner:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    openai_model: "gpt-5.2"
+    prompt_name: "autonomous_agent_planner"
+  verifier:
+    enabled: true
+    provider: "gemini"
+    gemini_model: ""
+    openai_model: "gpt-5.2"
+    prompt_name: "autonomous_agent_verifier"
   budget:
     max_steps: 10
     max_search_calls: 6
@@ -120,10 +141,18 @@ autonomous-agent:{date}:{slot}:{scope_hash}
 
 `date` は設定timezone上の日付、`slot` は `schedule_times` の時刻または手動trigger名、`scope_hash` は対象scope、guild、channel、lookahead設定のhashである。
 
-既存runが同じ `idempotency_key` で保存済みの場合、新しいPLAN/TOOLは実行せず、`status="duplicate"`、`metadata.duplicate=true` として応答する。
+run開始時に `AutomationRun(status="running")` を同じ `idempotency_key` で予約する。既存runが同じ `idempotency_key` で保存済みの場合、新しいPLAN/TOOLは実行せず、`status="duplicate"`、`metadata.duplicate=true` として応答する。Postgresでは `idempotency_key` unique constraintを使い、最終statusは同じ予約レコードを更新する。File fallbackでは同じidの追記で最新レコードを有効状態とする。
 
 ### 5.3 手動dry-run
 運用確認のため、CLIまたはworkerから手動dry-runできる。dry-runでは通知送信や候補保存を行わず、作成予定の提案、通知、承認申請をpayloadに返す。
+
+`AutonomousAgentRequest.dry_run` は三値で扱う。
+
+| 値 | 意味 |
+| --- | --- |
+| `None` | `configs/main/autonomous_agent.yaml` の `dry_run` に従う |
+| `true` | 強制dry-run。候補保存・通知要求を抑止する |
+| `false` | 候補保存を許可する。ただし外部投稿、サーバー操作、正本更新は承認前に実行しない |
 
 本番定期runでも初期値は `dry_run: true` とし、承認フローと通知先が確認できてから候補作成を有効化する。
 
@@ -144,6 +173,8 @@ PLANの入力snapshotには次を含める。
 | `automation` | waiting_approvalまたはblockedのAutomationRun、次回実行予定 |
 | `recent_runs` | 直近の自律エージェントrunと同一対象の通知履歴 |
 
+RAG差分の正データソースは ingestion repository の active chunks とする。`updated_at`、`source_updated_at`、`created_at`、`source_created_at`、`published_at`、`message_timestamp`、`indexed_at`、`ingested_at` などのmetadata時刻が `rag_delta_lookback_hours` 以内のsourceを差分として扱う。差分itemには `source_item_id`、`source_kind`、`external_id`、短いsummary、最大数件のcitationだけを入れる。
+
 大きな本文断片や検索contextはsnapshotに直接保持しない。必要な場合はcitation id、source id、短い要約、取得条件だけを保持する。
 
 ### 6.2 PLAN出力
@@ -161,18 +192,18 @@ PLANの出力は `AgentStep(state="PLAN")` として保存する。payloadには
 | `retry_policy` | 再検索上限、再計画上限 |
 
 ### 6.3 判定ルール
-初期実装では、LLMではなく決定的ルールでPLANを作る。
+完全実装では、決定的ルールを安全な下限として残したうえで、専用LLM Plannerが複合状況からPLANを作る。Plannerは `snapshot`、recent runs、budget、scope、side effect boundaryを入力にし、JSON schemaで `checks`、`required_queries`、`target_refs`、`success_criteria`、`risk`、`notification_policy`、`retry_policy` を返す。LLM出力は必ずschema validation、risk/boundary正規化、決定的planとのmerge、fallbackを通す。
 
-- 期限が `task_management.due_soon_notice_days` 以内の未完了Taskがある場合、通知候補を作る。
+決定的guardは次のルールを満たす。
+
+- 期限が `autonomous_agent.lookahead_days.tasks` 以内の未完了Taskがある場合、通知候補を作る。`task_management.due_soon_notice_days` は通常のTask通知機能用であり、自律エージェントの独立lookaheadを優先する。
 - 期限超過Taskがある場合、担当者確認または完了確認の通知候補を作る。
 - 直近n日のEventに未完了Taskがない場合、関連タスク候補作成クエリを作る。
 - 日時または場所が未定の直近Eventがある場合、確認通知またはEvent変更候補作成クエリを作る。
 - 当日のRAG差分にタスク・イベントらしい記述がある場合、統合入力受付へ抽出クエリを送る。
 - waiting_approvalのServerOperationがある場合、承認依頼通知を作る。
 - サーバー運用確認事項がある場合、実行ではなくdry-run候補または許可申請を作る。
-- 直近runで同じ対象に通知済みの場合、重複通知を抑制する。
-
-将来LLM Plannerを追加する場合も、出力はschema validationを通し、上記の副作用境界を破る計画は棄却する。
+- `duplicate_suppression_hours` 内の直近runで同じ対象に通知済みの場合、重複通知を抑制する。
 
 ## 7. TOOL
 TOOLでは、PLANの結果に基づき、必要な確認を統合入力受付へ送る。
@@ -258,8 +289,10 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 | `warnings` | 利用者に提示可能な警告 |
 | `metadata` | 内部判断、score、trace id |
 
+専用LLM Verifierはtool result、citation、権限、重複通知履歴、副作用契約を入力にし、JSON schemaで `decision`、`satisfied`、`missing`、`conflicts`、`warnings`、`metadata.reason` を返す。LLM出力は決定的Verifierの結果とmergeし、決定的Verifierが検出した副作用違反、secret、内部IP、招待URL、個人連絡先、citation不足はLLM判断で解除できない。
+
 ### 8.3 再検索
-再検索は `AgentBudget.max_replans` 以内に限定する。再検索しても改善が見込めない場合、`noop` または低confidenceの提案として終了する。
+再検索は `AgentBudget.max_replans` 以内に限定する。TOOL呼び出しは `max_steps` と `max_search_calls` の両方で制限し、`max_latency_seconds` を超える前に追加TOOLを止める。elapsed、cost、search call数、replan countはrun metadataとAuditEventに残す。再検索しても改善が見込めない場合、`noop` または `insufficient_evidence` として終了する。
 
 ## 9. 出力
 自律エージェントの出力は、提案・通知・承認申請・ログに限定する。
@@ -279,10 +312,10 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 | `automation_runs` | dry-runまたはwaiting_approvalのAutomationRun |
 | `server_operations` | waiting_approvalまたはdry-run候補 |
 | `warnings` | 利用者に提示可能な警告 |
-| `run` | `AgentRun` |
+| `metadata.run_id` | 外部payloadで参照するrun id |
 | `metadata` | 診断情報、内部判断、trace id、idempotency情報 |
 
-`routing_decision`、`selected_handler`、`policy_decision`、`trace_id`、`idempotency_key`、内部scoreはトップレベルに置かず `metadata` 配下に保持する。
+内部service返却型は `AgentRun` を持ってよいが、外部payloadでは `run` objectをトップレベルに置かず `metadata.run_id` / `metadata.trace_id` だけを出す。`routing_decision`、`selected_handler`、`policy_decision`、`trace_id`、`idempotency_key`、内部scoreはトップレベルに置かず `metadata` 配下に保持する。
 
 ### 9.2 通知
 `kumc-agent.md` では「特定チャンネルにメッセージを送る」がVERIFYの選択肢に含まれる。一方で自律エージェントの制約として外部投稿は承認フローを通す必要がある。
@@ -306,7 +339,7 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 | `trigger` | `schedule` / `manual` / `automation` |
 | `slot` | `08:00` などの起動slot |
 | `scopes` | `tasks`, `events`, `rag_delta`, `server_ops`, `automation` |
-| `dry_run` | 候補保存・通知要求を行わない |
+| `dry_run` | `None` はconfigに従う、`true` は強制dry-run、`false` は候補保存許可 |
 | `access` | system actorの `AccessContext` |
 | `budget` | `AgentBudget` |
 | `idempotency_key` | 指定がなければserviceが生成 |
@@ -351,6 +384,7 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 - `read_only=false` のtoolを呼ぶ場合、出力は候補作成または承認申請に限定する。
 - secret、招待URL、token、内部IP、個人連絡先、学籍番号などは出力前にマスクする。
 - 大きなRAG contextや本文断片は外部payloadにもtraceにも保存しない。
+- TOOL resultには `metadata.side_effects: none | candidate_or_approval_only | master_write | external_post | server_execute`、`master_write_count`、`external_delivery_count`、`server_execute_count` を必須化する。`master_write`、`external_post`、`server_execute` または各countの正値を検出した場合、VERIFYは `conflicts` に記録して自動実行結果を採用しない。
 
 ## 12. 設定
 自律エージェントのパラメータは `configs/main/autonomous_agent.yaml` に保存する。
@@ -370,6 +404,13 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 | `lookahead_days.tasks` | タスク確認対象日数 |
 | `lookahead_days.events` | イベント確認対象日数 |
 | `duplicate_suppression_hours` | 同一対象への通知抑制時間 |
+| `rag_delta_lookback_hours` | RAG差分として扱うingestion chunkの更新時間幅 |
+| `access.system_user_id` | 自律エージェントのsystem actor user id |
+| `access.guild_id` | 統合入力受付へ渡す既定guild |
+| `access.role_ids` | system actorに付与するrole |
+| `access.is_admin` | system actorをadmin扱いにするか。既定はfalse |
+| `planner` | 専用LLM Plannerのprovider/model/prompt/retry設定 |
+| `verifier` | 専用LLM Verifierのprovider/model/prompt/retry設定 |
 | `budget` | `AgentBudget` 相当の上限 |
 
 ## 13. 監査・trace
@@ -410,6 +451,10 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 - 承認前に正本更新や外部投稿を行わないか
 - 権限外情報やsecretを出力しないか
 - idempotencyにより二重実行を防げるか
+- schedule slotからAutomationRuleが生成されるか
+- 専用LLM Planner / Verifierのschema validation、決定的guard、fallbackが動くか
+- worker/CLI payloadの診断情報がmetadata配下に収まるか
+- forbidden side effect、citation不足、notification duplicate suppressionを検出できるか
 
 評価基盤では `target="agentic"` または専用 `target="autonomous_agent"` を使い、tool単位の成否、安全性、承認境界を記録する。
 

@@ -15,7 +15,9 @@ from kumc_agent.config.env_map import ENV_BINDINGS
 from kumc_agent.config.merge import MergeError, deep_merge
 from kumc_agent.config.schema import (
     AppSection,
+    AutonomousAgentAccessSection,
     AutonomousAgentBudgetSection,
+    AutonomousAgentLLMSection,
     AutonomousAgentLookaheadSection,
     AutonomousAgentSection,
     ComprehensiveAgentBudgetSection,
@@ -378,6 +380,7 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     autonomous_agent.setdefault("notification_channel_id", "")
     autonomous_agent.setdefault("dry_run", True)
     autonomous_agent.setdefault("duplicate_suppression_hours", 24)
+    autonomous_agent.setdefault("rag_delta_lookback_hours", 24)
     lookahead = autonomous_agent.get("lookahead_days")
     if not isinstance(lookahead, dict):
         lookahead = {}
@@ -393,6 +396,34 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     budget.setdefault("max_replans", 1)
     budget.setdefault("max_cost_usd", 0.50)
     budget.setdefault("max_latency_seconds", 120.0)
+    providers_config = updated.get("providers") if isinstance(updated.get("providers"), dict) else {}
+    provider_llm = providers_config.get("llm") if isinstance(providers_config.get("llm"), dict) else {}
+    default_llm_provider = str(autonomous_agent.get("llm_provider") or provider_llm.get("provider") or "gemini")
+    default_gemini_model = str(provider_llm.get("gemini_model") or "")
+    for key, prompt_name in (
+        ("planner", "autonomous_agent_planner"),
+        ("verifier", "autonomous_agent_verifier"),
+    ):
+        llm_section = autonomous_agent.get(key)
+        if not isinstance(llm_section, dict):
+            llm_section = {}
+            autonomous_agent[key] = llm_section
+        llm_section.setdefault("enabled", True)
+        llm_section.setdefault("provider", default_llm_provider)
+        llm_section.setdefault("gemini_model", default_gemini_model)
+        llm_section.setdefault("openai_model", "gpt-5.2")
+        llm_section.setdefault("prompt_name", prompt_name)
+        llm_section.setdefault("temperature", 0.0)
+        llm_section.setdefault("max_output_tokens", 2048)
+        llm_section.setdefault("max_retries", 2)
+    access = autonomous_agent.get("access")
+    if not isinstance(access, dict):
+        access = {}
+        autonomous_agent["access"] = access
+    access.setdefault("system_user_id", "system")
+    access.setdefault("guild_id", "")
+    access.setdefault("role_ids", [])
+    access.setdefault("is_admin", False)
 
     comprehensive_agent = updated.get("comprehensive_agent")
     if not isinstance(comprehensive_agent, dict):
@@ -619,6 +650,20 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     backup.setdefault("backup_dir", "data/minecraft/backups")
     backup.setdefault("max_backups", 10)
     return updated
+
+
+def _autonomous_llm_section(value: object, default_prompt: str) -> AutonomousAgentLLMSection:
+    payload = value if isinstance(value, dict) else {}
+    return AutonomousAgentLLMSection(
+        enabled=bool(payload.get("enabled", True)),
+        provider=str(payload.get("provider", "gemini")),
+        gemini_model=str(payload.get("gemini_model", "")),
+        openai_model=str(payload.get("openai_model", "gpt-5.2")),
+        prompt_name=str(payload.get("prompt_name", default_prompt)),
+        temperature=float(payload.get("temperature", 0.0)),
+        max_output_tokens=int(payload.get("max_output_tokens", 2048)),
+        max_retries=int(payload.get("max_retries", 2)),
+    )
 
 
 def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
@@ -966,6 +1011,18 @@ def _to_runtime_config(
                     (autonomous_agent.get("budget") or {}).get("max_latency_seconds", 120.0)
                 ),
             ),
+            planner=_autonomous_llm_section(autonomous_agent.get("planner"), "autonomous_agent_planner"),
+            verifier=_autonomous_llm_section(autonomous_agent.get("verifier"), "autonomous_agent_verifier"),
+            access=AutonomousAgentAccessSection(
+                system_user_id=str((autonomous_agent.get("access") or {}).get("system_user_id", "system")),
+                guild_id=str((autonomous_agent.get("access") or {}).get("guild_id", "")),
+                role_ids=[
+                    str(value)
+                    for value in (autonomous_agent.get("access") or {}).get("role_ids", [])
+                ],
+                is_admin=bool((autonomous_agent.get("access") or {}).get("is_admin", False)),
+            ),
+            rag_delta_lookback_hours=int(autonomous_agent.get("rag_delta_lookback_hours", 24)),
         ),
         comprehensive_agent=ComprehensiveAgentSection(
             enabled=bool(comprehensive_agent.get("enabled", True)),

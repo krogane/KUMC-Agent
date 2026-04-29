@@ -12,6 +12,7 @@
 - 手動dry-runとworker/scheduler経由のrunで同じ `AutonomousAgentService` を呼べる。
 - `idempotency_key` により同一日・同一slot・同一scopeの二重実行を防げる。
 - PLANでタスク、イベント、RAG差分、サーバー運用、オートメーションの確認項目を決定できる。
+- PLAN/VERIFYで、それぞれ独自のGemini/OpenAIモデルを使う専用LLMを設定でき、決定的guardとfallbackを通せる。
 - TOOLで統合入力受付へクエリを送り、通常の権限・安全性ルールで処理できる。
 - 統合入力受付が未完成の範囲では、限定adapterで既存Workflow/Automation/Retrieval serviceを安全に呼べる。
 - VERIFYで「再検索」「何もしない」「通知候補」「許可申請」「タスク/イベント/オートメーション候補」を選べる。
@@ -19,9 +20,11 @@
 - 承認前に外部投稿、サーバー操作、タスク/イベント正本更新が行われない。
 - `AgentRun` / `AgentStep` に PLAN / TOOL / VERIFY traceが保存される。
 - `AutomationRun` または専用run記録で定期起動履歴と `idempotency_key` を確認できる。
+- run開始時に `idempotency_key` を予約し、同時起動・途中クラッシュ時も重複runを抑制できる。
 - `AuditEvent` に判断理由、参照対象、候補ID、通知候補IDが保存される。
 - CLI/worker payloadの診断情報が `metadata` 配下に入る。
 - 大きなcontext、secret、権限外情報を外部payloadやtraceに出さない。
+- `dry_run=None|true|false` の三値、system actor権限設定、構造化副作用契約、budgetのsearch/replan/latency記録を検証できる。
 - 主要動作を既存のunittest方式で検証できる。
 
 ## 3. 実装ステップ
@@ -193,9 +196,9 @@
 ### Phase 12: worker/scheduler連携
 1. `apps/worker/app.py` に `job_type="autonomous_agent_run"` を追加する。
 2. payloadからtrigger、slot、scopes、dry_runを受け取る。
-3. `configs/main/autonomous_agent.yaml` の `schedule_times` をscheduler候補にできるようにする。
-4. 既存schedulerがcron生成を持たない場合は、初期実装では手動worker起動とCLI dry-runを優先する。
-5. `AutomationRule` と連携する場合は、action_type `autonomous_agent_run` を追加し、modeは初期 `approval_required` または `dry_run` にする。
+3. `configs/main/autonomous_agent.yaml` の `schedule_times` から、自動インデックス更新と同じ形式の `AutomationRule(trigger=schedule_cron)` を生成する。
+4. `action_type="autonomous_agent_run"` をauto-run allowlistに追加し、worker jobへ接続する。
+5. `enabled=false` の場合はAutomation ruleをdisabledにし、schedule/automation triggerの直接runは `blocked` として記録する。
 
 検証:
 - workerから自律エージェントrunを実行できること。
@@ -249,7 +252,11 @@
 7. VERIFYが副作用済みpayloadを拒否することをテストする。
 8. dry-runで候補保存や通知送信が行われないことをテストする。
 9. payload metadata方針をテストする。
-10. architecture testにlegacy非依存を追加する必要があれば更新する。
+10. schedule slotからAutomationRuleが生成されることをテストする。
+11. RAG差分collectorがingestion active chunksからcitation付きsnapshotを作ることをテストする。
+12. 専用LLM Planner / Verifierのschema validation、決定的guard、fallbackをテストする。
+13. `dry_run=None` がconfig値に従うことをテストする。
+14. architecture testにlegacy非依存を追加する必要があれば更新する。
 
 検証:
 - `python -m unittest tests/unit/test_autonomous_agent.py`
