@@ -28,7 +28,7 @@
 
 | 項目 | 現行実装 | 本設計で必要な状態 |
 | --- | --- | --- |
-| 候補抽出 | `task_extract` がルールベースで `TaskCandidate` を作成する | RAGデータ差分・自動登録の抽出は専用LLMが行い、重複検出も行う |
+| 候補抽出 | `TaskExtractionService` が専用promptで `workflow_extraction.v1` を抽出し、`TaskCandidate` / `TaskChangeCandidate` を作成する | RAGデータ差分・自動登録の抽出は専用LLMが行い、重複検出と既存Task変更候補化も行う |
 | 手動登録 | `task_add` が `TaskCandidate` を作成する | 必要情報を抽出できない場合はユーザーへ質問し、正本登録前に承認を必須にする |
 | 正本登録 | `/approval approve` で `TaskCandidate` を `Task` に昇格する | Discord Componentを含む承認UIから昇格できる |
 | 候補修正 | `/approval edit` で候補のtitle、担当、期限、説明を修正できる | 自然言語修正をComponentから受け付け、差分を明示する |
@@ -163,10 +163,10 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 議事録下書き
 - 統合入力受付または自律エージェントの出力
 
-現行実装では `task_extract` と `meeting_minutes_draft` が候補抽出を行う。`task_extract` は `instruction`、`target`、RAG検索結果を結合し、タスク候補を作成する。
+現行実装では `task_extract` と `meeting_minutes_draft` が候補抽出を行う。`task_extract` は `instruction`、`target`、RAG検索結果を結合し、`workflow_extraction.v1` 形式の `new_items` から `TaskCandidate`、`change_items` から `TaskChangeCandidate` を作成する。
 
 ### 7.2 抽出
-タスク自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、タスクらしい記述を `TaskCandidate` として抽出する。
+タスク自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、タスクらしい記述を `TaskCandidate`、既存Taskの変更・削除を `TaskChangeCandidate` として抽出する。
 
 抽出時に最低限行う処理は次の通り。
 
@@ -177,14 +177,17 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 優先度の推定
 - 根拠 `Citation` の付与
 - 既存候補・既存Taskとの重複検出
+- 既存Taskに対する変更・削除情報の検出
 - confidence算出
 
-現行実装は、キーワード、`担当:`、`期限:`、日付表記を使うルールベース抽出である。実装時は自動登録経路を専用LLM抽出へ置き換える。専用LLMが利用できない、schema検証に失敗する、または根拠不足の場合は、自動登録候補を作成せず、`metadata.degraded=true` と理由を記録して承認依頼には載せない。
+専用LLMが利用できない、schema検証に失敗する、または根拠不足の場合は、自動登録候補を作成せず、`metadata.extraction.degraded=true` と理由を記録して承認依頼には載せない。
 
 ### 7.3 候補保存
 抽出した候補は `TaskCandidate(status="proposed", created_by="agent")` として保存する。承認されるまで `tasks` には登録しない。
 
 重複が疑われる場合は候補を捨てず、`metadata.duplicate_candidates` に類似候補ID、類似Task ID、理由、スコアを保存する。承認UIでは重複警告を表示する。
+
+変更・削除が疑われる場合は、新規登録候補ではなく `TaskChangeCandidate(status="proposed")` として保存する。既存Task一覧から対象を一意に特定できない場合は候補化せず、`metadata.extraction.ignored_items` に理由を残す。
 
 ### 7.4 まとめ承認
 自動抽出された候補は、正本に登録する前に、設定された `n` 日ごとにDiscord上でまとめて承認を求める。
@@ -498,7 +501,9 @@ task:{target_id}:{action}:{batch_id}:{nonce}
 通知種別は `due_soon`、`overdue`、`unassigned`、`blocked_check` とし、完了確認Componentは `task_done` を実行する。送信失敗時もdelivery errorを保存し、同じkindの二重送信を防ぐ。
 
 ### 18.9 自然言語抽出の責務
-自動抽出は専用LLMを必須経路とし、LLM利用不可・schema不正・根拠不足ではcandidateを作らず `metadata.degraded=true` を返す。
+自動抽出は専用LLMを必須経路とし、LLM利用不可・schema不正・根拠不足ではcandidateを作らず `metadata.extraction.degraded=true` を返す。
+
+タスク抽出とイベント抽出のLLM出力schemaは `workflow_extraction.v1` に統一する。タスク抽出では `new_items[]` の `item_type="task"` を `TaskCandidate`、`change_items[]` の `item_type="task"` を `TaskChangeCandidate` として扱う。`ignored_items[]` は候補化しなかった理由だけを短く保存し、本文断片やsecretを含めない。
 
 手動登録、変更・削除、一覧filterはLLM primary、決定的parser fallbackで扱ってよい。ただし、fallback利用時も承認前正本化禁止、secret mask、承認履歴保存を満たす。
 

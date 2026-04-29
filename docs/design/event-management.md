@@ -29,8 +29,8 @@
 
 | 項目 | 実装状態 |
 | --- | --- |
-| 候補抽出 | `EventExtractionService` が専用promptで `new_events` と `event_changes` を抽出する。LLM未設定、schema不正、根拠不足では候補を保存せず `metadata.degraded` を返す。 |
-| RAG差分連携 | `auto_index_update` がingestion差分のactive chunkを `event_extract_from_delta` へ渡し、EventCandidate / EventChangeCandidateを作成する。 |
+| 候補抽出 | `EventExtractionService` が専用promptで `workflow_extraction.v1` を抽出する。LLM未設定、schema不正、根拠不足では候補を保存せず `metadata.extraction.degraded` を返す。 |
+| RAG差分連携 | `auto_index_update` がingestion差分のactive chunkを `event_extract_from_delta` へ渡し、`metadata.workflow_extraction.event` にEventCandidate / EventChangeCandidate件数を保存する。 |
 | 手動登録 | `event_add` も専用LLM抽出を使い、必須情報を抽出できない場合は候補を保存せず確認応答を返す。 |
 | 手動変更・削除 | `event_update` / `event_delete` は既存Event一覧を入力に含めてLLM抽出し、一意に変更候補を作れない場合は保存しない。 |
 | 対象解決 | `_resolve_event()` は先頭Eventへのfallbackを行わず、ID・titleから一意に決まる場合だけEventを返す。 |
@@ -204,10 +204,10 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 議事録下書き
 - 統合入力受付または自律エージェントの出力
 
-`auto_index_update` のingestion差分処理から `WorkflowService.event_extract_from_delta()` を呼び、変更されたactive chunkと `Citation` を専用LLMへ渡す。
+`auto_index_update` のingestion差分処理から `WorkflowService.event_extract_from_delta()` を呼び、変更されたactive chunkと `Citation` を専用LLMへ渡す。差分抽出metadataはタスク抽出と同じ `metadata.workflow_extraction.event` 形式に保存し、互換用に `metadata.event_extraction` も保持する。
 
 ### 7.2 抽出
-イベント自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、イベントらしい記述を `EventCandidate` として抽出する。
+イベント自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、`workflow_extraction.v1` 形式の `new_items` から `EventCandidate`、`change_items` から `EventChangeCandidate` を抽出する。
 
 抽出時に最低限行う処理は次の通り。
 
@@ -221,14 +221,14 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 既存Eventに対する変更・削除情報の検出
 - confidence算出
 
-専用LLMが利用できない、schema検証に失敗する、または根拠不足の場合は、自動登録候補を作成せず、`metadata.degraded=true` と理由を記録して承認依頼には載せない。
+専用LLMが利用できない、schema検証に失敗する、または根拠不足の場合は、自動登録候補を作成せず、`metadata.extraction.degraded=true` と理由を記録して承認依頼には載せない。
 
 ### 7.3 候補保存
 抽出した候補は `EventCandidate(status="proposed", created_by="agent")` として保存する。承認されるまで `events` には登録しない。
 
 重複が疑われる場合は候補を捨てず、`metadata.duplicate_candidates` に類似候補ID、類似Event ID、理由、スコアを保存する。承認UIでは重複警告を表示する。
 
-変更・削除が疑われる場合は、新規登録候補ではなく `EventChangeCandidate` または `WorkflowCandidate(candidate_type="event_change")` として保存する。
+変更・削除が疑われる場合は、新規登録候補ではなく `EventChangeCandidate(status="proposed")` として保存する。既存Event一覧から対象を一意に特定できない場合は候補化せず、`metadata.extraction.ignored_items` に理由を残す。
 
 ### 7.4 まとめ承認
 自動抽出された候補は、正本に登録する前に、設定された `n` 日ごとにDiscord上でまとめて承認を求める。
@@ -398,6 +398,8 @@ CLI、HTTP、Discord、workflow runでは、主結果と診断情報を分離す
 - `batch_id`
 - `notification_count`
 - `query_filters`
+
+抽出結果の診断情報はタスク抽出と同じ `workflow_extraction.v1` 契約に揃える。`metadata.extraction` には `schema_version`、`candidate_count`、`change_candidate_count`、`ignored_items`、`degraded`、`degraded_reason` を置き、CLIや外部連携のトップレベルへは昇格しない。
 
 大きな本文断片、検索context、secretを含む可能性がある値は、CLI出力や外部連携前に除外・マスクする。
 

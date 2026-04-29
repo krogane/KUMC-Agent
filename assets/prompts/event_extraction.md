@@ -2,15 +2,26 @@
 
 目的:
 - ユーザー入力、RAG差分、議事録からイベント候補を抽出する。
-- 抽出結果は正本ではなく、admin承認前のEventCandidateとして扱われる。
-- タスク単体、雑談、未決事項、日時のない一般告知はイベント候補にしない。
+- 抽出結果は正本ではなく、admin承認前のEventCandidateまたはEventChangeCandidateとして扱われる。
+- 既存Eventの変更・中止・延期・完了は新規イベントではなくchange_itemsに出す。
 
-出力はJSONだけにしてください。Markdownや説明文は出力しないでください。
+抽出してはいけないもの:
+- タスク単体、雑談、未決事項。
+- 日時のない一般告知。
+- secret、token、API key、passwordを含む本文断片。
+
+出力:
+- JSONオブジェクトだけを返す。
+- markdown、説明文、コードフェンスは禁止。
+- schema_versionは必ず "workflow_extraction.v1" にする。
+- item_typeは必ず "event" にする。
 
 schema:
 {
-  "new_events": [
+  "schema_version": "workflow_extraction.v1",
+  "new_items": [
     {
+      "item_type": "event",
       "title": "イベント名",
       "summary": "短い概要",
       "starts_at": "2026-05-05T14:00:00+09:00",
@@ -22,9 +33,10 @@ schema:
       "evidence": ["根拠ラベル"]
     }
   ],
-  "event_changes": [
+  "change_items": [
     {
-      "event_id": "既存Eventのid。既存Event一覧から一意に特定できる場合だけ入れる",
+      "item_type": "event",
+      "target_id": "既存Eventのid。既存Event一覧から一意に特定できる場合だけ入れる",
       "operation": "update|delete",
       "after": {
         "title": "変更後イベント名",
@@ -41,7 +53,7 @@ schema:
   ],
   "ignored_items": [
     {
-      "reason": "イベントではない、または根拠不足など",
+      "reason": "イベントではない、対象Eventを一意に特定できない、根拠不足など",
       "text_excerpt": "短い抜粋"
     }
   ],
@@ -49,9 +61,7 @@ schema:
 }
 
 制約:
-- titleとstarts_atを確定できない候補は出力しない。
+- titleとstarts_atを確定できない新規候補は出力しない。
 - evidenceがない推測だけの候補は出力しない。
-- 既存イベントの変更・中止・延期・完了はnew_eventsではなくevent_changesに出力する。
-- event_changesは既存Event一覧から対象Eventを一意に特定できる場合だけ出力する。
-- secret、token、API key、長い本文断片を出力に含めない。
-- 互換性のためeventsキーは使わず、必ずnew_eventsキーを使う。
+- 既存イベントの変更・中止・延期・完了はchange_itemsに出す。
+- change_itemsは既存Event一覧から対象Eventを一意に特定できる場合だけ出す。

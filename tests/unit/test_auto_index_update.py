@@ -169,6 +169,32 @@ class _EventDeltaExtractor:
         )
 
 
+class _TaskDeltaExtractor:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def task_extract_from_delta(self, *, text, evidence, access, metadata):
+        self.calls.append(
+            {
+                "text": text,
+                "evidence": evidence,
+                "access": access,
+                "metadata": metadata,
+            }
+        )
+        return SimpleNamespace(
+            metadata={
+                "extraction": {
+                    "schema_version": "workflow_extraction.v1",
+                    "candidate_count": 1,
+                    "change_candidate_count": 1,
+                }
+            },
+            task_candidates=(object(),),
+            task_change_candidates=(object(),),
+        )
+
+
 class _EventDeltaChunkSource:
     def __init__(self, chunks: list[Chunk]) -> None:
         self.chunks = chunks
@@ -338,6 +364,62 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertEqual(extractor.calls[0]["access"].user_id, "auto_index_update")
             self.assertEqual(chunk_source.source_kinds[0], ("discord",))
             self.assertEqual(operations.runs[-1].metadata["event_extraction"]["candidate_count"], 1)
+            self.assertEqual(
+                operations.runs[-1].metadata["workflow_extraction"]["event"]["candidate_count"],
+                1,
+            )
+
+    def test_auto_update_uses_unified_task_and_event_delta_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.task_management = SimpleNamespace(auto_extract_after_index_update=True)
+            operations = _Operations()
+            task_extractor = _TaskDeltaExtractor()
+            event_extractor = _EventDeltaExtractor()
+            chunk_source = _EventDeltaChunkSource(
+                [
+                    Chunk(
+                        id="chunk-1",
+                        document_id="doc-1",
+                        text="5月5日に新歓会を部室で開催します。新歓資料を作成します。",
+                        index=0,
+                        metadata={"source_item_id": "source-1", "source_kind": "discord"},
+                    )
+                ]
+            )
+
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=_Build(),
+                operations=operations,
+                ingestion_service=_Ingestion(
+                    IngestionResult(
+                        source_kind="discord",
+                        seen=1,
+                        changed=1,
+                        skipped=0,
+                        deleted=0,
+                        documents=1,
+                        chunks=1,
+                        secret_findings=0,
+                    )
+                ),
+                task_delta_extractor=task_extractor,
+                event_delta_extractor=event_extractor,
+                event_delta_chunk_source=chunk_source,
+            ).execute(AutoIndexUpdateRequest(trigger="manual"))
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(len(task_extractor.calls), 1)
+            self.assertEqual(len(event_extractor.calls), 1)
+            extraction = operations.runs[-1].metadata["workflow_extraction"]
+            self.assertEqual(extraction["task"]["candidate_count"], 1)
+            self.assertEqual(extraction["task"]["change_candidate_count"], 1)
+            self.assertEqual(
+                extraction["task"]["metadata"]["schema_version"],
+                "workflow_extraction.v1",
+            )
+            self.assertEqual(extraction["event"]["candidate_count"], 1)
 
     def test_auto_update_refreshes_member_profiles_as_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

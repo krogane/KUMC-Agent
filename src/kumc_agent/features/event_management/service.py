@@ -13,11 +13,15 @@ from kumc_agent.domain.ports.llms import LLMPort
 from kumc_agent.utils.hashing import stable_hash
 
 
+SCHEMA_VERSION = "workflow_extraction.v1"
+
+
 @dataclass(frozen=True)
 class EventExtractionResult:
     candidates: tuple[EventCandidate, ...]
     metadata: dict[str, Any]
     change_candidates: tuple[EventChangeCandidate, ...] = tuple()
+    ignored_items: tuple[dict[str, Any], ...] = tuple()
 
 
 class EventExtractionService:
@@ -46,6 +50,7 @@ class EventExtractionService:
         source_text = _safe_context(text)
         base_metadata = {
             **metadata,
+            "schema_version": SCHEMA_VERSION,
             "extractor": "event_llm",
             "extractor_model": self._model_name,
             "prompt_version": self._prompt_name,
@@ -87,11 +92,22 @@ class EventExtractionService:
                 max_output_tokens=2048,
             )
             payload = _extract_json_object(raw)
-            items = payload.get("new_events")
-            if items is None:
-                items = payload.get("events")
-            if not isinstance(items, list):
-                raise ValueError("new_events must be a list")
+            ignored_items = _ignored_items(payload)
+            if bool(payload.get("degraded")):
+                return EventExtractionResult(
+                    candidates=tuple(),
+                    change_candidates=tuple(),
+                    ignored_items=ignored_items,
+                    metadata={
+                        **base_metadata,
+                        "degraded": True,
+                        "degraded_reason": str(payload.get("degraded_reason") or "llm_degraded"),
+                        "candidate_count": 0,
+                        "change_candidate_count": 0,
+                        "ignored_items": list(ignored_items),
+                    },
+                )
+            items = _new_items(payload, legacy_keys=("new_events", "events"), item_type="event")
             candidates = tuple(
                 candidate
                 for candidate in (
@@ -107,11 +123,11 @@ class EventExtractionService:
                 )
                 if candidate is not None
             )
-            raw_changes = payload.get("event_changes")
-            if raw_changes is None:
-                raw_changes = []
-            if not isinstance(raw_changes, list):
-                raise ValueError("event_changes must be a list")
+            raw_changes = _change_items(
+                payload,
+                legacy_keys=("event_changes",),
+                item_type="event",
+            )
             expected_operation = str(metadata.get("expected_operation") or "").strip()
             change_candidates = tuple(
                 candidate
@@ -130,15 +146,15 @@ class EventExtractionService:
                 )
                 if candidate is not None
             )
-            ignored_items = payload.get("ignored_items")
             return EventExtractionResult(
                 candidates=candidates,
                 change_candidates=change_candidates,
+                ignored_items=ignored_items,
                 metadata={
                     **base_metadata,
                     "candidate_count": len(candidates),
                     "change_candidate_count": len(change_candidates),
-                    "ignored_items": ignored_items if isinstance(ignored_items, list) else [],
+                    "ignored_items": list(ignored_items),
                 },
             )
         except Exception as exc:
@@ -455,8 +471,79 @@ def _event_payload_for_extraction(event: Event) -> dict[str, object]:
     }
 
 
+def _new_items(
+    payload: dict[str, Any],
+    *,
+    legacy_keys: tuple[str, ...],
+    item_type: str,
+) -> list[dict[str, Any]]:
+    raw_items = payload.get("new_items")
+    legacy = False
+    if raw_items is None:
+        for key in legacy_keys:
+            raw_items = payload.get(key)
+            if raw_items is not None:
+                legacy = True
+                break
+    if raw_items is None and ("change_items" in payload or "event_changes" in payload):
+        raw_items = []
+        legacy = False
+    if not isinstance(raw_items, list):
+        raise ValueError(f"{legacy_keys[0]} or new_items must be a list")
+    return [
+        item
+        for item in raw_items
+        if isinstance(item, dict)
+        and (legacy or str(item.get("item_type") or "").strip().lower() == item_type)
+    ]
+
+
+def _change_items(
+    payload: dict[str, Any],
+    *,
+    legacy_keys: tuple[str, ...],
+    item_type: str,
+) -> list[dict[str, Any]]:
+    raw_items = payload.get("change_items")
+    legacy = False
+    if raw_items is None:
+        raw_items = []
+        for key in legacy_keys:
+            raw_items = payload.get(key)
+            if raw_items is not None:
+                legacy = True
+                break
+    if not isinstance(raw_items, list):
+        raise ValueError(f"{legacy_keys[0]} or change_items must be a list")
+    return [
+        item
+        for item in raw_items
+        if isinstance(item, dict)
+        and (legacy or str(item.get("item_type") or "").strip().lower() == item_type)
+    ]
+
+
+def _ignored_items(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    raw_items = payload.get("ignored_items")
+    if not isinstance(raw_items, list):
+        return tuple()
+    ignored: list[dict[str, Any]] = []
+    for item in raw_items[:20]:
+        if not isinstance(item, dict):
+            continue
+        ignored.append(
+            {
+                "reason": _safe_context(str(item.get("reason") or ""), limit=160),
+                "text_excerpt": _safe_context(str(item.get("text_excerpt") or ""), limit=240),
+            }
+        )
+    return tuple(ignored)
+
+
 def _resolve_existing_event(payload: dict[str, Any], events: tuple[Event, ...]) -> Event | None:
-    event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
+    event_id = str(
+        payload.get("target_id") or payload.get("event_id") or payload.get("id") or ""
+    ).strip()
     if event_id:
         for event in events:
             if event.id == event_id:
@@ -610,11 +697,14 @@ _DEFAULT_PROMPT = """\
 あなたはKUMCのイベント管理用抽出器です。
 入力本文から、正本登録前にadmin承認へ回すべきイベント候補だけを抽出してください。
 タスク単体、雑談、未決事項、日時のない一般告知はイベントにしないでください。
+既存Eventの変更・中止・延期・完了は新規イベントではなくchange_itemsに出してください。
 
 JSONのみを返してください:
 {
-  "new_events": [
+  "schema_version": "workflow_extraction.v1",
+  "new_items": [
     {
+      "item_type": "event",
       "title": "イベント名",
       "summary": "短い概要",
       "starts_at": "2026-05-05T14:00:00+09:00",
@@ -626,9 +716,10 @@ JSONのみを返してください:
       "evidence": ["根拠ラベル"]
     }
   ],
-  "event_changes": [
+  "change_items": [
     {
-      "event_id": "既存Event id",
+      "item_type": "event",
+      "target_id": "既存Event id",
       "operation": "update|delete",
       "after": {
         "starts_at": "2026-05-05T15:00:00+09:00",

@@ -105,6 +105,10 @@ def _dispatch_job(
             runtime.config.task_management.auto_extract_after_index_update
             and result.status == "succeeded"
             and (result.changed or result.deleted or bool(payload.get("extract_tasks")))
+            and not (
+                isinstance(metadata.get("workflow_extraction"), dict)
+                and isinstance(metadata["workflow_extraction"].get("task"), dict)
+            )
         ):
             metadata["task_delta_extraction"] = _run_task_delta_extract(
                 base_dir=base_dir,

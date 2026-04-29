@@ -645,6 +645,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
                 repository=workflow_repository,
                 embedder=embedder,
             ),
+            task_delta_extractor=event_delta_workflow,
             event_delta_extractor=event_delta_workflow,
             event_delta_chunk_source=ingestion_repository,
         ),

@@ -91,8 +91,9 @@ CLI は `RuntimeContext` を通して usecase を呼びます。
 | `ingestion_service` | 外部 source から差分を取り込み、repository に保存する |
 | `member_profile_builder` | Discord member profile の検索 index を作る |
 | `task_event_indexer` | task / event 正本から検索 index を作る |
-| `event_delta_extractor` | 変更された source から event 候補を抽出する |
-| `event_delta_chunk_source` | event 差分抽出に使う active chunks を読む |
+| `task_delta_extractor` | 変更された source から task 候補・変更候補を抽出する |
+| `event_delta_extractor` | 変更された source から event 候補・変更候補を抽出する |
+| `event_delta_chunk_source` | task/event 差分抽出に使う active chunks を読む |
 
 初学者向けに言うと、CLI 自体は重い処理を持っていません。CLI は入力を request に変換し、実処理は `AutoIndexUpdateUsecase` とその下のサービス群に任せています。
 
@@ -388,21 +389,21 @@ rollback が成功した場合、run は `status="rolled_back"` になります�
 
 結果は `metadata.rollback` に保存されます。
 
-## event 差分抽出
+## workflow 差分抽出
 
-publish に成功した後、必要なら `_run_event_delta_extraction()` が呼ばれます。
+publish に成功した後、必要なら `_run_workflow_delta_extraction()` が呼ばれます。
 
-これは「更新された source の active chunks から、イベントの新規登録・変更・削除候補を抽出する」ための後続処理です。
+これは「更新された source の active chunks から、タスク/イベントの新規登録・変更・削除候補を抽出する」ための後続処理です。
 
 実行条件は主に次です。
 
-- `event_management.auto_extract_after_index_update=True`
+- `task_management.auto_extract_after_index_update=True` または `event_management.auto_extract_after_index_update=True`
 - 成功した ingestion result の中に `changed` または `deleted` がある
-- `event_delta_extractor` と `event_delta_chunk_source` が設定されている
+- 対応する delta extractor と `event_delta_chunk_source` が設定されている
 
-抽出に成功した場合は `metadata.event_extraction.status="succeeded"` になります。
+抽出に成功した場合は `metadata.workflow_extraction.task.status="succeeded"` または `metadata.workflow_extraction.event.status="succeeded"` になります。互換用に `metadata.task_delta_extraction` と `metadata.event_extraction` も同じ要約を保持します。
 
-抽出に失敗しても、index publish 自体はすでに成功しているため、run 全体は失敗にしません。代わりに `metadata.event_extraction.status="failed"` と `degraded=True` を残します。
+抽出に失敗しても、index publish 自体はすでに成功しているため、run 全体は失敗にしません。代わりに対応する抽出metadataへ `status="failed"` と `degraded=True` を残します。
 
 ## 実行結果の保存
 

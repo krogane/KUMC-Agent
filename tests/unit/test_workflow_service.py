@@ -30,22 +30,55 @@ class FakeTaskLLM:
         temperature: float,
         max_output_tokens: int,
     ) -> str:
-        return """
-        {
-          "tasks": [
+        payload = json.loads(user_prompt)
+        text = str(payload.get("text") or "")
+        existing_tasks = list(payload.get("existing_tasks") or [])
+        target = existing_tasks[0] if existing_tasks else {}
+        if target and ("完了" in text or "done" in text.lower()):
+            after = dict(target)
+            after["status"] = "done"
+            return json.dumps(
+                {
+                    "schema_version": "workflow_extraction.v1",
+                    "new_items": [],
+                    "change_items": [
+                        {
+                            "item_type": "task",
+                            "target_id": target["id"],
+                            "operation": "update",
+                            "after": after,
+                            "reason": text,
+                            "confidence": "high",
+                            "evidence": ["input"],
+                        }
+                    ],
+                    "ignored_items": [],
+                    "degraded": False,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
             {
-              "title": "新歓資料を作成",
-              "description": "TODO: 新歓資料を作成 担当: alice 期限: 2026-05-01",
-              "assignee_user_id": "alice",
-              "due_at": "2026-05-01T00:00:00+00:00",
-              "related_event_id": null,
-              "priority": "high",
-              "confidence": "high",
-              "evidence": ["input"]
-            }
-          ]
-        }
-        """
+                "schema_version": "workflow_extraction.v1",
+                "new_items": [
+                    {
+                        "item_type": "task",
+                        "title": "新歓資料を作成",
+                        "description": "TODO: 新歓資料を作成 担当: alice 期限: 2026-05-01",
+                        "assignee_user_id": "alice",
+                        "due_at": "2026-05-01T00:00:00+00:00",
+                        "related_event_id": None,
+                        "priority": "high",
+                        "confidence": "high",
+                        "evidence": ["input"],
+                    }
+                ],
+                "change_items": [],
+                "ignored_items": [],
+                "degraded": False,
+            },
+            ensure_ascii=False,
+        )
 
 
 class FakeEventLLM:
@@ -67,10 +100,12 @@ class FakeEventLLM:
             after["place"] = "第2会議室" if "第2会議室" in text else target.get("place")
             return json.dumps(
                 {
-                    "new_events": [],
-                    "event_changes": [
+                    "schema_version": "workflow_extraction.v1",
+                    "new_items": [],
+                    "change_items": [
                         {
-                            "event_id": target["id"],
+                            "item_type": "event",
+                            "target_id": target["id"],
                             "operation": "update",
                             "after": after,
                             "reason": text,
@@ -86,10 +121,12 @@ class FakeEventLLM:
         if expected == "delete" and target:
             return json.dumps(
                 {
-                    "new_events": [],
-                    "event_changes": [
+                    "schema_version": "workflow_extraction.v1",
+                    "new_items": [],
+                    "change_items": [
                         {
-                            "event_id": target["id"],
+                            "item_type": "event",
+                            "target_id": target["id"],
                             "operation": "delete",
                             "reason": text,
                             "confidence": "high",
@@ -111,8 +148,10 @@ class FakeEventLLM:
             starts_at = f"{date_part}T{hour or '00'}:{minute or '00'}:00+00:00"
         return json.dumps(
             {
-                "new_events": [
+                "schema_version": "workflow_extraction.v1",
+                "new_items": [
                     {
+                        "item_type": "event",
                         "title": "新歓会",
                         "summary": "新入生歓迎イベント",
                         "starts_at": starts_at,
@@ -124,7 +163,7 @@ class FakeEventLLM:
                         "evidence": ["input"],
                     }
                 ],
-                "event_changes": [],
+                "change_items": [],
                 "ignored_items": [],
                 "degraded": False,
             },
@@ -206,6 +245,32 @@ class WorkflowServiceTests(unittest.TestCase):
                 service.repository.get_task_candidate(response.task_candidates[0].id).status,
                 "merged",
             )
+
+    def test_task_extract_creates_change_candidate_for_existing_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), llm=FakeTaskLLM())
+            task = service.repository.save_task(
+                Task(
+                    id="task-1",
+                    title="新歓資料を作成",
+                    assignee_user_id="alice",
+                    status="todo",
+                )
+            )
+
+            response = service.run(
+                WorkRequest(
+                    work_type="task_extract",
+                    instruction="新歓資料を作成は完了しました",
+                    access=AccessContext(user_id="admin", is_admin=True),
+                )
+            )
+
+            self.assertEqual(response.task_candidates, tuple())
+            self.assertEqual(len(response.task_change_candidates), 1)
+            self.assertEqual(response.task_change_candidates[0].task_id, task.id)
+            self.assertEqual(response.task_change_candidates[0].after["status"], "done")
+            self.assertEqual(response.metadata["extraction"]["schema_version"], "workflow_extraction.v1")
 
     def test_meeting_minutes_registers_task_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -529,6 +594,10 @@ class WorkflowServiceTests(unittest.TestCase):
                 )
             )
             self.assertEqual(len(extracted.event_candidates), 1)
+            self.assertEqual(
+                extracted.metadata["extraction"]["schema_version"],
+                "workflow_extraction.v1",
+            )
             self.assertEqual(service.repository.list_events(), [])
 
         with tempfile.TemporaryDirectory() as tmp:

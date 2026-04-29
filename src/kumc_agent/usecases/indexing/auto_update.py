@@ -46,6 +46,18 @@ class EventDeltaExtractionPort(Protocol):
         ...
 
 
+class TaskDeltaExtractionPort(Protocol):
+    def task_extract_from_delta(
+        self,
+        *,
+        text: str,
+        evidence: tuple[Citation, ...],
+        access: AccessContext,
+        metadata: dict[str, Any],
+    ) -> Any:
+        ...
+
+
 class EventDeltaChunkSourcePort(Protocol):
     def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
         ...
@@ -96,6 +108,7 @@ class AutoIndexUpdateUsecase:
         member_profile_builder: MemberProfileRebuildPort | None = None,
         member_profile_guild_ids: tuple[str, ...] = tuple(),
         task_event_indexer: TaskEventIndexPort | None = None,
+        task_delta_extractor: TaskDeltaExtractionPort | None = None,
         event_delta_extractor: EventDeltaExtractionPort | None = None,
         event_delta_chunk_source: EventDeltaChunkSourcePort | None = None,
     ) -> None:
@@ -108,6 +121,7 @@ class AutoIndexUpdateUsecase:
             str(value) for value in member_profile_guild_ids if str(value)
         )
         self._task_event_indexer = task_event_indexer
+        self._task_delta_extractor = task_delta_extractor
         self._event_delta_extractor = event_delta_extractor
         self._event_delta_chunk_source = event_delta_chunk_source
         self._publisher = IndexSnapshotPublisher(
@@ -398,7 +412,7 @@ class AutoIndexUpdateUsecase:
                 build_result=build_result,
                 metadata=metadata,
             )
-            self._run_event_delta_extraction(
+            self._run_workflow_delta_extraction(
                 run_id=run_id,
                 ingestion_results=ingestion_results,
                 metadata=metadata,
@@ -507,15 +521,18 @@ class AutoIndexUpdateUsecase:
                 "error": str(exc)[:500],
             }
 
-    def _run_event_delta_extraction(
+    def _run_workflow_delta_extraction(
         self,
         *,
         run_id: str,
         ingestion_results: tuple[IngestionResult, ...],
         metadata: dict[str, Any],
     ) -> None:
+        task_config = getattr(self._config, "task_management", None)
         event_config = getattr(self._config, "event_management", None)
-        if not getattr(event_config, "auto_extract_after_index_update", False):
+        task_enabled = bool(getattr(task_config, "auto_extract_after_index_update", False))
+        event_enabled = bool(getattr(event_config, "auto_extract_after_index_update", False))
+        if not task_enabled and not event_enabled:
             return
         changed_results = [
             result
@@ -524,11 +541,20 @@ class AutoIndexUpdateUsecase:
         ]
         if not changed_results:
             return
-        if self._event_delta_extractor is None or self._event_delta_chunk_source is None:
-            metadata["event_extraction"] = {
-                "status": "not_configured",
-                "source_kinds": [result.source_kind for result in changed_results],
-            }
+        workflow_metadata = metadata.setdefault("workflow_extraction", {})
+        if not isinstance(workflow_metadata, dict):
+            workflow_metadata = {}
+            metadata["workflow_extraction"] = workflow_metadata
+        if self._event_delta_chunk_source is None:
+            source_kinds = [result.source_kind for result in changed_results]
+            if task_enabled:
+                task_payload = {"status": "not_configured", "source_kinds": source_kinds}
+                workflow_metadata["task"] = task_payload
+                metadata["task_delta_extraction"] = task_payload
+            if event_enabled:
+                event_payload = {"status": "not_configured", "source_kinds": source_kinds}
+                workflow_metadata["event"] = event_payload
+                metadata["event_extraction"] = event_payload
             return
         source_kinds = tuple(
             dict.fromkeys(result.source_kind for result in changed_results if result.source_kind)
@@ -536,38 +562,109 @@ class AutoIndexUpdateUsecase:
         try:
             chunks = self._event_delta_chunk_source.load_active_chunks(source_kinds=source_kinds)
             selected_chunks = _event_delta_chunks(chunks)
-            text = _event_delta_text(
-                chunks=selected_chunks,
-                source_results=changed_results,
-            )
             evidence = tuple(_event_delta_citation(chunk) for chunk in selected_chunks[:12])
-            response = self._event_delta_extractor.event_extract_from_delta(
-                text=text,
-                evidence=evidence,
-                access=AccessContext(
-                    user_id="auto_index_update",
-                    role_ids=("admin",),
-                    is_admin=True,
-                ),
-                metadata={
-                    "source": "auto_index_update",
-                    "run_id": run_id,
-                    "source_kinds": list(source_kinds),
-                    "changed": sum(result.changed for result in changed_results),
-                    "deleted": sum(result.deleted for result in changed_results),
-                },
+            if task_enabled:
+                task_payload = self._run_single_delta_extraction(
+                    kind="task",
+                    run_id=run_id,
+                    source_kinds=source_kinds,
+                    selected_chunks=selected_chunks,
+                    changed_results=changed_results,
+                    evidence=evidence,
+                )
+                workflow_metadata["task"] = task_payload
+                metadata["task_delta_extraction"] = task_payload
+            if event_enabled:
+                event_payload = self._run_single_delta_extraction(
+                    kind="event",
+                    run_id=run_id,
+                    source_kinds=source_kinds,
+                    selected_chunks=selected_chunks,
+                    changed_results=changed_results,
+                    evidence=evidence,
+                )
+                workflow_metadata["event"] = event_payload
+                metadata["event_extraction"] = event_payload
+        except Exception as exc:
+            failure = {
+                "status": "failed",
+                "degraded": True,
+                "source_kinds": list(source_kinds),
+                "error": str(exc)[:500],
+            }
+            if task_enabled:
+                workflow_metadata["task"] = failure
+                metadata["task_delta_extraction"] = failure
+            if event_enabled:
+                workflow_metadata["event"] = failure
+                metadata["event_extraction"] = failure
+
+    def _run_single_delta_extraction(
+        self,
+        *,
+        kind: str,
+        run_id: str,
+        source_kinds: tuple[str, ...],
+        selected_chunks: list[Chunk],
+        changed_results: list[IngestionResult],
+        evidence: tuple[Citation, ...],
+    ) -> dict[str, Any]:
+        extractor = self._task_delta_extractor if kind == "task" else self._event_delta_extractor
+        if extractor is None:
+            return {
+                "status": "not_configured",
+                "source_kinds": list(source_kinds),
+            }
+        text = _delta_text(
+            kind=kind,
+            chunks=selected_chunks,
+            source_results=changed_results,
+        )
+        try:
+            access = AccessContext(
+                user_id="auto_index_update",
+                role_ids=("admin",),
+                is_admin=True,
             )
+            request_metadata = {
+                "source": "auto_index_update",
+                "run_id": run_id,
+                "source_kinds": list(source_kinds),
+                "changed": sum(result.changed for result in changed_results),
+                "deleted": sum(result.deleted for result in changed_results),
+            }
+            if kind == "task":
+                response = extractor.task_extract_from_delta(
+                    text=text,
+                    evidence=evidence,
+                    access=access,
+                    metadata=request_metadata,
+                )
+                candidate_count = len(getattr(response, "task_candidates", tuple()))
+                change_candidate_count = len(getattr(response, "task_change_candidates", tuple()))
+            else:
+                response = extractor.event_extract_from_delta(
+                    text=text,
+                    evidence=evidence,
+                    access=access,
+                    metadata=request_metadata,
+                )
+                candidate_count = len(getattr(response, "event_candidates", tuple()))
+                change_candidate_count = len(getattr(response, "event_change_candidates", tuple()))
             extraction_metadata = dict(getattr(response, "metadata", {}) or {})
-            metadata["event_extraction"] = {
+            extraction_detail = extraction_metadata.get("extraction", extraction_metadata)
+            if not isinstance(extraction_detail, dict):
+                extraction_detail = {}
+            return {
                 "status": "succeeded",
                 "source_kinds": list(source_kinds),
                 "chunks": len(selected_chunks),
-                "candidate_count": len(getattr(response, "event_candidates", tuple())),
-                "change_candidate_count": len(getattr(response, "event_change_candidates", tuple())),
-                "metadata": extraction_metadata.get("extraction", extraction_metadata),
+                "candidate_count": candidate_count,
+                "change_candidate_count": change_candidate_count,
+                "metadata": extraction_detail,
             }
         except Exception as exc:
-            metadata["event_extraction"] = {
+            return {
                 "status": "failed",
                 "degraded": True,
                 "source_kinds": list(source_kinds),
@@ -651,13 +748,30 @@ def _event_delta_chunks(chunks: list[Chunk]) -> list[Chunk]:
     return selected
 
 
-def _event_delta_text(
+def _delta_text(
     *,
+    kind: str,
     chunks: list[Chunk],
     source_results: list[IngestionResult],
 ) -> str:
+    if kind == "task":
+        instruction = (
+            "auto_index_update で変更または削除が検出されたソースから、"
+            "タスクの新規登録・変更・削除だけを抽出してください。"
+        )
+        empty_instruction = (
+            "アクティブchunkはありません。削除差分だけの場合は既存Taskとの対応が明確な場合のみ削除候補を返してください。"
+        )
+    else:
+        instruction = (
+            "auto_index_update で変更または削除が検出されたソースから、"
+            "イベントの新規登録・変更・削除だけを抽出してください。"
+        )
+        empty_instruction = (
+            "アクティブchunkはありません。削除差分だけの場合は既存Eventとの対応が明確な場合のみ削除候補を返してください。"
+        )
     lines = [
-        "auto_index_update で変更または削除が検出されたソースから、イベントの新規登録・変更・削除だけを抽出してください。",
+        instruction,
         "変更サマリ:",
         *[
             (
@@ -668,7 +782,7 @@ def _event_delta_text(
         ],
     ]
     if not chunks:
-        lines.append("アクティブchunkはありません。削除差分だけの場合は既存Eventとの対応が明確な場合のみ削除候補を返してください。")
+        lines.append(empty_instruction)
         return "\n".join(lines)
     for index, chunk in enumerate(chunks, start=1):
         metadata = dict(chunk.metadata or {})
@@ -684,6 +798,14 @@ def _event_delta_text(
             ]
         )
     return "\n".join(lines)
+
+
+def _event_delta_text(
+    *,
+    chunks: list[Chunk],
+    source_results: list[IngestionResult],
+) -> str:
+    return _delta_text(kind="event", chunks=chunks, source_results=source_results)
 
 
 def _event_delta_citation(chunk: Chunk) -> Citation:

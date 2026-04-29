@@ -297,7 +297,7 @@ class WorkflowService:
             fallback_query=request.target or request.instruction or "議事録 ToDo 決定事項",
         )
         combined = _join_text(source_text, retrieved["text"])
-        candidates, extraction_metadata = self._extract_and_store_candidates(
+        candidates, change_candidates, extraction_metadata = self._extract_and_store_candidates(
             combined,
             request.access,
             evidence=tuple(retrieved["citations"]),
@@ -324,9 +324,13 @@ class WorkflowService:
         )
         self._audit("workflow.meeting_minutes_draft", request.access, "succeeded", meeting.id)
         return WorkResponse(
-            text=f"議事録下書きを作成し、TaskCandidate を {len(candidates)} 件登録しました。",
+            text=(
+                f"議事録下書きを作成し、TaskCandidate を {len(candidates)} 件、"
+                f"Task変更候補を {len(change_candidates)} 件登録しました。"
+            ),
             detail_markdown=minutes,
             task_candidates=tuple(candidates),
+            task_change_candidates=tuple(change_candidates),
             meetings=(meeting,),
             metadata={
                 "decisions": len(decisions),
@@ -344,20 +348,30 @@ class WorkflowService:
             fallback_query=request.target or request.instruction or "タスク 担当 期限 ToDo",
         )
         combined = _join_text(source_text, retrieved["text"])
-        candidates, extraction_metadata = self._extract_and_store_candidates(
+        candidates, change_candidates, extraction_metadata = self._extract_and_store_candidates(
             combined,
             request.access,
             evidence=tuple(retrieved["citations"]),
             metadata={"source": "task_extract"},
         )
-        detail = self._format_task_candidates(candidates)
+        detail = "\n\n".join(
+            [
+                self._format_task_candidates(candidates),
+                self._format_task_change_candidates(change_candidates),
+            ]
+        )
         self._audit("workflow.task_extract", request.access, "succeeded", "task_candidates")
         return WorkResponse(
-            text=f"TaskCandidate を {len(candidates)} 件登録しました。承認されるまで Task 正本には入りません。",
+            text=(
+                f"TaskCandidate を {len(candidates)} 件、Task変更候補を {len(change_candidates)} 件登録しました。"
+                "承認されるまで Task 正本には入りません。"
+            ),
             detail_markdown=detail,
             task_candidates=tuple(candidates),
+            task_change_candidates=tuple(change_candidates),
             metadata={
                 "candidate_count": len(candidates),
+                "change_candidate_count": len(change_candidates),
                 "extraction": extraction_metadata,
             },
         )
@@ -974,6 +988,45 @@ class WorkflowService:
                     **result.metadata,
                     "candidate_count": len(stored),
                     "change_candidate_count": len(stored_changes),
+                }
+            },
+        )
+
+    def task_extract_from_delta(
+        self,
+        *,
+        text: str,
+        evidence: tuple[Citation, ...],
+        access: AccessContext,
+        metadata: dict[str, Any],
+    ) -> WorkResponse:
+        if not self.task_access_policy.can_create_candidate(access):
+            return self._task_forbidden_response("workflow.task_extract_delta", access)
+        candidates, change_candidates, extraction_metadata = self._extract_and_store_candidates(
+            text,
+            access,
+            evidence=evidence,
+            metadata={**metadata, "source": metadata.get("source") or "auto_index_update"},
+        )
+        self._audit("workflow.task_extract_delta", access, "succeeded", "task_candidates")
+        return WorkResponse(
+            text=(
+                f"TaskCandidate を {len(candidates)} 件、Task変更候補を {len(change_candidates)} 件登録しました。"
+                "承認されるまで Task 正本には入りません。"
+            ),
+            detail_markdown="\n\n".join(
+                [
+                    self._format_task_candidates(candidates),
+                    self._format_task_change_candidates(change_candidates),
+                ]
+            ),
+            task_candidates=tuple(candidates),
+            task_change_candidates=tuple(change_candidates),
+            metadata={
+                "extraction": {
+                    **extraction_metadata,
+                    "candidate_count": len(candidates),
+                    "change_candidate_count": len(change_candidates),
                 }
             },
         )
@@ -2931,17 +2984,22 @@ class WorkflowService:
         *,
         evidence: tuple[Citation, ...],
         metadata: dict[str, Any],
-    ) -> tuple[list[TaskCandidate], dict[str, Any]]:
+    ) -> tuple[list[TaskCandidate], list[TaskChangeCandidate], dict[str, Any]]:
         result = self.task_extractor.extract(
             text=text,
             evidence=evidence,
             access=access,
             metadata=metadata,
+            existing_tasks=tuple(self.repository.list_tasks(include_deleted=True)),
         )
         stored: list[TaskCandidate] = []
-        for candidate in result.candidates:
-            stored.append(self.repository.save_task_candidate(self._annotate_task_duplicate(candidate)))
-        return stored, result.metadata
+        stored_changes: list[TaskChangeCandidate] = []
+        if not result.metadata.get("degraded"):
+            for candidate in result.candidates:
+                stored.append(self.repository.save_task_candidate(self._annotate_task_duplicate(candidate)))
+            for candidate in result.change_candidates:
+                stored_changes.append(self.repository.save_task_change_candidate(candidate))
+        return stored, stored_changes, result.metadata
 
     def _extract_task_candidates(
         self,
