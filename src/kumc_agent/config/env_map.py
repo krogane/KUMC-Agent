@@ -482,7 +482,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "indexing.stages.summary_enabled",
         _to_bool,
     ),
-    EnvBinding("KUMC_CLEAR_RAW_DATA", "indexing.refresh.clear_raw_data", _to_bool),
+    EnvBinding(
+        "KUMC_CLEAR_INGESTION_SOURCE_DATA",
+        "indexing.refresh.clear_ingestion_source_data",
+        _to_bool,
+    ),
     EnvBinding(
         "KUMC_CLEAR_FIRST_RECURSIVE_CHUNK_DATA",
         "indexing.refresh.clear_first_recursive_chunk_data",
@@ -498,7 +502,11 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
         "indexing.refresh.clear_summary_chunk_data",
         _to_bool,
     ),
-    EnvBinding("KUMC_UPDATE_RAW_DATA", "indexing.refresh.update_raw_data", _to_bool),
+    EnvBinding(
+        "KUMC_UPDATE_INGESTION_SOURCE_DATA",
+        "indexing.refresh.update_ingestion_source_data",
+        _to_bool,
+    ),
     EnvBinding(
         "KUMC_UPDATE_FIRST_RECURSIVE_CHUNK_DATA",
         "indexing.refresh.update_first_recursive_chunk_data",

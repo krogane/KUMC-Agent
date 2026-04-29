@@ -508,7 +508,7 @@ def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) 
 
 def recursive_chunk_dir(
     *,
-    raw_data_dir: Path,
+    ingestion_data_dir: Path,
     chunk_dir: Path,
     chunk_size: int,
     chunk_overlap: int,
@@ -522,19 +522,21 @@ def recursive_chunk_dir(
 ) -> None:
     ensure_dir(chunk_dir)
 
-    if not raw_data_dir.exists():
-        raise FileNotFoundError(f"Raw data directory does not exist: {raw_data_dir}")
+    if not ingestion_data_dir.exists():
+        raise FileNotFoundError(
+            f"Ingestion source directory does not exist: {ingestion_data_dir}"
+        )
 
     input_files: list[Path] = []
     for ext in file_extensions:
-        input_files.extend(raw_data_dir.rglob(f"*{ext}"))
+        input_files.extend(ingestion_data_dir.rglob(f"*{ext}"))
     input_files = sorted(set(input_files), key=lambda path: str(path))
     if not input_files:
         if sync_deleted:
             _cleanup_stale_jsonl_outputs(output_dir=chunk_dir, expected_names=set())
         logger.warning(
             "No files found under %s for extensions: %s",
-            raw_data_dir,
+            ingestion_data_dir,
             ", ".join(file_extensions),
         )
         return
@@ -547,7 +549,7 @@ def recursive_chunk_dir(
 
     expected_output_names: set[str] = set()
     for path in input_files:
-        rel_path = path.relative_to(raw_data_dir)
+        rel_path = path.relative_to(ingestion_data_dir)
         safe_rel = sanitize_filename(str(rel_path).replace(os.sep, "__"))
         out_path = chunk_dir / f"{safe_rel}.jsonl"
         expected_output_names.add(out_path.name)

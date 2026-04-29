@@ -23,7 +23,7 @@ Wiki 側への負荷を避けるため、次の設定で取得間隔を制御し
 
 ## 再取得
 
-Raw cache は `data/raw/minecraft_wiki` に保存されます。
+Raw cache は `data/ingestion/minecraft_wiki` に保存されます。
 通常の再取得は次のコマンドを使います。
 
 ```bash

@@ -24,7 +24,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
     def _write_minimal_project(self, base: Path) -> None:
         (base / "configs" / "main").mkdir(parents=True)
         (base / "assets" / "prompts").mkdir(parents=True)
-        (base / "data" / "raw" / "docs").mkdir(parents=True)
+        (base / "data" / "ingestion" / "docs").mkdir(parents=True)
         (base / "data" / "eval").mkdir(parents=True)
 
         (base / "assets" / "prompts" / "answer_rag.md").write_text(
@@ -48,7 +48,8 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                   max_input_characters: 1024
                   log_level: "INFO"
                   data_dir: "data"
-                  raw_dir: "data/raw"
+                  ingestion_dir: "data/ingestion"
+                  index_documents_path: "data/ingestion/index_documents.jsonl"
                   chunks_path: "data/chunks/chunks.jsonl"
                   index_dir: "data/index"
                   eval_dir: "data/eval"
@@ -228,7 +229,7 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
         ):
             (base / "configs" / "main" / file_name).write_text("", encoding="utf-8")
 
-        (base / "data" / "raw" / "docs" / "sample.md").write_text(
+        (base / "data" / "ingestion" / "docs" / "sample.md").write_text(
             "KUMCは京都大学のMinecraftサークルです。例会は土曜日です。",
             encoding="utf-8",
         )

@@ -11,7 +11,8 @@ class AppSection:
     max_input_characters: int
     log_level: str
     data_dir: Path
-    raw_dir: Path
+    ingestion_dir: Path
+    index_documents_path: Path
     chunks_path: Path
     index_dir: Path
     eval_dir: Path
@@ -468,11 +469,11 @@ class IndexingStagesSection:
 
 @dataclass(frozen=True)
 class IndexingRefreshSection:
-    clear_raw_data: bool
+    clear_ingestion_source_data: bool
     clear_first_recursive_chunk_data: bool
     clear_second_recursive_chunk_data: bool
     clear_summary_chunk_data: bool
-    update_raw_data: bool
+    update_ingestion_source_data: bool
     update_first_recursive_chunk_data: bool
     update_second_recursive_chunk_data: bool
     update_sparse_second_recursive_chunk_data: bool

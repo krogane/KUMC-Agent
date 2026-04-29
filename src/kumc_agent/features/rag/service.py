@@ -1836,12 +1836,12 @@ class RagService:
         else:
             base_dir = self._base_dir()
             data_dir = self._retrieval.index_dir.parent
-            raw_dir = self._raw_data_dir()
+            ingestion_dir = self._ingestion_data_dir()
             candidates.extend(
                 [
                     base_dir / raw_path,  # Legacy catalog stores path relative to base dir.
                     data_dir / raw_path,
-                    raw_dir / raw_path,
+                    ingestion_dir / raw_path,
                 ]
             )
 
@@ -1869,8 +1869,8 @@ class RagService:
     def _base_dir(self) -> Path:
         return self._retrieval.index_dir.parent.parent
 
-    def _raw_data_dir(self) -> Path:
-        return self._retrieval.index_dir.parent / "raw"
+    def _ingestion_data_dir(self) -> Path:
+        return self._retrieval.index_dir.parent / "ingestion"
 
     @staticmethod
     def _merge_unique_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:

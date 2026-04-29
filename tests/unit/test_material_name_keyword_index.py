@@ -87,7 +87,7 @@ class MaterialNameKeywordIndexTests(unittest.TestCase):
                     "source_key": "id-1",
                     "canonical_name": "20250614 議事録",
                     "aliases": ["議事録/20250614"],
-                    "raw_path": "data/raw/docs/20250614.md",
+                    "raw_path": "data/ingestion/docs/20250614.md",
                 },
                 {
                     "material_id": "docs:id-2",
@@ -95,7 +95,7 @@ class MaterialNameKeywordIndexTests(unittest.TestCase):
                     "source_key": "id-2",
                     "canonical_name": "20250701 新歓企画",
                     "aliases": ["新歓/20250701"],
-                    "raw_path": "data/raw/docs/20250701.md",
+                    "raw_path": "data/ingestion/docs/20250701.md",
                 },
             ]
             (index_dir / "material_catalog.json").write_text(

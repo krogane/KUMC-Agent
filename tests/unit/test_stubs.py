@@ -34,7 +34,7 @@ class _FakeContext:
 class StubTests(unittest.TestCase):
     def test_vc_service_unbound_noop(self) -> None:
         config = VCManagerConfig(
-            raw_data_dir=Path("data/raw"),
+            ingestion_data_dir=Path("data/ingestion"),
             summery_chunk_dir=Path("data/chunks/summery_chunk"),
             discord_guild_allow_list=tuple(),
             drive_folder_id="",

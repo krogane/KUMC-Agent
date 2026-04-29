@@ -142,7 +142,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
 
     _collect_drive_like_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "docs",
+        ingestion_dir=cfg.ingestion_data_dir / "docs",
         source_type="docs",
         file_extensions=(".md",),
         title_key=None,
@@ -150,7 +150,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     )
     _collect_drive_like_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "sheets",
+        ingestion_dir=cfg.ingestion_data_dir / "sheets",
         source_type="sheets",
         file_extensions=(".csv",),
         title_key=None,
@@ -158,7 +158,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     )
     _collect_drive_like_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "hatenablog",
+        ingestion_dir=cfg.ingestion_data_dir / "hatenablog",
         source_type="hatenablog",
         file_extensions=(".md",),
         title_key="hatenablog_title",
@@ -166,7 +166,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     )
     _collect_drive_like_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "crafters_colony",
+        ingestion_dir=cfg.ingestion_data_dir / "crafters_colony",
         source_type="crafters_colony",
         file_extensions=(".md",),
         title_key="crafters_colony_title",
@@ -174,7 +174,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     )
     _collect_drive_like_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "notion",
+        ingestion_dir=cfg.ingestion_data_dir / "notion",
         source_type="notion",
         file_extensions=(".md",),
         title_key="notion_title",
@@ -184,13 +184,13 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     )
     _collect_message_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "messages",
+        ingestion_dir=cfg.ingestion_data_dir / "messages",
         default_source_type="messages",
         on_entry=_upsert,
     )
     _collect_message_entries(
         cfg=cfg,
-        raw_dir=cfg.raw_data_dir / "x",
+        ingestion_dir=cfg.ingestion_data_dir / "x",
         default_source_type="x_posts",
         on_entry=_upsert,
     )
@@ -230,7 +230,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
 def _collect_drive_like_entries(
     *,
     cfg: AppConfig,
-    raw_dir: Path,
+    ingestion_dir: Path,
     source_type: str,
     file_extensions: tuple[str, ...],
     title_key: str | None,
@@ -238,11 +238,11 @@ def _collect_drive_like_entries(
     alias_extra_fields: tuple[str, ...] = (),
     on_entry,
 ) -> None:
-    if not raw_dir.exists():
+    if not ingestion_dir.exists():
         return
     files: list[Path] = []
     for ext in file_extensions:
-        files.extend(raw_dir.rglob(f"*{ext}"))
+        files.extend(ingestion_dir.rglob(f"*{ext}"))
     for path in sorted(set(files), key=lambda value: str(value)):
         sidecar = _load_sidecar(path)
         source_file_name = path.name
@@ -287,13 +287,13 @@ def _collect_drive_like_entries(
 def _collect_message_entries(
     *,
     cfg: AppConfig,
-    raw_dir: Path,
+    ingestion_dir: Path,
     default_source_type: str,
     on_entry,
 ) -> None:
-    if not raw_dir.exists():
+    if not ingestion_dir.exists():
         return
-    for path in sorted(raw_dir.rglob("*.jsonl"), key=lambda value: str(value)):
+    for path in sorted(ingestion_dir.rglob("*.jsonl"), key=lambda value: str(value)):
         if path.name.endswith(".state.json"):
             continue
         metadata = _first_message_metadata(path)
@@ -344,11 +344,11 @@ def _collect_message_entries(
 
 
 def _collect_vc_entries(*, cfg: AppConfig, on_entry) -> None:
-    raw_dir = cfg.raw_data_dir / "vc"
-    if not raw_dir.exists():
+    ingestion_dir = cfg.ingestion_data_dir / "vc"
+    if not ingestion_dir.exists():
         return
-    for path in sorted(raw_dir.rglob("*.txt"), key=lambda value: str(value)):
-        rel = path.relative_to(raw_dir)
+    for path in sorted(ingestion_dir.rglob("*.txt"), key=lambda value: str(value)):
+        rel = path.relative_to(ingestion_dir)
         rel_posix = str(rel).replace("\\", "/")
         source_file_name = f"vc/{rel_posix}"
         meeting_date, meeting_label = _meeting_labels_for_vc(path)

@@ -35,7 +35,7 @@ integrations:
     rate_limit_per_minute: 120
     request_interval_seconds: 1.0
     namespaces: [0]
-    full_backfill_enabled: true
+    full_backfill_enabled: false
   openai_api_key: ""
   gemini_api_key: ""
   gemini_requests_per_minute: 1000

@@ -82,7 +82,7 @@ Minecraft Wiki RAGの正式入口は、サークル情報RAGと同じく `ChatAn
 - Rawキャッシュが存在し、checksumまたはrevision idが変わらない場合は再取得を省略する。
 
 ### 4.3 Raw保存
-Raw記事は `data/raw/minecraft_wiki` 配下にMarkdownまたはWiki Markdownとして保存する。
+Raw記事は `data/ingestion/minecraft_wiki` 配下にMarkdownまたはWiki Markdownとして保存する。
 
 | ファイル | 内容 |
 | --- | --- |
@@ -123,16 +123,16 @@ Minecraft Version、Minecraft Edition、Java版/統合版の判定結果はmetad
 MediaWikiのテンプレート・カテゴリ・表は、検索品質を損ねない範囲でMarkdown相当へ正規化する。完全なレンダリングよりも、見出し、箇条書き、表のキー情報が検索可能であることを優先する。
 
 ## 5. インデックス作成
-Minecraft Wiki RAGのindex正本は、`data/chunks/*/minecraft_wiki` に出力されるraw chunk pipeline成果物である。
+Minecraft Wiki RAGのindex正本は、`data/chunks/*/minecraft_wiki` に出力されるingestion chunk pipeline成果物である。
 
-ingestion repositoryは取得、変更検知、Raw snapshot、監査のために使うが、Minecraft Wiki RAGのDense/BM25/keyword indexへ投入する正本chunkにはしない。auto-indexでingestion repositoryを優先する場合も、Minecraft Wikiだけは専用raw chunk pipelineを再実行し、その第2 Recursive ChunkとSummary ChunkをDense/keyword indexへ投入する。
+ingestion repositoryは取得、変更検知、Raw snapshot、監査のために使うが、Minecraft Wiki RAGのDense/BM25/keyword indexへ投入する正本chunkにはしない。auto-indexでingestion repositoryを優先する場合も、Minecraft Wikiだけは専用ingestion chunk pipelineを再実行し、その第2 Recursive ChunkとSummary ChunkをDense/keyword indexへ投入する。
 
 ### 5.1 保存先
 インデックス成果物は次の場所に置く。
 
 | 成果物 | 保存先 |
 | --- | --- |
-| Raw | `data/raw/minecraft_wiki` |
+| Raw | `data/ingestion/minecraft_wiki` |
 | 第1 Recursive Chunk | `data/chunks/first_rec_chunk/minecraft_wiki` |
 | 第2 Recursive Chunk | `data/chunks/second_rec_chunk/minecraft_wiki` |
 | Sparse用第2 Recursive Chunk | `data/chunks/sparse_second_rec_chunk/minecraft_wiki` |
@@ -379,7 +379,7 @@ CLIや外部連携向けpayloadのトップレベルには、利用者・連携�
 
 - `MinecraftWikiConnector` は日本語版URL検証、rate limit、429/5xx backoff、revision id比較、Raw cache、metadata sidecar、NormalizedDocument化を行う。
 - 手動 `index build` はMinecraft Wiki connector ingestionを呼び、Raw取得からindex作成まで完結できる。
-- auto-indexでingestion repositoryを使う場合も、Minecraft Wikiは専用raw chunk pipeline成果物をDense/keyword indexの正本にする。
+- auto-indexでingestion repositoryを使う場合も、Minecraft Wikiは専用ingestion chunk pipeline成果物をDense/keyword indexの正本にする。
 - Minecraft Wiki専用の第1/第2/sparse/Summary Chunk成果物を作成し、Summary Chunkは専用LLMを使い、失敗時だけfallback要約にする。
 - 検索時にはMinecraft Wiki専用のSudachi mode、normalized form、symbol処理、RRF k、sparse混合比率を適用する。
 - keyword index構築時にはMinecraft Wiki専用BM25 k1/bとSudachi設定で専用corpusを作る。

@@ -4,7 +4,8 @@ app:
   max_input_characters: 1024
   log_level: "INFO"
   data_dir: "data"
-  raw_dir: "data/raw"
+  ingestion_dir: "data/ingestion"
+  index_documents_path: "data/ingestion/index_documents.jsonl"
   chunks_path: "data/chunks/chunks.jsonl"
   index_dir: "data/index"
   eval_dir: "data/eval"

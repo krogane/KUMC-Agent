@@ -13,7 +13,7 @@ class VCConfig:
 
 @dataclass(frozen=True)
 class VCManagerConfig:
-    raw_data_dir: Path
+    ingestion_data_dir: Path
     summery_chunk_dir: Path
     discord_guild_allow_list: tuple[int, ...]
     drive_folder_id: str
@@ -66,7 +66,7 @@ class VCManagerConfig:
         auto_join_hour, auto_join_minute = _parse_time(config.vc.auto_join_time)
 
         return cls(
-            raw_data_dir=config.app.raw_dir,
+            ingestion_data_dir=config.app.ingestion_dir,
             summery_chunk_dir=config.app.data_dir / "chunks" / "summary_chunk",
             discord_guild_allow_list=tuple(config.security.discord_guild_allow_list),
             drive_folder_id=config.integrations.drive.folder_id,

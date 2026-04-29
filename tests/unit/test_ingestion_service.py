@@ -139,7 +139,7 @@ class IngestionServiceTests(unittest.TestCase):
             root = Path(tmp)
             storage = FileSystemStorage(
                 chunks_path=root / "chunks.jsonl",
-                raw_dir=root / "raw",
+                index_documents_path=root / "ingestion" / "index_documents.jsonl",
             )
             storage.save_chunks(
                 [

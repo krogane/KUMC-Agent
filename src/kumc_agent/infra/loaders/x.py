@@ -4,13 +4,13 @@ from pathlib import Path
 
 
 class XPostsLoader:
-    def __init__(self, *, raw_dir: Path) -> None:
-        self._raw_dir = raw_dir
+    def __init__(self, *, ingestion_dir: Path) -> None:
+        self._ingestion_dir = ingestion_dir
 
     def load(self) -> int:
         from kumc_agent.infra.loaders.x_impl import convert_x_tweets_js_to_jsonl
 
-        output_dir = self._raw_dir / "x"
+        output_dir = self._ingestion_dir / "x"
         output_dir.mkdir(parents=True, exist_ok=True)
         stats = convert_x_tweets_js_to_jsonl(
             raw_x_dir=output_dir,

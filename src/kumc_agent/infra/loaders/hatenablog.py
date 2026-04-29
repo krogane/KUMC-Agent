@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 class HatenaBlogLoader:
-    def __init__(self, *, raw_dir: Path, blog_url: str) -> None:
-        self._raw_dir = raw_dir
+    def __init__(self, *, ingestion_dir: Path, blog_url: str) -> None:
+        self._ingestion_dir = ingestion_dir
         self._blog_url = blog_url
 
     def load(self) -> int:
@@ -13,7 +13,7 @@ class HatenaBlogLoader:
             download_hatenablog_articles,
         )
 
-        output_dir = self._raw_dir / "hatenablog"
+        output_dir = self._ingestion_dir / "hatenablog"
         output_dir.mkdir(parents=True, exist_ok=True)
         downloaded = download_hatenablog_articles(
             blog_url=self._blog_url,

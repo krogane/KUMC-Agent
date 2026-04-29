@@ -9,7 +9,7 @@ class GoogleDriveLoader:
         *,
         folder_id: str,
         credentials_path: str,
-        raw_dir: Path,
+        ingestion_dir: Path,
         max_files: int,
         batch_size: int,
         download_max_retries: int,
@@ -20,7 +20,7 @@ class GoogleDriveLoader:
     ) -> None:
         self._folder_id = folder_id
         self._credentials_path = credentials_path
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._max_files = max_files
         self._batch_size = batch_size
         self._download_max_retries = download_max_retries
@@ -40,8 +40,8 @@ class GoogleDriveLoader:
             download_drive_markdown,
         )
 
-        docs_dir = self._raw_dir / "docs"
-        sheets_dir = self._raw_dir / "sheets"
+        docs_dir = self._ingestion_dir / "docs"
+        sheets_dir = self._ingestion_dir / "sheets"
         docs_dir.mkdir(parents=True, exist_ok=True)
         sheets_dir.mkdir(parents=True, exist_ok=True)
         docs_count, sheets_count = download_drive_markdown(

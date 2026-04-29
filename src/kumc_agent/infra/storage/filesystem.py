@@ -14,16 +14,15 @@ FileSignature = tuple[int, int]
 
 
 class FileSystemStorage(StoragePort):
-    def __init__(self, *, chunks_path: Path, raw_dir: Path) -> None:
+    def __init__(self, *, chunks_path: Path, index_documents_path: Path) -> None:
         self._chunks_path = chunks_path
-        self._raw_dir = raw_dir
-        self._raw_documents_path = raw_dir / "documents.jsonl"
+        self._index_documents_path = index_documents_path
         self._chunks_path.parent.mkdir(parents=True, exist_ok=True)
-        self._raw_dir.mkdir(parents=True, exist_ok=True)
+        self._index_documents_path.parent.mkdir(parents=True, exist_ok=True)
 
     def save_documents(self, documents: list[Document]) -> None:
-        self._raw_documents_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._raw_documents_path.open("w", encoding="utf-8") as fw:
+        self._index_documents_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._index_documents_path.open("w", encoding="utf-8") as fw:
             for doc in documents:
                 fw.write(
                     json.dumps(

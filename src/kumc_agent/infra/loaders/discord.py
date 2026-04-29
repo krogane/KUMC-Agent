@@ -9,11 +9,11 @@ class DiscordLoader:
         self,
         *,
         bot_token: str,
-        raw_dir: Path,
+        ingestion_dir: Path,
         allow_guild_ids: list[int],
     ) -> None:
         self._bot_token = bot_token
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._allow_guild_ids = allow_guild_ids
 
     def load(self) -> int:
@@ -23,7 +23,7 @@ class DiscordLoader:
             download_discord_messages,
         )
 
-        output_dir = self._raw_dir / "messages"
+        output_dir = self._ingestion_dir / "messages"
         output_dir.mkdir(parents=True, exist_ok=True)
         stats = asyncio.run(
             download_discord_messages(

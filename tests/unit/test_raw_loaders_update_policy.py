@@ -25,7 +25,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
             loader = GoogleDriveLoader(
                 folder_id="folder-id",
                 credentials_path="/tmp/creds.json",
-                raw_dir=Path(td),
+                ingestion_dir=Path(td),
                 max_files=100,
                 batch_size=20,
                 download_max_retries=3,
@@ -51,7 +51,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
     def test_hatenablog_loader_enables_up_to_date_skip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             loader = HatenaBlogLoader(
-                raw_dir=Path(td),
+                ingestion_dir=Path(td),
                 blog_url="https://example.com/",
             )
             with patch(
@@ -70,7 +70,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
     def test_crafters_colony_loader_enables_up_to_date_skip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             loader = CraftersColonyLoader(
-                raw_dir=Path(td),
+                ingestion_dir=Path(td),
                 author_url="https://example.com",
                 max_pages=3,
                 max_articles=20,
@@ -90,7 +90,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
 
     def test_x_loader_enables_up_to_date_skip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            loader = XPostsLoader(raw_dir=Path(td))
+            loader = XPostsLoader(ingestion_dir=Path(td))
             with patch(
                 "kumc_agent.infra.loaders.x_impl.convert_x_tweets_js_to_jsonl",
                 return_value=XConvertStats(files=1, posts=9, skipped_invalid=0),
@@ -109,7 +109,7 @@ class RawLoaderUpdatePolicyTests(unittest.TestCase):
             loader = NotionLoader(
                 api_token="token",
                 database_ids=["db-1"],
-                raw_dir=Path(td),
+                ingestion_dir=Path(td),
             )
             with patch(
                 "kumc_agent.infra.loaders.notion_impl.download_notion_database_pages",

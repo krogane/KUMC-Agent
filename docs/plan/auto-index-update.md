@@ -95,7 +95,7 @@
 - `--stage` 指定が引き続き効くこと。
 
 ### Phase 7: 画像index連携
-1. `ImageAssetBuildService.build_from_raw_sources()` を自動更新stageに位置付ける。
+1. `ImageAssetBuildService.build_from_ingestion_sources()` を自動更新stageに位置付ける。
 2. 画像ごとの `content_hash`、`source_item_id`、`image_index` を差分判定に使う。
 3. 差分がある画像だけcaption、OCR、feature vectorを再作成する方針を固定する。
 4. 削除済み画像は `metadata.index_status=deleted` として検索除外する。

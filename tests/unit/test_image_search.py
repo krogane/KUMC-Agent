@@ -130,7 +130,7 @@ class ImageSearchTests(unittest.TestCase):
             root = Path(tmp)
             image_path = root / "poster.png"
             image_path.write_bytes(_tiny_png())
-            messages_dir = root / "raw" / "messages" / "guild"
+            messages_dir = root / "ingestion" / "messages" / "guild"
             messages_dir.mkdir(parents=True)
             (messages_dir / "channel.jsonl").write_text(
                 json.dumps(
@@ -168,14 +168,14 @@ class ImageSearchTests(unittest.TestCase):
             )
             builder = ImageAssetBuildService(
                 repository=repository,
-                raw_dir=root / "raw",
+                ingestion_dir=root / "ingestion",
                 image_dir=root / "image_search" / "images",
                 index_dir=root / "image_search",
                 embedder=embedder,
                 config=config,
             )
 
-            run = builder.build_from_raw_sources()
+            run = builder.build_from_ingestion_sources()
             service = ImageSearchService(
                 repository=repository,
                 embedder=embedder,
@@ -202,7 +202,7 @@ class ImageSearchTests(unittest.TestCase):
     def test_builder_falls_back_to_discord_proxy_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            messages_dir = root / "raw" / "messages" / "guild"
+            messages_dir = root / "ingestion" / "messages" / "guild"
             messages_dir.mkdir(parents=True)
             (messages_dir / "channel.jsonl").write_text(
                 json.dumps(
@@ -241,7 +241,7 @@ class ImageSearchTests(unittest.TestCase):
             )
             builder = ImageAssetBuildService(
                 repository=repository,
-                raw_dir=root / "raw",
+                ingestion_dir=root / "ingestion",
                 image_dir=root / "image_search" / "images",
                 index_dir=root / "image_search",
                 embedder=embedder,
@@ -258,7 +258,7 @@ class ImageSearchTests(unittest.TestCase):
                 "kumc_agent.features.image_search.service._download_bytes",
                 side_effect=_fake_download,
             ):
-                run = builder.build_from_raw_sources()
+                run = builder.build_from_ingestion_sources()
 
             assets = repository.list_assets(query="")
             self.assertEqual("succeeded", run.status)
@@ -304,13 +304,13 @@ class ImageSearchTests(unittest.TestCase):
             )
             builder = ImageAssetBuildService(
                 repository=repository,
-                raw_dir=root / "raw",
+                ingestion_dir=root / "ingestion",
                 image_dir=root / "image_search" / "images",
                 index_dir=root / "image_search",
                 embedder=embedder,
                 config=config,
             )
-            builder.build_from_raw_sources()
+            builder.build_from_ingestion_sources()
             service = ImageSearchService(
                 repository=repository,
                 embedder=embedder,
@@ -377,13 +377,13 @@ class ImageSearchTests(unittest.TestCase):
             )
             builder = ImageAssetBuildService(
                 repository=repository,
-                raw_dir=root / "raw",
+                ingestion_dir=root / "ingestion",
                 image_dir=root / "image_search" / "images",
                 index_dir=root / "image_search",
                 embedder=embedder,
                 config=config,
             )
-            builder.build_from_raw_sources()
+            builder.build_from_ingestion_sources()
             service = ImageSearchService(
                 repository=repository,
                 embedder=embedder,

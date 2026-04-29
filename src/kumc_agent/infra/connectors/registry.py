@@ -16,13 +16,13 @@ from kumc_agent.infra.loaders.x import XPostsLoader
 
 
 def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]:
-    raw_dir = config.app.raw_dir
+    ingestion_dir = config.app.ingestion_dir
     connectors: dict[str, SourceConnector] = {}
     if config.features.sources.drive:
         drive_loader = GoogleDriveLoader(
             folder_id=config.integrations.drive.folder_id,
             credentials_path=config.integrations.drive.google_application_credentials,
-            raw_dir=raw_dir,
+            ingestion_dir=ingestion_dir,
             max_files=config.integrations.drive.max_files,
             batch_size=config.integrations.drive.batch_size,
             download_max_retries=config.integrations.drive.download_max_retries,
@@ -43,13 +43,13 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             raw_items=lambda: [
                 *iter_raw_files(
                     source_kind="google_drive",
-                    root_dir=raw_dir / "docs",
+                    root_dir=ingestion_dir / "docs",
                     extensions={".md"},
                     default_visibility="admin",
                 ),
                 *iter_raw_files(
                     source_kind="google_drive",
-                    root_dir=raw_dir / "sheets",
+                    root_dir=ingestion_dir / "sheets",
                     extensions={".csv"},
                     default_visibility="admin",
                 ),
@@ -61,12 +61,12 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             source_kind="discord",
             loader=DiscordLoader(
                 bot_token=config.integrations.discord.bot_token,
-                raw_dir=raw_dir,
+                ingestion_dir=ingestion_dir,
                 allow_guild_ids=config.security.discord_guild_allow_list,
             ),
             raw_items=lambda: iter_raw_files(
                 source_kind="discord",
-                root_dir=raw_dir / "messages",
+                root_dir=ingestion_dir / "messages",
                 extensions={".jsonl"},
                 default_visibility="guild",
             ),
@@ -78,11 +78,11 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
             loader=NotionLoader(
                 api_token=config.integrations.notion.api_token,
                 database_ids=config.integrations.notion.database_ids,
-                raw_dir=raw_dir,
+                ingestion_dir=ingestion_dir,
             ),
             raw_items=lambda: iter_raw_files(
                 source_kind="notion",
-                root_dir=raw_dir / "notion",
+                root_dir=ingestion_dir / "notion",
                 extensions={".md"},
                 default_visibility="admin",
             ),
@@ -92,12 +92,12 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
         connectors["hatenablog"] = LoaderBackedConnector(
             source_kind="hatenablog",
             loader=HatenaBlogLoader(
-                raw_dir=raw_dir,
+                ingestion_dir=ingestion_dir,
                 blog_url=config.integrations.hatenablog.blog_url,
             ),
             raw_items=lambda: iter_raw_files(
                 source_kind="hatenablog",
-                root_dir=raw_dir / "hatenablog",
+                root_dir=ingestion_dir / "hatenablog",
                 extensions={".md"},
                 default_visibility="public",
             ),
@@ -106,10 +106,10 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
     if config.features.sources.x:
         connectors["x"] = LoaderBackedConnector(
             source_kind="x",
-            loader=XPostsLoader(raw_dir=raw_dir),
+            loader=XPostsLoader(ingestion_dir=ingestion_dir),
             raw_items=lambda: iter_raw_files(
                 source_kind="x",
-                root_dir=raw_dir / "x",
+                root_dir=ingestion_dir / "x",
                 extensions={".jsonl"},
                 default_visibility="public",
             ),
@@ -119,14 +119,14 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
         connectors["crafters_colony"] = LoaderBackedConnector(
             source_kind="crafters_colony",
             loader=CraftersColonyLoader(
-                raw_dir=raw_dir,
+                ingestion_dir=ingestion_dir,
                 author_url=config.integrations.crafters_colony.author_url,
                 max_pages=config.integrations.crafters_colony.max_pages,
                 max_articles=config.integrations.crafters_colony.max_articles,
             ),
             raw_items=lambda: iter_raw_files(
                 source_kind="crafters_colony",
-                root_dir=raw_dir / "crafters_colony",
+                root_dir=ingestion_dir / "crafters_colony",
                 extensions={".md"},
                 default_visibility="public",
             ),
@@ -134,7 +134,7 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
         )
     if config.features.sources.minecraft_wiki:
         connectors["minecraft_wiki"] = MinecraftWikiConnector(
-            raw_dir=Path(raw_dir) / "minecraft_wiki",
+            ingestion_dir=Path(ingestion_dir) / "minecraft_wiki",
             page_titles=tuple(config.integrations.minecraft_wiki.page_titles),
             api_url=config.integrations.minecraft_wiki.api_url,
             page_url_base=config.integrations.minecraft_wiki.page_url_base,

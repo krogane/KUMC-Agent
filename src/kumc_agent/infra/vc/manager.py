@@ -1588,7 +1588,7 @@ class VoiceMeetingManager:
         now = datetime.now(_JST)
         date_token = now.strftime("%Y-%m-%d")
         date_metadata = now.strftime("%Y/%m/%d")
-        base_dir = self._config.raw_data_dir / "vc"
+        base_dir = self._config.ingestion_data_dir / "vc"
         base_dir.mkdir(parents=True, exist_ok=True)
 
         for number in range(1, 1000):

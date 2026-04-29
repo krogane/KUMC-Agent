@@ -94,7 +94,7 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
                 embedder=object(),  # type: ignore[arg-type]
                 faiss_index=object(),  # type: ignore[arg-type]
                 bm25_index=object(),  # type: ignore[arg-type]
-                raw_dir=Path(tmp),
+                ingestion_dir=Path(tmp),
                 app_config=_runtime_config(data_dir=Path(tmp), provider="gemini"),  # type: ignore[arg-type]
                 summary_llm=llm,
             )
@@ -117,7 +117,7 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
                 embedder=object(),  # type: ignore[arg-type]
                 faiss_index=object(),  # type: ignore[arg-type]
                 bm25_index=object(),  # type: ignore[arg-type]
-                raw_dir=Path(tmp),
+                ingestion_dir=Path(tmp),
                 app_config=_runtime_config(data_dir=Path(tmp), provider="none"),  # type: ignore[arg-type]
                 summary_llm=llm,
             )
@@ -138,7 +138,7 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
                 embedder=object(),  # type: ignore[arg-type]
                 faiss_index=object(),  # type: ignore[arg-type]
                 bm25_index=object(),  # type: ignore[arg-type]
-                raw_dir=Path(tmp),
+                ingestion_dir=Path(tmp),
                 app_config=_runtime_config(data_dir=Path(tmp), provider="gemini"),  # type: ignore[arg-type]
                 summary_llm=llm,
             )
@@ -158,7 +158,7 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
                 embedder=object(),  # type: ignore[arg-type]
                 faiss_index=object(),  # type: ignore[arg-type]
                 bm25_index=object(),  # type: ignore[arg-type]
-                raw_dir=Path(tmp),
+                ingestion_dir=Path(tmp),
                 app_config=_runtime_config(  # type: ignore[arg-type]
                     data_dir=Path(tmp),
                     provider="gemini",

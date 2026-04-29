@@ -74,7 +74,7 @@ def build_summery_chunk_prompt(
 @dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
-    raw_data_dir: Path
+    ingestion_data_dir: Path
     first_rec_chunk_dir: Path
     second_rec_chunk_dir: Path
     sparse_second_rec_chunk_dir: Path
@@ -111,11 +111,11 @@ class AppConfig:
     temperature: float = 0.0
     max_output_tokens: int = 512
     thinking_level: str = "minimal"
-    clear_raw_data: bool = False
+    clear_ingestion_source_data: bool = False
     clear_first_rec_chunk_data: bool = False
     clear_second_rec_chunk_data: bool = False
     clear_summery_chunk_data: bool = False
-    update_raw_data: bool = True
+    update_ingestion_source_data: bool = True
     update_first_rec_chunk_data: bool = True
     update_second_rec_chunk_data: bool = True
     update_sparse_second_rec_chunk_data: bool = True

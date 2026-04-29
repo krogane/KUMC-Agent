@@ -23,7 +23,7 @@ from kumc_agent.utils.hashing import stable_hash
 
 @dataclass(frozen=True)
 class MinecraftWikiConnector:
-    raw_dir: Path
+    ingestion_dir: Path
     page_titles: tuple[str, ...]
     api_url: str
     page_url_base: str
@@ -47,7 +47,7 @@ class MinecraftWikiConnector:
         )
 
     async def backfill(self, scope: BackfillScope) -> AsyncIterator[SourceRawItem]:
-        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.ingestion_dir.mkdir(parents=True, exist_ok=True)
         titles = self._resolve_backfill_titles(scope)
         if scope.limit is not None:
             titles = titles[: max(0, scope.limit)]
@@ -93,7 +93,7 @@ class MinecraftWikiConnector:
         clean_title = (title or "").strip()
         if not clean_title:
             return None
-        path = self.raw_dir / f"{_safe_name(clean_title)}.md"
+        path = self.ingestion_dir / f"{_safe_name(clean_title)}.md"
         meta_path = path.with_suffix(path.suffix + ".meta.json")
         if path.exists() and not force:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -302,7 +302,7 @@ class MinecraftWikiConnector:
             text=text,
             canonical_url=canonical_url,
             access_scope=AccessScope(visibility="public"),
-            raw_path=str(self.raw_dir / f"{_safe_name(title)}.md"),
+            raw_path=str(self.ingestion_dir / f"{_safe_name(title)}.md"),
             checksum=stable_hash(text),
             metadata={
                 **metadata,

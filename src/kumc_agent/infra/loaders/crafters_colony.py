@@ -7,12 +7,12 @@ class CraftersColonyLoader:
     def __init__(
         self,
         *,
-        raw_dir: Path,
+        ingestion_dir: Path,
         author_url: str,
         max_pages: int,
         max_articles: int,
     ) -> None:
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._author_url = author_url
         self._max_pages = max_pages
         self._max_articles = max_articles
@@ -24,7 +24,7 @@ class CraftersColonyLoader:
             download_crafters_colony_articles,
         )
 
-        output_dir = self._raw_dir / "crafters_colony"
+        output_dir = self._ingestion_dir / "crafters_colony"
         output_dir.mkdir(parents=True, exist_ok=True)
         downloaded = download_crafters_colony_articles(
             author_url=self._author_url,

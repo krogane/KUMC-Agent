@@ -52,7 +52,7 @@ flowchart TD
 
 ## 4. データ取得
 ### 4.1 共通方針
-Rawデータは `data/raw` 配下に情報源別に保存する。各Rawレコードまたはサイドカーmetadataには、検索、権限判定、Recency、引用URL生成、資料検索に必要な情報を保持する。
+Rawデータは `data/ingestion` 配下に情報源別に保存する。各Rawレコードまたはサイドカーmetadataには、検索、権限判定、Recency、引用URL生成、資料検索に必要な情報を保持する。
 
 主な共通metadataは次の通り。
 
@@ -127,7 +127,7 @@ Driveファイルの日付は、Drive更新日時、ファイル名・パスに�
 
 | 成果物 | 保存先 |
 | --- | --- |
-| Raw | `data/raw/{source}` |
+| Raw | `data/ingestion/{source}` |
 | 第1 Recursive Chunk | `data/chunks/first_rec_chunk/{source}` |
 | 第2 Recursive Chunk | `data/chunks/second_rec_chunk/{source}` |
 | Sparse用第2 Recursive Chunk | `data/chunks/sparse_second_rec_chunk/{source}` |

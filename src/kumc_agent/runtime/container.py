@@ -177,7 +177,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
 
     storage = FileSystemStorage(
         chunks_path=config.app.chunks_path,
-        raw_dir=config.app.raw_dir,
+        index_documents_path=config.app.index_documents_path,
     )
     dense_index = FaissLikeIndex(index_dir=config.app.index_dir)
     sparse_index = SudachiBM25Retriever(
@@ -226,7 +226,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         no_rag_llm=no_rag_llm,
         prompts=prompt_repo,
         source_max_count=config.app.source_max_count,
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         prompt_texts=RagPromptTextSettings(
             empty_context=config.rag.prompt_texts.empty_context,
             empty_history=config.rag.prompt_texts.empty_history,
@@ -420,7 +420,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     image_asset_builder = (
         ImageAssetBuildService(
             repository=operations_repository,
-            raw_dir=config.app.raw_dir,
+            ingestion_dir=config.app.ingestion_dir,
             image_dir=config.base_dir / "data" / "image_search" / "images",
             index_dir=config.app.index_dir / "image_search",
             embedder=embedder,
@@ -443,7 +443,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
         embedder=embedder,
         faiss_index=dense_index,
         bm25_index=sparse_index,
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         app_config=config,
         summary_llm=summary_chunk_llm,
         minecraft_wiki_summary_llm=minecraft_wiki_summary_chunk_llm,
@@ -472,7 +472,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     drive_loader = GoogleDriveLoader(
         folder_id=config.integrations.drive.folder_id,
         credentials_path=config.integrations.drive.google_application_credentials,
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         max_files=config.integrations.drive.max_files,
         batch_size=config.integrations.drive.batch_size,
         download_max_retries=config.integrations.drive.download_max_retries,
@@ -489,25 +489,25 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
     )
     discord_loader = DiscordLoader(
         bot_token=config.integrations.discord.bot_token,
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         allow_guild_ids=config.security.discord_guild_allow_list,
     )
     hatena_loader = HatenaBlogLoader(
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         blog_url=config.integrations.hatenablog.blog_url,
     )
     crafters_loader = CraftersColonyLoader(
-        raw_dir=config.app.raw_dir,
+        ingestion_dir=config.app.ingestion_dir,
         author_url=config.integrations.crafters_colony.author_url,
         max_pages=config.integrations.crafters_colony.max_pages,
         max_articles=config.integrations.crafters_colony.max_articles,
     )
-    x_loader = XPostsLoader(raw_dir=config.app.raw_dir)
+    x_loader = XPostsLoader(ingestion_dir=config.app.ingestion_dir)
     notion_loader = (
         NotionLoader(
             api_token=config.integrations.notion.api_token,
             database_ids=config.integrations.notion.database_ids,
-            raw_dir=config.app.raw_dir,
+            ingestion_dir=config.app.ingestion_dir,
         )
         if config.features.sources.notion
         else None

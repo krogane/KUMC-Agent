@@ -159,7 +159,7 @@ class MinecraftWikiRagTests(unittest.TestCase):
     def test_connector_uses_ja_metadata_and_does_not_emit_edition_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             connector = _Connector(
-                raw_dir=Path(tmp),
+                ingestion_dir=Path(tmp),
                 page_titles=("丸石",),
                 api_url="https://ja.minecraft.wiki/api.php",
                 page_url_base="https://ja.minecraft.wiki/w/",
@@ -237,8 +237,8 @@ class MinecraftWikiRagTests(unittest.TestCase):
 
     def test_connector_refreshes_cached_page_when_revision_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            raw_dir = Path(tmp)
-            raw_path = raw_dir / "丸石.md"
+            ingestion_dir = Path(tmp)
+            raw_path = ingestion_dir / "丸石.md"
             meta_path = raw_path.with_suffix(raw_path.suffix + ".meta.json")
             raw_path.write_text("old text", encoding="utf-8")
             meta_path.write_text(
@@ -246,7 +246,7 @@ class MinecraftWikiRagTests(unittest.TestCase):
                 encoding="utf-8",
             )
             connector = _Connector(
-                raw_dir=raw_dir,
+                ingestion_dir=ingestion_dir,
                 page_titles=("丸石",),
                 api_url="https://ja.minecraft.wiki/api.php",
                 page_url_base="https://ja.minecraft.wiki/w/",
@@ -298,7 +298,7 @@ class MinecraftWikiRagTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 MinecraftWikiConnector(
-                    raw_dir=Path(tmp),
+                    ingestion_dir=Path(tmp),
                     page_titles=("Stone",),
                     api_url="https://minecraft.wiki/api.php",
                     page_url_base="https://minecraft.wiki/w/",
@@ -422,14 +422,14 @@ class MinecraftWikiRagTests(unittest.TestCase):
             app = replace(
                 config.app,
                 data_dir=root / "data",
-                raw_dir=root / "data" / "raw",
+                ingestion_dir=root / "data" / "ingestion",
                 chunks_path=root / "data" / "chunks",
                 index_dir=root / "data" / "index",
             )
             config = replace(config, app=app)
-            raw_dir = config.app.raw_dir / "minecraft_wiki"
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / "丸石.md"
+            ingestion_dir = config.app.ingestion_dir / "minecraft_wiki"
+            ingestion_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = ingestion_dir / "丸石.md"
             raw_path.write_text(
                 "# 丸石\n\n== 入手 ==\n丸石は石を採掘すると得られる。\n\n== 用途 ==\nクラフト素材。",
                 encoding="utf-8",
@@ -446,7 +446,7 @@ class MinecraftWikiRagTests(unittest.TestCase):
                 embedder=_Embedder(),
                 faiss_index=dense,
                 bm25_index=sparse,
-                raw_dir=config.app.raw_dir,
+                ingestion_dir=config.app.ingestion_dir,
                 app_config=config,
                 summary_llm=None,
                 minecraft_wiki_summary_llm=None,

@@ -1013,7 +1013,11 @@ def _to_runtime_config(
             max_input_characters=int(app["max_input_characters"]),
             log_level=str(app["log_level"]),
             data_dir=_resolve_path(base_dir, str(app["data_dir"])),
-            raw_dir=_resolve_path(base_dir, str(app["raw_dir"])),
+            ingestion_dir=_resolve_path(base_dir, str(app["ingestion_dir"])),
+            index_documents_path=_resolve_path(
+                base_dir,
+                str(app["index_documents_path"]),
+            ),
             chunks_path=_resolve_path(base_dir, str(app["chunks_path"])),
             index_dir=_resolve_path(base_dir, str(app["index_dir"])),
             eval_dir=_resolve_path(base_dir, str(app["eval_dir"])),
@@ -1749,7 +1753,9 @@ def _to_runtime_config(
                 summary_enabled=bool(indexing_stages.get("summary_enabled", True)),
             ),
             refresh=IndexingRefreshSection(
-                clear_raw_data=bool(indexing_refresh.get("clear_raw_data", False)),
+                clear_ingestion_source_data=bool(
+                    indexing_refresh.get("clear_ingestion_source_data", False)
+                ),
                 clear_first_recursive_chunk_data=bool(
                     indexing_refresh.get("clear_first_recursive_chunk_data", False)
                 ),
@@ -1759,7 +1765,9 @@ def _to_runtime_config(
                 clear_summary_chunk_data=bool(
                     indexing_refresh.get("clear_summary_chunk_data", False)
                 ),
-                update_raw_data=bool(indexing_refresh.get("update_raw_data", True)),
+                update_ingestion_source_data=bool(
+                    indexing_refresh.get("update_ingestion_source_data", True)
+                ),
                 update_first_recursive_chunk_data=bool(
                     indexing_refresh.get("update_first_recursive_chunk_data", True)
                 ),

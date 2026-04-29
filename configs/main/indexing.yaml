@@ -16,11 +16,11 @@ indexing:
     sparse_second_recursive_enabled: true
     summary_enabled: true
   refresh:
-    clear_raw_data: false
+    clear_ingestion_source_data: false
     clear_first_recursive_chunk_data: false
     clear_second_recursive_chunk_data: false
     clear_summary_chunk_data: false
-    update_raw_data: true
+    update_ingestion_source_data: true
     update_first_recursive_chunk_data: true
     update_second_recursive_chunk_data: true
     update_sparse_second_recursive_chunk_data: true

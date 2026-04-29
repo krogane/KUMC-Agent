@@ -9,11 +9,11 @@ class NotionLoader:
         *,
         api_token: str,
         database_ids: list[str],
-        raw_dir: Path,
+        ingestion_dir: Path,
     ) -> None:
         self._api_token = api_token
         self._database_ids = list(database_ids)
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
 
     def load(self) -> int:
         token = (self._api_token or "").strip()
@@ -23,7 +23,7 @@ class NotionLoader:
 
         from kumc_agent.infra.loaders.notion_impl import download_notion_database_pages
 
-        output_dir = self._raw_dir / "notion"
+        output_dir = self._ingestion_dir / "notion"
         output_dir.mkdir(parents=True, exist_ok=True)
         return int(
             download_notion_database_pages(

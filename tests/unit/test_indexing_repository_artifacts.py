@@ -48,7 +48,7 @@ class RepositoryBackedIndexArtifactsTests(unittest.TestCase):
                 embedder=object(),
                 faiss_index=object(),
                 bm25_index=object(),
-                raw_dir=root / "data" / "raw",
+                ingestion_dir=root / "data" / "ingestion",
                 app_config=runtime,
             )
             source_chunk = Chunk(

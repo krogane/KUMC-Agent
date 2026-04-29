@@ -166,7 +166,7 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                 source_key="id-20250614",
                 canonical_name="20250614 議事録",
                 aliases=["議事録/20250614 議事録"],
-                raw_rel_path="data/raw/docs/20250614.md",
+                raw_rel_path="data/ingestion/docs/20250614.md",
                 raw_text="2025/06/14 議事録本文",
             )
             (index_dir / "material_catalog.json").write_text(
@@ -196,7 +196,7 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                     source_key="id-20250614",
                     canonical_name="20250614 議事録",
                     aliases=["議事録/20250614 議事録"],
-                    raw_rel_path="data/raw/docs/20250614.md",
+                    raw_rel_path="data/ingestion/docs/20250614.md",
                     raw_text="2025/06/14 議事録本文",
                 ),
                 _write_material(
@@ -205,7 +205,7 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                     source_key="id-20250621",
                     canonical_name="20250621 議事録",
                     aliases=["議事録/20250621 議事録"],
-                    raw_rel_path="data/raw/docs/20250621.md",
+                    raw_rel_path="data/ingestion/docs/20250621.md",
                     raw_text="2025/06/21 議事録本文",
                 ),
             ]
@@ -247,7 +247,7 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                 source_key="id-20250614",
                 canonical_name="20250614 議事録",
                 aliases=["議事録/20250614 議事録"],
-                raw_rel_path="data/raw/docs/20250614.md",
+                raw_rel_path="data/ingestion/docs/20250614.md",
                 raw_text="2025/06/14 議事録本文",
             )
             (index_dir / "material_catalog.json").write_text(
@@ -287,7 +287,7 @@ class MaterialSearchMatchingTests(unittest.TestCase):
                 source_key="id-20250614",
                 canonical_name="20250614 議事録",
                 aliases=["議事録/20250614 議事録"],
-                raw_rel_path="data/raw/docs/20250614.md",
+                raw_rel_path="data/ingestion/docs/20250614.md",
                 raw_text="x" * 30,
             )
             (index_dir / "material_catalog.json").write_text(

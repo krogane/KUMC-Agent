@@ -47,14 +47,14 @@ class GenerationComponent:
         no_rag_llm: LLMPort | None = None,
         prompts: PromptRepositoryPort,
         source_max_count: int,
-        raw_dir: Path | None = None,
+        ingestion_dir: Path | None = None,
         prompt_texts: RagPromptTextSettings | None = None,
     ) -> None:
         self._rag_llm = llm
         self._no_rag_llm = no_rag_llm or llm
         self._prompts = prompts
         self._source_max_count = max(0, int(source_max_count))
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._prompt_texts = prompt_texts or RagPromptTextSettings()
         self._discord_raw_cache: dict[tuple[str, str], tuple[_DiscordChunkLine, ...]] = {}
 
@@ -810,11 +810,11 @@ class GenerationComponent:
         cached = self._discord_raw_cache.get(key)
         if cached is not None:
             return cached
-        if self._raw_dir is None:
+        if self._ingestion_dir is None:
             self._discord_raw_cache[key] = tuple()
             return tuple()
 
-        path = self._raw_dir / "messages" / guild_id / f"{channel_id}.jsonl"
+        path = self._ingestion_dir / "messages" / guild_id / f"{channel_id}.jsonl"
         if not path.exists():
             self._discord_raw_cache[key] = tuple()
             return tuple()

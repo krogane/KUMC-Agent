@@ -352,7 +352,7 @@ class ImageAssetBuildService:
         self,
         *,
         repository: OperationsRepository,
-        raw_dir: Path,
+        ingestion_dir: Path,
         image_dir: Path,
         index_dir: Path,
         embedder: EmbedderPort,
@@ -361,7 +361,7 @@ class ImageAssetBuildService:
         ocr: LocalImageOcrExtractor | None = None,
     ) -> None:
         self._repository = repository
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._image_dir = image_dir
         self._embedder = embedder
         self._index = _ImageSearchIndex(index_dir=index_dir, embedder=embedder, config=config)
@@ -369,7 +369,7 @@ class ImageAssetBuildService:
         self._captioner = captioner
         self._ocr = ocr
 
-    def build_from_raw_sources(self, *, index_dir: Path | None = None) -> IndexingRun:
+    def build_from_ingestion_sources(self, *, index_dir: Path | None = None) -> IndexingRun:
         target_index = (
             _ImageSearchIndex(index_dir=index_dir / "image_search", embedder=self._embedder, config=self._config)
             if index_dir is not None
@@ -582,11 +582,11 @@ class ImageAssetBuildService:
 
     def _scan_candidates(self) -> list[_ImageSourceCandidate]:
         candidates: list[_ImageSourceCandidate] = []
-        candidates.extend(_scan_discord_images(self._raw_dir))
-        candidates.extend(_scan_google_drive_images(self._raw_dir))
-        candidates.extend(_scan_x_images(self._raw_dir))
-        candidates.extend(_scan_article_images(self._raw_dir / "hatenablog", source_kind="hatena"))
-        candidates.extend(_scan_article_images(self._raw_dir / "crafters_colony", source_kind="crafters_colony"))
+        candidates.extend(_scan_discord_images(self._ingestion_dir))
+        candidates.extend(_scan_google_drive_images(self._ingestion_dir))
+        candidates.extend(_scan_x_images(self._ingestion_dir))
+        candidates.extend(_scan_article_images(self._ingestion_dir / "hatenablog", source_kind="hatena"))
+        candidates.extend(_scan_article_images(self._ingestion_dir / "crafters_colony", source_kind="crafters_colony"))
         return _dedupe_candidates(candidates)
 
 
@@ -872,9 +872,9 @@ class _ImageSearchIndex:
         return [asset_id for asset_id in out if asset_id]
 
 
-def _scan_discord_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+def _scan_discord_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
     candidates: list[_ImageSourceCandidate] = []
-    root = raw_dir / "messages"
+    root = ingestion_dir / "messages"
     if not root.exists():
         return candidates
     for path in root.glob("**/*.jsonl"):
@@ -932,9 +932,9 @@ def _scan_discord_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
     return candidates
 
 
-def _scan_google_drive_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+def _scan_google_drive_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
     candidates: list[_ImageSourceCandidate] = []
-    root = raw_dir / "images" / "google_drive"
+    root = ingestion_dir / "images" / "google_drive"
     if root.exists():
         for path in root.glob("**/*"):
             if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
@@ -961,7 +961,7 @@ def _scan_google_drive_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
                     metadata={"source_type": "docs", "source_kind": "google_drive", **metadata},
                 )
             )
-    for path in (raw_dir / "docs").glob("*.md") if (raw_dir / "docs").exists() else []:
+    for path in (ingestion_dir / "docs").glob("*.md") if (ingestion_dir / "docs").exists() else []:
         text = path.read_text(encoding="utf-8", errors="replace")
         metadata = _read_sidecar(path)
         for index, image_ref, context in _extract_image_refs(text, base_url=str(metadata.get("drive_url") or "")):
@@ -983,9 +983,9 @@ def _scan_google_drive_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
     return candidates
 
 
-def _scan_x_images(raw_dir: Path) -> list[_ImageSourceCandidate]:
+def _scan_x_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
     candidates: list[_ImageSourceCandidate] = []
-    path = raw_dir / "x" / "posts.jsonl"
+    path = ingestion_dir / "x" / "posts.jsonl"
     if not path.exists():
         return candidates
     for payload in _read_jsonl(path):

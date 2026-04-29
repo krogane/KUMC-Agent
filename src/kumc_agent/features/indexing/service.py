@@ -61,7 +61,7 @@ class IndexingService:
         embedder: EmbedderPort,
         faiss_index: FaissLikeIndex,
         bm25_index: SudachiBM25Retriever,
-        raw_dir: Path,
+        ingestion_dir: Path,
         app_config: RuntimeConfig,
         summary_llm: LLMPort | None = None,
         minecraft_wiki_summary_llm: LLMPort | None = None,
@@ -72,7 +72,7 @@ class IndexingService:
         self._embedder = embedder
         self._faiss_index = faiss_index
         self._bm25_index = bm25_index
-        self._raw_dir = raw_dir
+        self._ingestion_dir = ingestion_dir
         self._runtime = app_config
         self._summary_llm = summary_llm
         self._minecraft_wiki_summary_llm = minecraft_wiki_summary_llm
@@ -83,15 +83,15 @@ class IndexingService:
         self._second_rec_dir = self._chunks_root / "second_rec_chunk"
         self._sparse_second_rec_dir = self._chunks_root / "sparse_second_rec_chunk"
         self._summary_dir = self._chunks_root / "summary_chunk"
-        self._raw_docs_dir = self._raw_dir / "docs"
-        self._raw_sheets_dir = self._raw_dir / "sheets"
-        self._raw_messages_dir = self._raw_dir / "messages"
-        self._raw_x_dir = self._raw_dir / "x"
-        self._raw_vc_dir = self._raw_dir / "vc"
-        self._raw_hatenablog_dir = self._raw_dir / "hatenablog"
-        self._raw_crafters_colony_dir = self._raw_dir / "crafters_colony"
-        self._raw_notion_dir = self._raw_dir / "notion"
-        self._raw_minecraft_wiki_dir = self._raw_dir / "minecraft_wiki"
+        self._ingestion_docs_dir = self._ingestion_dir / "docs"
+        self._ingestion_sheets_dir = self._ingestion_dir / "sheets"
+        self._ingestion_messages_dir = self._ingestion_dir / "messages"
+        self._ingestion_x_dir = self._ingestion_dir / "x"
+        self._ingestion_vc_dir = self._ingestion_dir / "vc"
+        self._ingestion_hatenablog_dir = self._ingestion_dir / "hatenablog"
+        self._ingestion_crafters_colony_dir = self._ingestion_dir / "crafters_colony"
+        self._ingestion_notion_dir = self._ingestion_dir / "notion"
+        self._ingestion_minecraft_wiki_dir = self._ingestion_dir / "minecraft_wiki"
 
         self._first_rec_docs_dir = self._first_rec_dir / "docs"
         self._first_rec_sheets_dir = self._first_rec_dir / "sheets"
@@ -165,9 +165,9 @@ class IndexingService:
 
         self._apply_clear_flags(full_rebuild=full_rebuild)
         self._check_cancel(allow_cancel=allow_cancel, cancel_event=cancel_event)
-        self._ensure_raw_source_dirs()
+        self._ensure_ingestion_source_dirs()
 
-        documents = self._parse_documents_from_raw()
+        documents = self._parse_documents_from_ingestion()
         self._storage.save_documents(documents)
 
         legacy_cfg = self._build_legacy_app_config()
@@ -251,19 +251,19 @@ class IndexingService:
         self._build_material_name_keyword_index(legacy_cfg=legacy_cfg)
         stage_results: dict[str, object] = {
             "source_of_chunks": (
-                "ingestion_repository_plus_minecraft_wiki_raw_chunk_pipeline"
+                "ingestion_repository_plus_minecraft_wiki_ingestion_chunk_pipeline"
                 if repository_artifacts is not None
                 else "raw_chunk_pipeline"
             )
         }
         if self._image_asset_builder is not None:
-            build_from_raw_sources = getattr(
+            build_from_ingestion_sources = getattr(
                 self._image_asset_builder,
-                "build_from_raw_sources",
+                "build_from_ingestion_sources",
                 None,
             )
-            if callable(build_from_raw_sources):
-                image_run = build_from_raw_sources(index_dir=self._runtime.app.index_dir)
+            if callable(build_from_ingestion_sources):
+                image_run = build_from_ingestion_sources(index_dir=self._runtime.app.index_dir)
                 stage_results["image"] = getattr(image_run, "__dict__", {"status": "unknown"})
 
         return IndexBuildResult(
@@ -343,8 +343,8 @@ class IndexingService:
     def _apply_clear_flags(self, *, full_rebuild: bool) -> None:
         refresh = self._runtime.indexing.refresh
         clear_all = full_rebuild
-        if clear_all or refresh.clear_raw_data:
-            self._clear_dir_contents(self._raw_dir)
+        if clear_all or refresh.clear_ingestion_source_data:
+            self._clear_ingestion_source_contents()
         if clear_all or refresh.clear_first_recursive_chunk_data:
             self._clear_dir_contents(self._first_rec_dir)
         if clear_all or refresh.clear_second_recursive_chunk_data:
@@ -353,17 +353,17 @@ class IndexingService:
         if clear_all or refresh.clear_summary_chunk_data:
             self._clear_dir_contents(self._summary_dir)
 
-    def _ensure_raw_source_dirs(self) -> None:
+    def _ensure_ingestion_source_dirs(self) -> None:
         for path in (
-            self._raw_docs_dir,
-            self._raw_sheets_dir,
-            self._raw_messages_dir,
-            self._raw_x_dir,
-            self._raw_vc_dir,
-            self._raw_hatenablog_dir,
-            self._raw_crafters_colony_dir,
-            self._raw_notion_dir,
-            self._raw_minecraft_wiki_dir,
+            self._ingestion_docs_dir,
+            self._ingestion_sheets_dir,
+            self._ingestion_messages_dir,
+            self._ingestion_x_dir,
+            self._ingestion_vc_dir,
+            self._ingestion_hatenablog_dir,
+            self._ingestion_crafters_colony_dir,
+            self._ingestion_notion_dir,
+            self._ingestion_minecraft_wiki_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -379,7 +379,7 @@ class IndexingService:
 
         return LegacyAppConfig(
             base_dir=self._runtime.base_dir,
-            raw_data_dir=self._raw_dir,
+            ingestion_data_dir=self._ingestion_dir,
             first_rec_chunk_dir=self._first_rec_dir,
             second_rec_chunk_dir=self._second_rec_dir,
             sparse_second_rec_chunk_dir=self._sparse_second_rec_dir,
@@ -419,11 +419,11 @@ class IndexingService:
             genai_model=providers_llm.gemini_model,
             temperature=providers_llm.temperature,
             max_output_tokens=providers_llm.max_output_tokens,
-            clear_raw_data=refresh.clear_raw_data,
+            clear_ingestion_source_data=refresh.clear_ingestion_source_data,
             clear_first_rec_chunk_data=refresh.clear_first_recursive_chunk_data,
             clear_second_rec_chunk_data=refresh.clear_second_recursive_chunk_data,
             clear_summery_chunk_data=refresh.clear_summary_chunk_data,
-            update_raw_data=refresh.update_raw_data,
+            update_ingestion_source_data=refresh.update_ingestion_source_data,
             update_first_rec_chunk_data=refresh.update_first_recursive_chunk_data,
             update_second_rec_chunk_data=refresh.update_second_recursive_chunk_data,
             update_sparse_second_rec_chunk_data=(
@@ -448,7 +448,7 @@ class IndexingService:
 
         return LegacyAppConfig(
             base_dir=self._runtime.base_dir,
-            raw_data_dir=self._raw_dir,
+            ingestion_data_dir=self._ingestion_dir,
             first_rec_chunk_dir=self._first_rec_dir,
             second_rec_chunk_dir=self._second_rec_dir,
             sparse_second_rec_chunk_dir=self._sparse_second_rec_dir,
@@ -477,11 +477,11 @@ class IndexingService:
             genai_model=providers_llm.gemini_model,
             temperature=providers_llm.temperature,
             max_output_tokens=providers_llm.max_output_tokens,
-            clear_raw_data=refresh.clear_raw_data,
+            clear_ingestion_source_data=refresh.clear_ingestion_source_data,
             clear_first_rec_chunk_data=refresh.clear_first_recursive_chunk_data,
             clear_second_rec_chunk_data=refresh.clear_second_recursive_chunk_data,
             clear_summery_chunk_data=refresh.clear_summary_chunk_data,
-            update_raw_data=refresh.update_raw_data,
+            update_ingestion_source_data=refresh.update_ingestion_source_data,
             update_first_rec_chunk_data=refresh.update_first_recursive_chunk_data,
             update_second_rec_chunk_data=refresh.update_second_recursive_chunk_data,
             update_sparse_second_rec_chunk_data=(
@@ -557,9 +557,9 @@ class IndexingService:
         chunking = self._runtime.indexing.chunking
 
         if self._should_run_stage(stage_name="first_recursive", selected=selected):
-            if self._raw_messages_dir.exists():
+            if self._ingestion_messages_dir.exists():
                 message_chunk_jsonl_dir(
-                    raw_messages_dir=self._raw_messages_dir,
+                    raw_messages_dir=self._ingestion_messages_dir,
                     chunk_dir=self._first_rec_messages_dir,
                     chunk_size=chunking.first_recursive_chunk_size,
                     chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -568,9 +568,9 @@ class IndexingService:
                     update_existing=refresh.update_first_recursive_chunk_data,
                     sync_deleted=refresh.update_first_recursive_chunk_data,
                 )
-            if self._raw_x_dir.exists():
+            if self._ingestion_x_dir.exists():
                 message_chunk_jsonl_dir(
-                    raw_messages_dir=self._raw_x_dir,
+                    raw_messages_dir=self._ingestion_x_dir,
                     chunk_dir=self._first_rec_x_dir,
                     chunk_size=chunking.first_recursive_chunk_size,
                     chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -580,7 +580,7 @@ class IndexingService:
                     sync_deleted=refresh.update_first_recursive_chunk_data,
                 )
             recursive_chunk_dir(
-                raw_data_dir=self._raw_docs_dir,
+                ingestion_data_dir=self._ingestion_docs_dir,
                 chunk_dir=self._first_rec_docs_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -592,7 +592,7 @@ class IndexingService:
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
             recursive_chunk_dir(
-                raw_data_dir=self._raw_sheets_dir,
+                ingestion_data_dir=self._ingestion_sheets_dir,
                 chunk_dir=self._first_rec_sheets_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -605,7 +605,7 @@ class IndexingService:
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
             recursive_chunk_dir(
-                raw_data_dir=self._raw_hatenablog_dir,
+                ingestion_data_dir=self._ingestion_hatenablog_dir,
                 chunk_dir=self._first_rec_hatenablog_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -618,7 +618,7 @@ class IndexingService:
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
             recursive_chunk_dir(
-                raw_data_dir=self._raw_crafters_colony_dir,
+                ingestion_data_dir=self._ingestion_crafters_colony_dir,
                 chunk_dir=self._first_rec_crafters_colony_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -631,7 +631,7 @@ class IndexingService:
                 sync_deleted=refresh.update_first_recursive_chunk_data,
             )
             recursive_chunk_dir(
-                raw_data_dir=self._raw_notion_dir,
+                ingestion_data_dir=self._ingestion_notion_dir,
                 chunk_dir=self._first_rec_notion_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -733,9 +733,9 @@ class IndexingService:
                     update_existing=refresh.update_second_recursive_chunk_data,
                     sync_deleted=refresh.update_second_recursive_chunk_data,
                 )
-            if self._raw_vc_dir.exists():
+            if self._ingestion_vc_dir.exists():
                 recursive_chunk_dir(
-                    raw_data_dir=self._raw_vc_dir,
+                    ingestion_data_dir=self._ingestion_vc_dir,
                     chunk_dir=self._second_rec_vc_dir,
                     chunk_size=chunking.second_recursive_chunk_size,
                     chunk_overlap=chunking.second_recursive_chunk_overlap,
@@ -869,7 +869,7 @@ class IndexingService:
         )
         from kumc_agent.infra.indexing.constants import DOCS_SEPARATORS
 
-        if not self._raw_minecraft_wiki_dir.exists():
+        if not self._ingestion_minecraft_wiki_dir.exists():
             return
 
         refresh = self._runtime.indexing.refresh
@@ -878,7 +878,7 @@ class IndexingService:
 
         if self._should_run_stage(stage_name="first_recursive", selected=selected):
             recursive_chunk_dir(
-                raw_data_dir=self._raw_minecraft_wiki_dir,
+                ingestion_data_dir=self._ingestion_minecraft_wiki_dir,
                 chunk_dir=self._first_rec_minecraft_wiki_dir,
                 chunk_size=chunking.first_recursive_chunk_size,
                 chunk_overlap=chunking.first_recursive_chunk_overlap,
@@ -1504,8 +1504,8 @@ class IndexingService:
                 aliases.extend(self._material_aliases_from_metadata(metadata, source_key))
 
         entries: list[MaterialCatalogEntry] = []
-        raw_dir = self._runtime.app.data_dir / "material_raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
+        material_text_dir = self._runtime.app.data_dir / "material_raw"
+        material_text_dir.mkdir(parents=True, exist_ok=True)
         for (source_type, source_key), row in grouped.items():
             metadata = row.get("metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
@@ -1514,7 +1514,7 @@ class IndexingService:
                 [canonical, source_key, *list(row.get("aliases") or [])]
             )
             material_id = f"{source_type}:{source_key}"
-            raw_path = raw_dir / f"{stable_hash(material_id)[:24]}.txt"
+            raw_path = material_text_dir / f"{stable_hash(material_id)[:24]}.txt"
             chunk_texts = [
                 str(value).strip()
                 for value in row.get("chunks") or []
@@ -1908,7 +1908,7 @@ class IndexingService:
             logger.exception(
                 "Legacy material catalog build failed. Falling back to basic catalog."
             )
-            self._build_material_catalog(documents=self._parse_documents_from_raw())
+            self._build_material_catalog(documents=self._parse_documents_from_ingestion())
 
     def _load_or_build_first_chunks(
         self,
@@ -2253,19 +2253,19 @@ class IndexingService:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _parse_documents_from_raw(self) -> list[Document]:
-        if not self._raw_dir.exists():
+    def _parse_documents_from_ingestion(self) -> list[Document]:
+        if not self._ingestion_dir.exists():
             return []
 
         source_specs: tuple[tuple[Path, set[str], str], ...] = (
-            (self._raw_docs_dir, {".md"}, "docs"),
-            (self._raw_sheets_dir, {".csv"}, "sheets"),
-            (self._raw_messages_dir, {".jsonl"}, "messages"),
-            (self._raw_x_dir, {".jsonl"}, "x_posts"),
-            (self._raw_vc_dir, {".txt"}, "vc_transcript"),
-            (self._raw_hatenablog_dir, {".md"}, "hatenablog"),
-            (self._raw_crafters_colony_dir, {".md"}, "crafters_colony"),
-            (self._raw_notion_dir, {".md"}, "notion"),
+            (self._ingestion_docs_dir, {".md"}, "docs"),
+            (self._ingestion_sheets_dir, {".csv"}, "sheets"),
+            (self._ingestion_messages_dir, {".jsonl"}, "messages"),
+            (self._ingestion_x_dir, {".jsonl"}, "x_posts"),
+            (self._ingestion_vc_dir, {".txt"}, "vc_transcript"),
+            (self._ingestion_hatenablog_dir, {".md"}, "hatenablog"),
+            (self._ingestion_crafters_colony_dir, {".md"}, "crafters_colony"),
+            (self._ingestion_notion_dir, {".md"}, "notion"),
         )
 
         documents: list[Document] = []
@@ -2279,10 +2279,10 @@ class IndexingService:
                     continue
                 if path.suffix.lower() not in extensions:
                     continue
-                text, extracted_meta, updated_at = self._read_raw_document(path)
+                text, extracted_meta, updated_at = self._read_ingestion_document(path)
                 if not text.strip():
                     continue
-                source_name = str(path.relative_to(self._raw_dir)).replace("\\", "/")
+                source_name = str(path.relative_to(self._ingestion_dir)).replace("\\", "/")
                 source_type = str(extracted_meta.get("source_type") or "").strip().lower()
                 if not source_type:
                     source_type = default_source_type
@@ -2306,7 +2306,7 @@ class IndexingService:
         return documents
 
     @staticmethod
-    def _read_raw_document(path: Path) -> tuple[str, dict[str, object], datetime | None]:
+    def _read_ingestion_document(path: Path) -> tuple[str, dict[str, object], datetime | None]:
         sidecar_metadata = IndexingService._read_sidecar_metadata(path)
         file_updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
 
@@ -2432,6 +2432,25 @@ class IndexingService:
             except ValueError:
                 continue
         return None
+
+    def _clear_ingestion_source_contents(self) -> None:
+        for path in (
+            self._ingestion_docs_dir,
+            self._ingestion_sheets_dir,
+            self._ingestion_messages_dir,
+            self._ingestion_x_dir,
+            self._ingestion_vc_dir,
+            self._ingestion_hatenablog_dir,
+            self._ingestion_crafters_colony_dir,
+            self._ingestion_notion_dir,
+            self._ingestion_minecraft_wiki_dir,
+            self._ingestion_dir / "images",
+        ):
+            self._clear_dir_contents(path)
+        try:
+            self._runtime.app.index_documents_path.unlink()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def _clear_dir_contents(target: Path) -> None:
