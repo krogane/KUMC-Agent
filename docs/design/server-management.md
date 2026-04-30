@@ -24,14 +24,16 @@
 - CLI、Discord、HTTP、workflow向けpayload整形
 - 秘密情報、内部IP、ネットワークキー、PIN、解錠手順の出力抑止
 
-対象外は、Minecraft Wiki RAG、通常RAG、サーバー内アプリケーション固有ロジックの詳細である。ただし現行実装ではMinecraftサーバー運用を主対象にしているため、初期実装ではMinecraft向けActionSpecを中心に扱う。
+対象外は、Minecraft Wiki RAG、通常RAG、サーバー内アプリケーション固有ロジックの詳細である。ただし現行実装ではMinecraftサーバー運用を主対象にしているため、現行ActionSpecはMinecraft向け操作を中心に扱う。
 
 ## 3. 現行実装の基準
-現行実装は、Minecraftサーバー管理候補の作成、承認、固定executorによる実行、監査ログ保存、payload sanitizationまでを持つ。汎用サーバー管理へ拡張できる構成だが、初期ActionSpecはMinecraft運用向けに固定する。
+現行実装は、Minecraftサーバー管理候補の作成、承認、固定executorによる実行、監査ログ保存、payload sanitizationまでを持つ。汎用サーバー管理へ拡張できる構成だが、現行ActionSpecはMinecraft運用向けに固定する。
 
-| 項目 | 実装基準 | 本設計で必要な状態 |
+現行のActionSpecは `status`、`docker_ps`、`file_search`、`compose_up`、`compose_restart`、`restart`、`whitelist_update`、`backup_create`、`compose_down` である。設定は `configs/main/server_management.yaml` の `default_server_name`、`docker_ps.container_name_prefixes`、`servers[]`、`execution.*`、`backup.*` と、feature flag `features.risk_flags.minecraft_server_ops` を使う。
+
+| 項目 | 現行実装 | 維持・拡張方針 |
 | --- | --- | --- |
-| 操作対象 | Minecraft supportとして実装 | 汎用サーバー管理として設計し、初期ActionSpecはMinecraft向けにする |
+| 操作対象 | Minecraft supportとして実装 | 汎用サーバー管理へ拡張できるActionSpec構造を維持し、現行ActionSpecはMinecraft向けにする |
 | 権限 | `AccessContext` とserver management access policyでadmin限定 | サーバー管理はadminのみ受付し、非adminには拒否文だけを返す |
 | 計画抽出 | 自然言語は専用LLM Planner、ラベル付き入力はdeterministic parserで抽出 | 専用LLMで複数操作を抽出し、ActionSpecに正規化する。deterministic parserはラベル付き入力とテスト補助に限定する |
 | 任意shell拒否 | registry外operationを拒否 | 入力中のshell断片も候補として直接採用せず、ActionSpecに対応しないものは拒否する |
@@ -94,7 +96,7 @@ admin判定は `AccessContext` の次の情報を使う。
 | `guild_id` | `security.discord_guild_allow_list` と照合する |
 | `role_ids` | Discord roleに基づくadmin権限拡張に使う |
 
-初期実装では `is_admin=True` または `user_id` が `security.maintenance_command_author_ids` に含まれる場合をadminとする。role_idによるadmin判定を入れる場合は、role allow listを `configs/main/security.yaml` 配下に追加する。
+現行実装では `is_admin=True` または `user_id` が `security.maintenance_command_author_ids` に含まれる場合をadminとする。role_idによるadmin判定を入れる場合は、role allow listを `configs/main/security.yaml` 配下に追加する。
 
 ### 5.2 拒否応答
 非adminが操作しようとした場合は、候補作成も一覧表示も行わない。

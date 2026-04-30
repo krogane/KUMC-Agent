@@ -9,6 +9,7 @@ autonomous_agent:
     tasks: 2
     events: 7
   duplicate_suppression_hours: 24
+  # Deprecated: RAG delta extraction now uses workflow_extraction.lookback_days.
   rag_delta_lookback_hours: 24
   access:
     system_user_id: "system"

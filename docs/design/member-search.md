@@ -23,18 +23,20 @@
 
 対象外は、候補者への連絡、担当確定、タスク正本への担当者登録である。担当者登録が必要な場合は、メンバー検索結果を根拠に `member_assignment` などの承認待ち候補を別機能で作成する。
 
-## 3. 現行実装との差分
-現行実装には、メンバー検索の最小限の土台だけが存在する。
+## 3. 現行実装同期状況
+現行実装では、メンバー検索はプロフィール作成、index作成、検索を分けて実装されている。自動インデックス更新または管理操作で `MemberProfileBuildService.rebuild_guild()` を実行し、検索時は `WorkflowService.member_search()` または統合入力受付の `member_search` routeから `MemberSearchService.search()` を呼ぶ。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| ドメインモデル | `MemberProfile` に `display_name`, `discord_user_id`, `roles`, `skills`, `interests`, `past_assignments`, `access_scope`, `metadata` がある | `evidence`, `profile_text`, `profile_version`, `source_fingerprint` などを保持できる |
-| Repository | JSONL/Postgresへ保存し、単純な部分一致で検索する | 条件抽出、権限フィルタ、Dense/Sparse index検索、RRF結果を扱う |
-| workflow | `member_search` が `operations.search_member_profiles()` を呼ぶ | 専用 `MemberSearchService` を呼び、候補理由と根拠を生成する |
-| 権限 | `admin` / `organizer` roleを許可している | 指定Guild内チャットとadmin DMのみ許可する |
-| プロフィール生成 | 未実装 | Discord情報とサークル情報RAGの根拠から生成する |
-| index | 未実装 | FaissLikeIndex、通常Sparse、ステミング転置インデックスを作成する |
-| 回答生成 | profile一覧を整形するだけ | LLMまたはテンプレートで候補理由、スキル、ロール、担当履歴、根拠を非断定表現で返す |
+| 項目 | 現行実装 |
+| --- | --- |
+| ドメインモデル | `MemberProfile` は `display_name`, `discord_user_id`, `roles`, `skills`, `interests`, `past_assignments`, `evidence`, `access_scope`, `metadata` を保持する |
+| Repository | `OperationsRepository` がMemberProfileをJSONL/PostgreSQLへ保存し、`list_member_profiles()` / `save_member_profile()` / fallback検索を提供する |
+| workflow | `WorkflowService.member_search()` は専用serviceがある場合は `MemberSearchService` を呼び、未設定時は権限確認後にrepository検索へdegraded fallbackする |
+| 権限 | `MemberSearchConfig.allowed_guild_ids` と `admin_user_ids` を使い、指定Guild内またはadmin DMだけ許可する。profile個別の `access_scope` も適用する |
+| プロフィール生成 | `DiscordMemberDirectoryConnector` からmember recordを取得し、`AskServiceEvidenceSource` でRAG根拠を集め、`MemberProfileGenerator` がLLMまたはfallback profileを生成する |
+| index | `MemberProfileIndexService` が通常Sparse、ステミングSparse、FaissLikeIndexを `data/index/member_profiles` またはstaging release配下に作る |
+| 検索 | mention、role、表示名、除外条件を `MemberSearchConditions` に抽出し、Dense/Sparse/RRFと条件boostで候補を並べる |
+| 回答生成 | LLM回答が使えない場合もテンプレートで候補理由、ロール、スキル、担当履歴、根拠を返す。担当可否は断定せず、本人または運営確認が必要と明記する |
+| 自動更新 | `AutoIndexUpdateUsecase` は `member_profiles` sourceまたはfull rebuild時にguild単位で再生成し、退会・除外profileをinactiveにする |
 
 `src/kumc_agent/infra/legacy` は参照・依存しない。
 

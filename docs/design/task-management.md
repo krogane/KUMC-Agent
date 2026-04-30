@@ -23,23 +23,24 @@
 
 対象外は、イベント正本、スケジュール正本、外部カレンダー連携そのものの詳細である。ただし、タスクは `related_event_id` によりイベントと関連付けられる。
 
-## 3. 現行実装との差分
-現行実装は、タスク候補作成と承認後の正本登録の最小経路を持つ。
+## 3. 現行実装同期状況
+現行実装では、タスク管理は `WorkflowService`、`TaskExtractionService`、`TaskAccessPolicy`、`DuplicateTaskDetector`、`TaskNotificationPlanner`、`WorkflowRepository` によって、正本、候補、変更候補、承認batch、通知候補までを扱う。統合入力受付からは `task_management` routeとして `task_*` work_typeへ変換される。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| 候補抽出 | `TaskExtractionService` が専用promptで `workflow_extraction.v1` を抽出し、`TaskCandidate` / `TaskChangeCandidate` を作成する | RAGデータ差分・自動登録の抽出は専用LLMが行い、重複検出と既存Task変更候補化も行う |
-| 手動登録 | `task_add` が `TaskCandidate` を作成する | 必要情報を抽出できない場合はユーザーへ質問し、正本登録前に承認を必須にする |
-| 正本登録 | `/approval approve` で `TaskCandidate` を `Task` に昇格する | Discord Componentを含む承認UIから昇格できる |
-| 候補修正 | `/approval edit` で候補のtitle、担当、期限、説明を修正できる | 自然言語修正をComponentから受け付け、差分を明示する |
-| 却下 | `/approval reject` で `status=rejected` にする | まとめ承認時も却下理由を保存する |
-| 表示 | `task_list` はstatusのみ抽出し、Taskとproposed候補を表示する | 期限、担当者、状態、関連イベントで絞り込める |
-| 完了 | `task_done` は対象Taskを即時 `done` にする | 完了確認後に `done` に変更し、必要に応じて承認・監査を通す |
-| 変更・削除 | 正本の変更・削除候補は未実装 | 正本変更前に候補作成と承認を通す |
-| 通知 | 未実装 | 期限通知、期限超過通知、完了確認通知を送る |
-| 権限 | workflow側のadmin限定チェックは未徹底 | 初期実装から候補作成者、担当者、adminの承認操作範囲を分ける |
-| 保存先 | JSONL repositoryとPostgres repositoryがある | production正本は内部DBとし、JSONLはローカル・テスト用に限定する |
-| 承認UI | slash command中心 | Discord Componentで承認、修正、却下を選択できる |
+| 項目 | 現行実装 |
+| --- | --- |
+| 候補抽出 | `TaskExtractionService` が `workflow_extraction.v1` の `new_items` / `change_items` を解釈し、根拠不足やschema不正ではdegradedにして候補保存しない |
+| 手動登録 | `task_add` はtitle、due、assignee、priority、related_event_idを抽出し、Task正本ではなく `TaskCandidate` を作る |
+| 正本登録 | `approval approve` またはbatch承認で `TaskCandidate` を `Task` に昇格する |
+| 候補修正 | approval editで候補のtitle、担当、期限、説明を修正できる |
+| 却下 | approval rejectで `status=rejected` にし、正本へは反映しない |
+| 表示 | `task_list` はTask正本と `status=proposed` の候補を表示し、担当者、期限範囲、関連イベント、優先度の条件も扱う |
+| 完了 | 統合入力受付の完了依頼は `task_update` に変換し `TaskChangeCandidate(operation="update", after.status="done")` を作る。明示的なworkflow `task_done` は権限確認後に正本を更新し、承認履歴を保存する |
+| 変更・削除 | `task_update` / `task_delete` は正本を直接変えず `TaskChangeCandidate` を作り、承認後に反映する |
+| 通知 | `task_notify_due` は期限通知対象を選び、sender未設定時は送信せず通知候補とmetadataを返す。統合入力受付では直接送信扱いにせず候補化する |
+| 権限 | `TaskAccessPolicy` が候補作成、一覧、承認を制御する。admin/運営以外は正本反映できない |
+| 差分抽出 | auto-indexから `task_extract_from_delta` を呼び、`workflow_extraction.lookback_days` の抽出窓内active chunkだけを対象にする |
+| 保存先 | productionはPostgreSQL、未設定時はJSONL repositoryを使う。JSONLはローカル・テストfallbackである |
+| 外部連携 | `WorkResponse` と `IntegratedInputResponse` は主結果と診断metadataを分け、raw contextやsecretをトップレベルに出さない |
 
 `src/kumc_agent/infra/legacy` は参照・依存しない。
 
@@ -165,6 +166,8 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 
 現行実装では `task_extract` と `meeting_minutes_draft` が候補抽出を行う。`task_extract` は `instruction`、`target`、RAG検索結果を結合し、`workflow_extraction.v1` 形式の `new_items` から `TaskCandidate`、`change_items` から `TaskChangeCandidate` を作成する。
 
+自動インデックス更新からのタスク差分抽出では、`workflow_extraction.lookback_days` を共通設定として使い、抽出開始時刻から rolling 24h × n 以内のtimestampを持つactive chunkだけを専用LLMへ渡す。判定対象のmetadata keyは `updated_at`、`source_updated_at`、`created_at`、`source_created_at`、`published_at`、`message_timestamp`、`hatenablog_updated_at`、`hatenablog_created_at`、`indexed_at`、`ingested_at` とし、時刻が無いchunkは抽出対象外にする。抽出metadataには `lookback_days`、`extraction_since`、`extraction_at`、`selected_chunks`、`excluded_older_chunks`、`excluded_missing_timestamp_chunks` を保存する。
+
 ### 7.2 抽出
 タスク自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、タスクらしい記述を `TaskCandidate`、既存Taskの変更・削除を `TaskChangeCandidate` として抽出する。
 
@@ -270,7 +273,7 @@ RAGデータ差分や自律エージェントが既存Taskの変更・削除を�
 - 根拠
 - 重複・競合情報
 
-現行実装に正本変更候補モデルはないため、実装時は `TaskChangeCandidate` を追加するか、汎用 `WorkflowCandidate(candidate_type="task")` を明確なschemaで利用する。
+現行実装では `TaskChangeCandidate` を正本変更候補モデルとして持つ。`task_update` / `task_delete` と統合入力経由の完了依頼はこの候補を保存し、承認後に正本へ反映する。
 
 ### 10.2 手動変更・削除
 手動変更・削除も、正本を変更する前に承認を得る。
@@ -346,10 +349,10 @@ TaskCandidate ID / title / 候補担当 / 候補期限 / status / confidence / �
 - audit log
 - 操作履歴
 
-現行 `task_done` は即時 `done` にするため、Discord Componentによる確認UIと権限確認を追加する。
+明示的なworkflow `task_done` は即時 `done` にするため、自然言語の統合入力では `task_update` の変更候補へ変換する。Discord Componentで完了確認を扱う場合も、確認UIと権限確認を通して候補または承認済み操作として扱う。
 
 ## 13. 権限管理
-タスク管理の権限は、初期実装から候補作成者、担当者、adminの扱いを分ける。
+タスク管理の権限は、候補作成者、担当者、adminの扱いを分ける。
 
 権限確認は次の入口で必ず行う。
 

@@ -25,7 +25,7 @@
 対象外は、外部カレンダーを正本にする設計、外部カレンダー双方向同期、会計・参加者募集・出欠管理の詳細である。`ScheduleEvent` はイベントに紐づく個別予定を表す補助正本であり、本設計の主対象は `Event` とする。
 
 ## 3. 実装同期状況
-2026-04-28時点で、本設計の主要要件は現行実装へ同期済みである。実装は初期実装ではなく、候補抽出、正本変更候補、承認、Discord通知、auto-index差分連携まで含む。
+2026-04-30時点で、本設計の主要要件は現行実装へ同期済みである。実装は初期実装ではなく、候補抽出、正本変更候補、承認、Discord通知、auto-index差分連携、`workflow_extraction.lookback_days` による抽出窓制限まで含む。
 
 | 項目 | 実装状態 |
 | --- | --- |
@@ -118,7 +118,7 @@ flowchart TD
 ### 5.3 関連タスク
 `kumc-agent.md` ではEventに関連タスクを含める。現行実装では `Event` 側に `related_task_ids` はなく、`Task.related_event_id` から逆引きする。
 
-初期実装では次の方針を採る。
+現行実装では次の方針を採る。
 
 - `Event` 正本には関連タスクを重複保持しない。
 - 表示時、通知時、brief作成時に `Task.related_event_id == Event.id` で関連タスクを取得する。
@@ -205,6 +205,8 @@ JSONL repositoryは最新レコードをID単位で復元するappend-only方式
 - 統合入力受付または自律エージェントの出力
 
 `auto_index_update` のingestion差分処理から `WorkflowService.event_extract_from_delta()` を呼び、変更されたactive chunkと `Citation` を専用LLMへ渡す。差分抽出metadataはタスク抽出と同じ `metadata.workflow_extraction.event` 形式に保存し、互換用に `metadata.event_extraction` も保持する。
+
+イベント差分抽出の入力chunkは `workflow_extraction.lookback_days` で制限する。抽出開始時刻から rolling 24h × n 以内のtimestampを持つactive chunkのみを対象にし、古いchunkと時刻不明chunkはLLMへ渡さない。metadataには `lookback_days`、`extraction_since`、`extraction_at`、`selected_chunks`、`excluded_older_chunks`、`excluded_missing_timestamp_chunks` を保存する。
 
 ### 7.2 抽出
 イベント自動登録の抽出は専用LLMが行う。差分を専用LLMに渡し、`workflow_extraction.v1` 形式の `new_items` から `EventCandidate`、`change_items` から `EventChangeCandidate` を抽出する。
@@ -427,7 +429,7 @@ CLI、HTTP、Discord、workflow runでは、主結果と診断情報を分離す
 - 自動抽出のfallbackとしてルールベース抽出だけで候補作成してはならない。LLM失敗時は診断情報を残して候補作成を止める。
 - 手動登録の補助としてルールベース抽出を使う場合でも、必須情報が不足しているときは候補保存前に質問する。
 - EventとScheduleEventを混同しない。Eventはイベント正本、ScheduleEventはイベントや運用に紐づく個別予定である。
-- 関連タスクは初期実装では `Task.related_event_id` を正とし、Event側に重複保持しない。
+- 関連タスクは `Task.related_event_id` を正とし、Event側に重複保持しない。
 - 削除は物理削除ではなく `canceled` への論理削除を基本にする。
 - 通知先チャンネル、承認間隔、通知n日前などのパラメータは `configs` 配下に保存する。
 

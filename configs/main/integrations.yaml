@@ -28,6 +28,7 @@ integrations:
     api_token: ""
     database_ids: []
     page_ids: []
+    default_visibility: "public"
   minecraft_wiki:
     page_titles: []
     api_url: "https://ja.minecraft.wiki/api.php"

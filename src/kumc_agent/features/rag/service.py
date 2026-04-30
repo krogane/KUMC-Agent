@@ -98,23 +98,35 @@ class RagService:
         if not cleaned_query:
             return Answer(text="", route="none", metadata={"reason": "empty_query"})
 
-        routing_history: Sequence[ChatHistoryEntry] | None
-        if routing_history_override is not None:
-            routing_history = list(routing_history_override)
-        elif disable_history:
-            routing_history = []
-        else:
-            routing_history = self._history_for_prompt(
-                limit=self._config.prompt_default_turns,
-                include_sources=False,
-                history_scope=history_scope,
+        normalized_route_override = str(route_override or "").strip().lower()
+        if normalized_route_override in {"no_rag", "norag"}:
+            decision = RoutingDecision(
+                target_model="no_rag",
+                recency_mode="off",
+                material_names=[],
+                include_capabilities_info=False,
+                use_additional_memory=False,
+                fast_mode=False,
+                additional_queries=[],
             )
-        decision = self._router.route(
-            cleaned_query,
-            question_author=question_author,
-            history=routing_history,
-        )
-        if str(route_override or "").strip().lower() in {
+        else:
+            routing_history: Sequence[ChatHistoryEntry] | None
+            if routing_history_override is not None:
+                routing_history = list(routing_history_override)
+            elif disable_history:
+                routing_history = []
+            else:
+                routing_history = self._history_for_prompt(
+                    limit=self._config.prompt_default_turns,
+                    include_sources=False,
+                    history_scope=history_scope,
+                )
+            decision = self._router.route(
+                cleaned_query,
+                question_author=question_author,
+                history=routing_history,
+            )
+        if normalized_route_override in {
             "minecraft_wiki",
             "minecraft_wiki_rag",
         }:
@@ -139,7 +151,15 @@ class RagService:
         effective_fast_mode = bool(force_fast_mode or decision.fast_mode)
         if effective_fast_mode and (decision.material_names or decision.additional_queries):
             decision = replace(decision, material_names=[], additional_queries=[])
-        if decision.target_model == "minecraft_wiki":
+        if decision.target_model == "no_rag":
+            decision = replace(
+                decision,
+                material_names=[],
+                additional_queries=[],
+                recency_mode="off",
+                use_additional_memory=False,
+            )
+        elif decision.target_model == "minecraft_wiki":
             decision = replace(
                 decision,
                 material_names=[],
@@ -162,6 +182,17 @@ class RagService:
                 ),
                 include_sources=False,
                 history_scope=history_scope,
+            )
+
+        if decision.target_model == "no_rag":
+            return self._answer_no_rag(
+                query=cleaned_query,
+                decision=decision,
+                generation_history=generation_history,
+                effective_fast_mode=effective_fast_mode,
+                history_scope=history_scope,
+                disable_history=disable_history,
+                extra_mode_instruction=extra_mode_instruction,
             )
 
         if decision.target_model == "minecraft_wiki":
@@ -215,29 +246,15 @@ class RagService:
         chunks = self._filter_chunks_by_access(chunks, access_context=access_context)
 
         if not chunks:
-            no_rag_generation = self._resolve_generation_settings(
-                target_model="no_rag",
-            )
-            answer = self._generation.generate_no_rag(
+            return self._answer_no_rag(
                 query=cleaned_query,
-                history=generation_history,
-                provider=no_rag_generation.provider,
-                include_capabilities_info=decision.include_capabilities_info,
-                temperature=no_rag_generation.temperature,
-                max_output_tokens=no_rag_generation.max_output_tokens,
-                answer_prompt_name=no_rag_generation.prompt_name,
-                extra_mode_instruction=extra_mode_instruction,
-                json_max_retries=self._config.answer_json_max_retries,
-            )
-            answer = self._apply_answer_filter(query=cleaned_query, answer=answer)
-            return self._finalize_answer(
-                query=cleaned_query,
-                answer=answer,
-                routing_decision=decision,
-                query_synthesis=synthesis,
-                force_fast_mode=effective_fast_mode,
+                decision=decision,
+                generation_history=generation_history,
+                effective_fast_mode=effective_fast_mode,
                 history_scope=history_scope,
                 disable_history=disable_history,
+                extra_mode_instruction=extra_mode_instruction,
+                query_synthesis=synthesis,
             )
 
         rag_generation = self._resolve_generation_settings(
@@ -262,6 +279,42 @@ class RagService:
         answer = self._apply_answer_filter(query=cleaned_query, answer=answer)
         return self._finalize_answer(
             query=cleaned_query,
+            answer=answer,
+            routing_decision=decision,
+            query_synthesis=synthesis,
+            force_fast_mode=effective_fast_mode,
+            history_scope=history_scope,
+            disable_history=disable_history,
+        )
+
+    def _answer_no_rag(
+        self,
+        *,
+        query: str,
+        decision: RoutingDecision,
+        generation_history: Sequence[ChatHistoryEntry] | None,
+        effective_fast_mode: bool,
+        history_scope: str | int | None,
+        disable_history: bool,
+        extra_mode_instruction: str | None,
+        query_synthesis: QuerySynthesisResult | None = None,
+    ) -> Answer:
+        synthesis = query_synthesis or QuerySynthesisResult(query, used=False, fallback=False)
+        no_rag_generation = self._resolve_generation_settings(target_model="no_rag")
+        answer = self._generation.generate_no_rag(
+            query=query,
+            history=generation_history,
+            provider=no_rag_generation.provider,
+            include_capabilities_info=decision.include_capabilities_info,
+            temperature=no_rag_generation.temperature,
+            max_output_tokens=no_rag_generation.max_output_tokens,
+            answer_prompt_name=no_rag_generation.prompt_name,
+            extra_mode_instruction=extra_mode_instruction,
+            json_max_retries=self._config.answer_json_max_retries,
+        )
+        answer = self._apply_answer_filter(query=query, answer=answer)
+        return self._finalize_answer(
+            query=query,
             answer=answer,
             routing_decision=decision,
             query_synthesis=synthesis,

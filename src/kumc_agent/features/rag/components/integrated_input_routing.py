@@ -9,7 +9,9 @@ from typing import Any
 from kumc_agent.domain.models.integrated_input import IntegratedInputDecision, IntegratedRoute
 
 _DEFAULT_PROMPT = "integrated_input_routing"
+_CIRCLE_RAG_SOURCE_FILTERS = {"drive", "discord", "notion", "hatena", "x", "crafters_colony"}
 _VALID_ROUTES = {
+    "no_rag",
     "circle_rag",
     "minecraft_wiki_rag",
     "member_search",
@@ -216,7 +218,7 @@ class IntegratedInputRouter:
         metadata: dict[str, Any],
     ) -> IntegratedInputDecision:
         features = _detect_required_features(text, source)
-        route: IntegratedRoute = "circle_rag"
+        route: IntegratedRoute = "circle_rag" if features else "no_rag"
         intent = _detect_intent(text)
         risk = _risk_for_intent(intent, text)
         if source == "minecraft_wiki":
@@ -243,7 +245,11 @@ class IntegratedInputRouter:
             route=route,
             intent=intent,  # type: ignore[arg-type]
             required_features=features,
-            source_filters=(source,) if source not in {"member", "image", "task", "event"} else tuple(),
+            source_filters=(
+                tuple()
+                if route == "no_rag"
+                else (source,) if source not in {"member", "image", "task", "event"} else tuple()
+            ),
             risk=risk,  # type: ignore[arg-type]
             freshness_required=route in {"task_management", "event_management", "server_management"},
             reason="heuristic",
@@ -291,6 +297,8 @@ class IntegratedRoutingPolicy:
     ) -> IntegratedInputDecision:
         route = decision.route
         risk = decision.risk
+        needs_clarification = decision.needs_clarification
+        clarification_question = decision.clarification_question
         detected = _detect_features_without_default_circle(text)
         required = tuple(dict.fromkeys([*(decision.required_features or tuple()), *detected]))
         if not required:
@@ -314,23 +322,42 @@ class IntegratedRoutingPolicy:
             route = "server_management"
             risk = "approval_required" if _has_server_operation_request(text) else risk
             required = tuple(dict.fromkeys(["server_management", *(item for item in detected if item != "server_management")]))
+        elif source in _CIRCLE_RAG_SOURCE_FILTERS:
+            route = "circle_rag"
+            required = tuple(dict.fromkeys(["circle_rag", *detected]))
         if _has_server_management(text):
             route = "server_management"
             risk = "approval_required" if _has_server_operation_request(text) else risk
             required = _merge_required(required, "server_management")
+        if source == "all" and not required and risk == "read_only" and not needs_clarification:
+            route = "no_rag"
+        if route == "no_rag" and required:
+            route = _route_for_feature(required[0])
         if depth == "deep" and route in {"circle_rag", "minecraft_wiki_rag"} and len(required) == 1:
             route = "comprehensive_agent"
         if len(required) >= 2:
             route = "comprehensive_agent"
+        if route == "no_rag" and risk != "read_only":
+            if risk == "admin_only" and not access_is_admin:
+                route = "deny"
+            else:
+                route = "clarify"
+                needs_clarification = True
+                clarification_question = (
+                    clarification_question
+                    or "副作用や管理操作を含む可能性があるため、対象と実行内容を明示してください。"
+                )
         if risk == "admin_only" and not access_is_admin:
             route = "deny"
-        if decision.needs_clarification:
+        if needs_clarification:
             route = "clarify"
         return replace(
             decision,
             route=route,
             risk=risk,
             required_features=required,
+            needs_clarification=needs_clarification,
+            clarification_question=clarification_question,
             metadata={
                 **decision.metadata,
                 "policy_decision": {
@@ -359,10 +386,10 @@ def _detect_required_features(query: str, source_filter: str = "all") -> tuple[s
         features.append("event_management")
     if source_filter == "server" or _has_server_management(query):
         features.append("server_management")
-    if source_filter in {"all", "drive", "discord", "notion", "hatena", "x", "crafters_colony"}:
+    if source_filter in {"all", *_CIRCLE_RAG_SOURCE_FILTERS}:
         if any(token in query for token in ("資料", "過去", "根拠", "確認", "調べ", "KUMC", "サークル")):
             features.insert(0, "circle_rag")
-    if not features:
+    if not features and source_filter != "all":
         features.append("circle_rag")
     return tuple(dict.fromkeys(features))
 
@@ -433,3 +460,19 @@ def _has_candidate_side_effect_request(text: str) -> bool:
 
 def _merge_required(required: tuple[str, ...], feature: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*required, feature]))
+
+
+def _route_for_feature(feature: str) -> IntegratedRoute:
+    if feature in {"minecraft_wiki", "minecraft_wiki_rag"}:
+        return "minecraft_wiki_rag"
+    if feature == "member_search":
+        return "member_search"
+    if feature == "image_search":
+        return "image_search"
+    if feature == "task_management":
+        return "task_management"
+    if feature == "event_management":
+        return "event_management"
+    if feature == "server_management":
+        return "server_management"
+    return "circle_rag"

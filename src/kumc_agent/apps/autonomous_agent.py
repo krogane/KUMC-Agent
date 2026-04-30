@@ -73,6 +73,7 @@ def build_autonomous_agent_app_context(*, base_dir: Path | None = None) -> Auton
         config=SnapshotCollectorConfig(
             task_lookahead_days=cfg.lookahead_days.tasks,
             event_lookahead_days=cfg.lookahead_days.events,
+            rag_delta_lookback_days=foundation.config.workflow_extraction.lookback_days,
             rag_delta_lookback_hours=cfg.rag_delta_lookback_hours,
             recent_run_limit=20,
         ),

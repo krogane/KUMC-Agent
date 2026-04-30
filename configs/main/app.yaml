@@ -1,6 +1,5 @@
 app:
   command_prefix: "/ai"
-  index_command_prefix: "/ai build-index"
   max_input_characters: 1024
   log_level: "INFO"
   data_dir: "data"

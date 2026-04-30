@@ -111,6 +111,7 @@ class AutonomousIntegratedInputAdapter:
                     metadata={
                         "autonomous_query_id": query.id,
                         "side_effect_boundary": "candidate_only",
+                        "autonomous_query_metadata": dict(query.metadata or {}),
                     },
                 )
             )
@@ -141,7 +142,12 @@ class AutonomousIntegratedInputAdapter:
                 WorkRequest(
                     work_type=work_type,
                     instruction=query.query,
+                    target="\n".join(query.target_refs),
                     access=access,
+                    metadata={
+                        "autonomous_query_id": query.id,
+                        "autonomous_query_metadata": dict(query.metadata or {}),
+                    },
                 )
             )
         except Exception as exc:

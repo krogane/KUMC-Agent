@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import sys
 import tempfile
@@ -18,7 +18,7 @@ if str(SRC) not in sys.path:
 
 from kumc_agent.domain.models.chunk import Chunk
 from kumc_agent.domain.models.operations import IndexingRun
-from kumc_agent.domain.models.source import AccessScope, SourceRawItem
+from kumc_agent.domain.models.source import AccessScope, NormalizedDocument, SourceRawItem
 from kumc_agent.features.indexing.change_detection import SourceItemState, detect_source_change
 from kumc_agent.features.indexing.lock import FileIndexingLock
 from kumc_agent.features.indexing.paths import resolve_current_index_dir
@@ -238,6 +238,7 @@ def _config(root: Path):
             rollback_keep_snapshots=2,
         ),
         event_management=SimpleNamespace(auto_extract_after_index_update=True),
+        workflow_extraction=SimpleNamespace(lookback_days=1),
         indexing=SimpleNamespace(
             embedding_cache=SimpleNamespace(compact_after_publish=True),
         ),
@@ -390,6 +391,7 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 ),
             ).execute(AutoIndexUpdateRequest(trigger="manual"))
             self.assertEqual(result.status, "succeeded")
+            self.assertNotIn("running", [run.status for run in operations.runs])
             self.assertTrue((resolve_current_index_dir(config.app.index_dir) / "dense_chunks.jsonl").exists())
             self.assertEqual(operations.runs[-1].metadata["source_results"][0]["changed"], 1)
             self.assertEqual(build.compacted, [("cache-key-1",)])
@@ -452,6 +454,7 @@ class AutoIndexUpdateTests(unittest.TestCase):
                             "source_kind": "discord",
                             "external_id": "message-1",
                             "source_title": "告知",
+                            "updated_at": datetime.now(UTC).isoformat(),
                         },
                     )
                 ]
@@ -501,7 +504,11 @@ class AutoIndexUpdateTests(unittest.TestCase):
                         document_id="doc-1",
                         text="5月5日に新歓会を部室で開催します。新歓資料を作成します。",
                         index=0,
-                        metadata={"source_item_id": "source-1", "source_kind": "discord"},
+                        metadata={
+                            "source_item_id": "source-1",
+                            "source_kind": "discord",
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        },
                     )
                 ]
             )
@@ -538,6 +545,150 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 "workflow_extraction.v1",
             )
             self.assertEqual(extraction["event"]["candidate_count"], 1)
+
+    def test_auto_update_filters_workflow_extraction_to_recent_timestamped_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.task_management = SimpleNamespace(auto_extract_after_index_update=True)
+            operations = _Operations()
+            task_extractor = _TaskDeltaExtractor()
+            event_extractor = _EventDeltaExtractor()
+            now = datetime.now(UTC)
+            old = now - timedelta(days=2)
+            chunk_source = _EventDeltaChunkSource(
+                [
+                    Chunk(
+                        id="chunk-recent",
+                        document_id="doc-recent",
+                        text="最近の新歓会を開催します。最近の資料を作ります。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-recent",
+                            "source_kind": "discord",
+                            "updated_at": now.isoformat(),
+                        },
+                    ),
+                    Chunk(
+                        id="chunk-old",
+                        document_id="doc-old",
+                        text="古いイベントを開催します。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-old",
+                            "source_kind": "discord",
+                            "updated_at": old.isoformat(),
+                        },
+                    ),
+                    Chunk(
+                        id="chunk-missing-time",
+                        document_id="doc-missing-time",
+                        text="時刻不明のイベントを開催します。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-missing",
+                            "source_kind": "discord",
+                        },
+                    ),
+                ]
+            )
+
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=_Build(),
+                operations=operations,
+                ingestion_service=_Ingestion(
+                    IngestionResult(
+                        source_kind="discord",
+                        seen=3,
+                        changed=3,
+                        skipped=0,
+                        deleted=0,
+                        documents=3,
+                        chunks=3,
+                        secret_findings=0,
+                    )
+                ),
+                task_delta_extractor=task_extractor,
+                event_delta_extractor=event_extractor,
+                event_delta_chunk_source=chunk_source,
+            ).execute(AutoIndexUpdateRequest(trigger="manual"))
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(len(task_extractor.calls), 1)
+            self.assertEqual(len(event_extractor.calls), 1)
+            self.assertIn("最近の新歓会", task_extractor.calls[0]["text"])
+            self.assertNotIn("古いイベント", task_extractor.calls[0]["text"])
+            self.assertNotIn("時刻不明", task_extractor.calls[0]["text"])
+            self.assertEqual(task_extractor.calls[0]["evidence"][0].chunk_id, "chunk-recent")
+            extraction = operations.runs[-1].metadata["workflow_extraction"]["task"]
+            self.assertEqual(extraction["lookback_days"], 1)
+            self.assertEqual(extraction["selected_chunks"], 1)
+            self.assertEqual(extraction["excluded_older_chunks"], 1)
+            self.assertEqual(extraction["excluded_missing_timestamp_chunks"], 1)
+            self.assertEqual(extraction["metadata"]["selected_chunks"], 1)
+
+    def test_auto_update_skips_workflow_extraction_when_recent_chunks_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.task_management = SimpleNamespace(auto_extract_after_index_update=True)
+            operations = _Operations()
+            task_extractor = _TaskDeltaExtractor()
+            event_extractor = _EventDeltaExtractor()
+            old = datetime.now(UTC) - timedelta(days=2)
+            chunk_source = _EventDeltaChunkSource(
+                [
+                    Chunk(
+                        id="chunk-old",
+                        document_id="doc-old",
+                        text="古い資料です。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-old",
+                            "source_kind": "discord",
+                            "updated_at": old.isoformat(),
+                        },
+                    ),
+                    Chunk(
+                        id="chunk-missing-time",
+                        document_id="doc-missing-time",
+                        text="時刻不明の資料です。",
+                        index=0,
+                        metadata={"source_item_id": "source-missing", "source_kind": "discord"},
+                    ),
+                ]
+            )
+
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=_Build(),
+                operations=operations,
+                ingestion_service=_Ingestion(
+                    IngestionResult(
+                        source_kind="discord",
+                        seen=2,
+                        changed=2,
+                        skipped=0,
+                        deleted=0,
+                        documents=2,
+                        chunks=2,
+                        secret_findings=0,
+                    )
+                ),
+                task_delta_extractor=task_extractor,
+                event_delta_extractor=event_extractor,
+                event_delta_chunk_source=chunk_source,
+            ).execute(AutoIndexUpdateRequest(trigger="manual"))
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(task_extractor.calls, [])
+            self.assertEqual(event_extractor.calls, [])
+            extraction = operations.runs[-1].metadata["workflow_extraction"]
+            self.assertEqual(extraction["task"]["status"], "skipped")
+            self.assertEqual(extraction["task"]["reason"], "no_recent_chunks")
+            self.assertEqual(extraction["task"]["selected_chunks"], 0)
+            self.assertEqual(extraction["task"]["excluded_older_chunks"], 1)
+            self.assertEqual(extraction["task"]["excluded_missing_timestamp_chunks"], 1)
+            self.assertEqual(extraction["event"]["status"], "skipped")
 
     def test_auto_update_refreshes_member_profiles_as_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -587,7 +738,7 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 metadata={"revision": "rev-1"},
                 access_scope=AccessScope(source_acl_hash="acl-1"),
             )
-            repo = FileIngestionRepository(root)
+            repo = FileIngestionRepository(root, auto_compact=False)
             repo.save_item(raw=raw, document=_doc(raw), chunks=[], findings=[], raw_object_key="raw/key")
             state = repo.load_item_states("drive")["file-1"]
             self.assertEqual(state.revision, "rev-1")
@@ -605,7 +756,7 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 metadata={"revision": "rev-1"},
                 access_scope=AccessScope(source_acl_hash="acl-1"),
             )
-            repo = FileIngestionRepository(root)
+            repo = FileIngestionRepository(root, auto_compact=False)
             source_item_id = _source_item_id(raw)
             repo.save_item(
                 raw=raw,
@@ -629,6 +780,245 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertEqual(len(repo.load_active_chunks()), 1)
             repo.mark_deleted(source_kind="drive", external_id="file-1")
             self.assertEqual(repo.load_active_chunks(), [])
+
+    def test_file_ingestion_repository_compacts_append_only_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = FileIngestionRepository(root, auto_compact=False)
+            raw_old = SourceRawItem(
+                source_kind="crafters_colony",
+                external_id="12345",
+                title="Old",
+                text="old body",
+                checksum="old-checksum",
+                metadata={
+                    "crafters_colony_article_id": "12345",
+                    "crafters_colony_updated_at": "2024-01-01T00:00:00+09:00",
+                },
+                access_scope=AccessScope(visibility="public"),
+            )
+            raw_new = SourceRawItem(
+                source_kind="crafters_colony",
+                external_id="12345",
+                title="New",
+                text="new body",
+                checksum="new-checksum",
+                metadata={
+                    "crafters_colony_article_id": "12345",
+                    "crafters_colony_updated_at": "2024-01-02T00:00:00+09:00",
+                },
+                access_scope=AccessScope(visibility="public"),
+            )
+            source_item_id = _source_item_id(raw_new)
+            repo.save_item(
+                raw=raw_old,
+                document=_doc_with_id(raw_old, document_id="doc-old"),
+                chunks=[
+                    Chunk(
+                        id="chunk-old",
+                        document_id="doc-old",
+                        text="old body",
+                        index=0,
+                        metadata={
+                            "source_item_id": source_item_id,
+                            "source_kind": "crafters_colony",
+                            "index_status": "active",
+                        },
+                    )
+                ],
+                findings=[],
+                raw_object_key="raw/old",
+            )
+            repo.save_item(
+                raw=raw_new,
+                document=_doc_with_id(raw_new, document_id="doc-new"),
+                chunks=[
+                    Chunk(
+                        id="chunk-new",
+                        document_id="doc-new",
+                        text="new body",
+                        index=0,
+                        metadata={
+                            "source_item_id": source_item_id,
+                            "source_kind": "crafters_colony",
+                            "index_status": "active",
+                        },
+                    )
+                ],
+                findings=[],
+                raw_object_key="raw/new",
+            )
+
+            self.assertEqual(
+                len(
+                    (root / "source_items.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                2,
+            )
+            self.assertEqual(repo.load_active_chunks()[0].text, "new body")
+
+            result = repo.compact_history(source_kinds=("crafters_colony",))
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(result["active_source_items"], 1)
+            self.assertEqual(result["active_documents"], 1)
+            self.assertEqual(result["active_chunks"], 1)
+            self.assertEqual(
+                len(
+                    (root / "source_items.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    (root / "documents.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    (root / "chunks.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            active_chunks = repo.load_active_chunks(source_kinds=("crafters_colony",))
+            self.assertEqual(len(active_chunks), 1)
+            self.assertEqual(active_chunks[0].text, "new body")
+            current_source_items = (root / "current_source_items.jsonl").read_text(
+                encoding="utf-8"
+            )
+            current_documents = (root / "current_documents.jsonl").read_text(
+                encoding="utf-8"
+            )
+            quality_report = json.loads(
+                (root / "ingestion_quality_report.json").read_text(encoding="utf-8")
+            )
+            document_payload = json.loads(current_documents.splitlines()[0])
+            self.assertEqual(len(current_source_items.splitlines()), 1)
+            self.assertEqual(document_payload["source_kind"], "crafters_colony")
+            self.assertEqual(document_payload["source_type"], "crafters_colony")
+            before_source_items = quality_report["before_compaction"]["files"][
+                "source_items.jsonl"
+            ]
+            self.assertEqual(before_source_items["duplicate_rows"], 1)
+
+    def test_file_ingestion_repository_auto_compacts_after_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = FileIngestionRepository(root)
+            raw_old = SourceRawItem(
+                source_kind="hatenablog",
+                external_id="entry-1",
+                title="Old",
+                text="old body",
+                checksum="old-checksum",
+                metadata={"hatenablog_entry_id": "entry-1"},
+                access_scope=AccessScope(visibility="public"),
+            )
+            raw_new = SourceRawItem(
+                source_kind="hatenablog",
+                external_id="entry-1",
+                title="New",
+                text="new body",
+                checksum="new-checksum",
+                metadata={"hatenablog_entry_id": "entry-1"},
+                access_scope=AccessScope(visibility="public"),
+            )
+            source_item_id = _source_item_id(raw_new)
+            repo.save_item(
+                raw=raw_old,
+                document=_doc_with_id(raw_old, document_id="doc-old"),
+                chunks=[
+                    Chunk(
+                        id="chunk-old",
+                        document_id="doc-old",
+                        text="old body",
+                        index=0,
+                        metadata={
+                            "source_item_id": source_item_id,
+                            "source_kind": "hatenablog",
+                            "source_type": "hatenablog",
+                            "index_status": "active",
+                            "access_scope": {"visibility": "public"},
+                        },
+                    )
+                ],
+                findings=[],
+                raw_object_key="raw/old",
+            )
+            repo.save_item(
+                raw=raw_new,
+                document=_doc_with_id(raw_new, document_id="doc-new"),
+                chunks=[
+                    Chunk(
+                        id="chunk-new",
+                        document_id="doc-new",
+                        text="new body",
+                        index=0,
+                        metadata={
+                            "source_item_id": source_item_id,
+                            "source_kind": "hatenablog",
+                            "source_type": "hatenablog",
+                            "index_status": "active",
+                            "access_scope": {"visibility": "public"},
+                        },
+                    )
+                ],
+                findings=[],
+                raw_object_key="raw/new",
+            )
+
+            self.assertEqual(
+                len(
+                    (root / "source_items.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    (root / "documents.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    (root / "chunks.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            self.assertEqual(
+                repo.load_active_chunks(source_kinds=("hatenablog",))[0].text,
+                "new body",
+            )
+            self.assertEqual(
+                len(
+                    (root / "current_chunk_acl_entries.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ),
+                1,
+            )
+            quality_report = json.loads(
+                (root / "ingestion_quality_report.json").read_text(encoding="utf-8")
+            )
+            source_items_before = quality_report["before_compaction"]["files"][
+                "source_items.jsonl"
+            ]["by_source"]["hatenablog"]
+            self.assertEqual(source_items_before["duplicate_rows"], 1)
 
     def test_task_event_index_includes_only_canonical_active_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -655,6 +1045,23 @@ def _doc(raw: SourceRawItem):
 
     return NormalizedDocument(
         id="doc-1",
+        source_item_id=_source_item_id(raw),
+        source_kind=raw.source_kind,
+        external_id=raw.external_id,
+        version=1,
+        title=raw.title,
+        normalized_text=raw.text,
+        normalized_format="markdown",
+        language="ja",
+        access_scope=raw.access_scope,
+        checksum=raw.checksum,
+        metadata=raw.metadata,
+    )
+
+
+def _doc_with_id(raw: SourceRawItem, *, document_id: str) -> NormalizedDocument:
+    return NormalizedDocument(
+        id=document_id,
         source_item_id=_source_item_id(raw),
         source_kind=raw.source_kind,
         external_id=raw.external_id,

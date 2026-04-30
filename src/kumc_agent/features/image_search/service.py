@@ -631,11 +631,11 @@ class ImageAssetBuildService:
         )
         refs = list(dict.fromkeys([ref, *fallback_refs]))
         metadata: dict[str, Any] = {"original_image_ref": ref}
-        if any(_is_http_url(item) for item in refs):
-            errors: list[dict[str, str]] = []
-            for image_ref in refs:
-                if not _is_http_url(image_ref):
-                    continue
+        errors: list[dict[str, str]] = []
+        for image_ref in refs:
+            if not image_ref:
+                continue
+            if _is_http_url(image_ref):
                 downloaded = self._download_image_ref(
                     image_ref=image_ref,
                     source_kind=candidate.source_kind,
@@ -657,15 +657,22 @@ class ImageAssetBuildService:
                 if errors:
                     metadata["download_attempt_errors"] = errors
                 return path, content_hash, metadata
-            logger.warning("Failed to download image refs %s", refs)
-            metadata.update({"download_status": "failed", "download_attempt_errors": errors})
-            return None, stable_hash(ref), metadata
-        path = Path(ref)
-        if path.exists():
-            data = path.read_bytes()
-            metadata.update({"download_status": "local", "downloaded_image_path": str(path)})
-            return path, stable_hash(data.hex()), metadata
-        metadata.update({"download_status": "missing"})
+            path = Path(image_ref)
+            if path.exists():
+                data = path.read_bytes()
+                metadata.update(
+                    {
+                        "download_status": "local",
+                        "downloaded_image_path": str(path),
+                    }
+                )
+                if image_ref != ref:
+                    metadata["download_fallback_used"] = True
+                if errors:
+                    metadata["download_attempt_errors"] = errors
+                return path, stable_hash(data.hex()), metadata
+            errors.append({"ref": image_ref, "error": "missing"})
+        metadata.update({"download_status": "missing", "download_attempt_errors": errors})
         return None, stable_hash(ref), metadata
 
     def _download_image_ref(self, *, image_ref: str, source_kind: str) -> tuple[bytes, Path] | None:
@@ -1101,16 +1108,14 @@ def _scan_x_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
         record = dict(payload.get("record") or payload)
         text = str(record.get("text") or payload.get("text") or "")
         metadata = dict(record.get("metadata") or payload.get("metadata") or {})
-        media_urls = metadata.get("x_media_urls") or record.get("media_urls") or []
-        if isinstance(media_urls, str):
-            media_urls = [media_urls]
-        if not isinstance(media_urls, list):
-            continue
         post_id = str(metadata.get("x_post_id") or payload.get("id") or "")
-        for index, url in enumerate(media_urls):
-            image_ref = str(url).strip()
-            if not _looks_like_image(image_ref):
-                continue
+        media_items = _x_image_media_items(
+            ingestion_dir=ingestion_dir,
+            metadata=metadata,
+            record=record,
+        )
+        for index, media_item in enumerate(media_items):
+            image_ref = str(media_item.get("image_ref") or "").strip()
             candidates.append(
                 _ImageSourceCandidate(
                     source_kind="x",
@@ -1123,10 +1128,79 @@ def _scan_x_images(ingestion_dir: Path) -> list[_ImageSourceCandidate]:
                     surrounding_text=text,
                     image_index=index,
                     access_scope={"visibility": "public"},
-                    metadata={"source_type": "x_posts", "source_kind": "x", **metadata},
+                    metadata={
+                        "source_type": "x_posts",
+                        "source_kind": "x",
+                        **metadata,
+                        **{
+                            key: value
+                            for key, value in media_item.items()
+                            if key != "image_ref"
+                        },
+                    },
                 )
             )
     return candidates
+
+
+def _x_image_media_items(
+    *,
+    ingestion_dir: Path,
+    metadata: dict[str, Any],
+    record: dict[str, Any],
+) -> list[dict[str, Any]]:
+    media = metadata.get("x_media")
+    if isinstance(media, list):
+        items: list[dict[str, Any]] = []
+        for entry in media:
+            if not isinstance(entry, dict):
+                continue
+            media_type = str(entry.get("type") or "").strip().lower()
+            local_relative_path = str(entry.get("local_relative_path") or "").strip()
+            local_path = (
+                ingestion_dir / "x" / local_relative_path
+                if local_relative_path
+                else None
+            )
+            remote_url = str(entry.get("remote_url") or "").strip()
+            thumbnail_remote_url = str(entry.get("thumbnail_remote_url") or "").strip()
+            fallback_refs = [
+                value
+                for value in (remote_url, thumbnail_remote_url)
+                if value and _looks_like_image(value)
+            ]
+            if (
+                local_path is not None
+                and local_path.exists()
+                and _looks_like_image(str(local_path))
+            ):
+                image_ref = str(local_path)
+            else:
+                image_ref = next((value for value in fallback_refs if value), "")
+            if not image_ref:
+                continue
+            item = {
+                "image_ref": image_ref,
+                "fallback_image_refs": fallback_refs,
+                "x_media_type": media_type,
+                "x_media_remote_url": remote_url,
+                "x_media_thumbnail_remote_url": thumbnail_remote_url,
+                "x_media_local_relative_path": local_relative_path,
+                "x_media_content_hash": str(entry.get("content_hash") or ""),
+            }
+            items.append(item)
+        return items
+
+    media_urls = metadata.get("x_media_urls") or record.get("media_urls") or []
+    if isinstance(media_urls, str):
+        media_urls = [media_urls]
+    if not isinstance(media_urls, list):
+        return []
+    return [
+        {"image_ref": image_ref}
+        for image_ref in (str(url).strip() for url in media_urls)
+        if image_ref and _looks_like_image(image_ref)
+    ]
 
 
 def _scan_article_images(root: Path, *, source_kind: str) -> list[_ImageSourceCandidate]:

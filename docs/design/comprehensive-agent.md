@@ -5,7 +5,7 @@
 
 本機能は、検索・候補作成・承認申請を統合する。タスク、イベント、サーバー操作など副作用が必要な依頼については、直接実行せず、承認待ち候補として出力する。
 
-本設計は `docs/design/kumc-agent.md` の「10. 総合エージェント」を上位仕様とする。詳細部分は現行実装の `domain.models.agentic.AgentRun`、`AgentStep`、`AgentBudget`、`features.agentic.tools.ToolSchemaRegistry`、`infra.agentic.repository`、`features.workflow.service.WorkflowService`、`domain.models.workflow.WorkResponse`、`infrastructure/migrations/005_agentic_runs_announcements.sql` を参照する。現行の `AgenticSearchService`、`AgenticSearchRequest`、`AgenticSearchResponse`、Agentic Search専用のCLI/HTTP/Discord起動経路は削除対象とし、新たにComprehensiveAgentのコードとして作り直す。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
+本設計は `docs/design/kumc-agent.md` の「10. 総合エージェント」を上位仕様とする。詳細部分は現行実装の `domain.models.agentic.AgentRun`、`AgentStep`、`AgentBudget`、`ComprehensiveAgentRequest`、`ComprehensiveAgentResponse`、`features.agentic.comprehensive.ComprehensiveAgentService`、`features.agentic.tools.ToolSchemaRegistry`、`infra.agentic.repository`、`features.workflow.service.WorkflowService`、`domain.models.workflow.WorkResponse`、`infrastructure/migrations/005_agentic_runs_announcements.sql` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
 ## 2. 対象範囲
 対象機能は次の通り。
@@ -23,22 +23,22 @@
 
 対象外は、単一機能だけで完結する通常RAG回答、承認後の副作用実行、自律エージェントの定期起動である。単一機能で解決できる場合は、総合エージェントを経由せず、その機能へ直接ルーティングする。
 
-## 3. 現行実装との差分
-現行実装は、深い検索向けの `AgenticSearchService` を持つ。これは状態機械、budget、trace保存の土台であるが、`kumc-agent.md` の総合エージェント仕様には未到達であり、本設計では互換維持せず削除する。
+## 3. 現行実装同期状況
+現行実装では、旧AgenticSearch経路は残っておらず、複合依頼と `depth=deep` の昇格先は `ComprehensiveAgentService` に統一されている。`IntegratedInputUsecase` は `required_features` が2件以上、または単一RAGで `depth=deep` の場合に `ComprehensiveAgentRequest` を作成し、分類結果、`AccessContext`、`source_filters`、`attribute_filters`、`risk`、`history_scope` を `metadata.routing` に保持して渡す。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| コード構成 | `AgenticSearchService`、`AgenticSearchRequest`、`AgenticSearchResponse` が検索専用に存在する | AgenticSearch関連コードを削除し、`ComprehensiveAgentService`、`ComprehensiveAgentRequest`、`ComprehensiveAgentResponse` を新設する |
-| 呼び出し条件 | CLI/HTTP/Discordの `depth=deep` でAgentic Searchを起動 | 2つ以上の機能が必要な入力を総合エージェントへ昇格する。深掘り検索が必要な場合もComprehensiveAgentのread-only計画として扱う |
-| 状態 | `PLAN`、`SEARCH`、`READ`、`VERIFY`、`ANSWER` | 上位仕様は `PLAN`、`TOOL`、`VERIFY`。検索と読込は `TOOL` stepに統合し、`SEARCH` / `READ` stateは廃止する |
-| tool | RAG検索、context読込、検証のみ | RAG、Minecraft Wiki RAG、メンバー検索、画像検索、タスク管理、イベント管理、サーバー管理候補作成、承認待ち候補作成を使える |
-| 計画 | クエリ分割、根拠・関連資料・未決事項の検索を追加 | 必要機能、検索条件、成功条件、副作用境界、再試行条件を明示する |
-| 副作用 | 未対応 | 副作用のある操作は候補作成または承認申請までに限定する |
-| 検証 | citationsとnotesの有無を決定的に確認 | 機能別結果、根拠、候補、矛盾、未確認事項を検証し、最大n回まで再計画する |
-| 回答 | Agentic Searchの検索結果文 | 結論、根拠、使用した機能、未確認事項、承認待ち候補を含める |
-| trace | `agent_runs`、`agent_steps` に保存 | テーブルは再利用しつつ、ComprehensiveAgentのtool call単位の入力、出力、権限、候補ID、承認ID、検証結果を保存する |
-| payload | CLI深掘り結果に `agent_run_id` を返す | 診断情報は `metadata` 配下に入れ、主結果だけをトップレベルに置く |
-| 入口 | `depth=deep` とOpenClaw経路が併存 | 統合入力受付の分類結果に基づき、総合エージェントへ渡す。Agentic Search専用入口は廃止する |
+| 項目 | 現行実装 |
+| --- | --- |
+| コード構成 | `features.agentic.comprehensive.ComprehensiveAgentService`、`ComprehensiveAgentPlanner`、`ComprehensiveToolAdapters`、`ComprehensiveAgentVerifier`、`ComprehensiveAgentAnswerBuilder` を使う |
+| 呼び出し条件 | `IntegratedInputUsecase` が複数機能または深掘りRAGを `comprehensive_agent` routeへ渡す |
+| 状態 | `PLAN`、`TOOL`、`VERIFY`、trace可読性のための `ANSWER` stepを `agent_steps` に保存する |
+| tool | `circle_rag_search`、`minecraft_wiki_rag_search`、`member_search`、`image_search`、`task_search`、`event_search`、`task_candidate_create`、`event_candidate_create`、`server_operation_candidate_create`、`approval_candidate_create` |
+| 計画 | LLM plannerが有効ならJSON planを使い、無効または失敗時は `required_features` と本文から決定的fallback planを作る |
+| 副作用 | 書き込みtoolは `allow_write_tools=True` かつadminのときだけ実行し、それでも正本更新ではなく候補作成に限定する |
+| 検証 | `VerificationResult` が成功条件、missing、conflicts、warningsを返し、`max_replans` まで再計画する |
+| 回答 | 結論、根拠、tool結果、未確認事項、候補を `ComprehensiveAgentResponse` にまとめる |
+| trace | `AgentTraceRepository` がPostgreSQLまたは `data/agentic/*.jsonl` fallbackへ `AgentRun` / `AgentStep` を保存する |
+| payload | 主結果は `text`, `detail_markdown`, `citations`, `candidates` 系列に置き、`agent_run_id`、tool summary、cost、elapsed、verificationは `metadata` に置く |
+| 設定 | `configs/main/comprehensive_agent.yaml` の planner/verifier/budget を読む。APIキーやtokenを追加する場合だけ `.env` / `.env.example` を更新する |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -253,7 +253,7 @@ tool出力は、総合エージェント内部で `AgentToolResult` 相当の正
 `input` と `output` にはsecret、巨大context、権限外本文を保存しない。必要な場合は短い要約、citation id、candidate id、hashだけを保存する。
 
 ### 8.4 ComprehensiveAgentRequest / Response
-現行の `AgenticSearchRequest` と `AgenticSearchResponse` は検索専用であり、総合エージェント実装時に削除する。代わりに `ComprehensiveAgentRequest` と `ComprehensiveAgentResponse` を追加する。
+現行の request/response は `ComprehensiveAgentRequest` と `ComprehensiveAgentResponse` である。旧AgenticSearch専用のrequest/responseは現行コードの呼び出し面に存在しない。
 
 `ComprehensiveAgentResponse` のトップレベルには、利用者が主結果として扱う安定フィールドだけを置く。
 
@@ -297,7 +297,7 @@ toolが作成した候補は、それぞれの正本repositoryに保存する。
 ### 9.2 ローカル・テスト
 Postgres未設定時は `FileAgentTraceRepository` を使う。保存先は `data/agentic/agent_runs.jsonl` と `data/agentic/agent_steps.jsonl` である。
 
-JSONL repositoryはappend-only方式で、同一IDの最新レコードを読み戻すAPIは現行では持たない。実装時は、trace参照、再実行、評価用途に必要なread APIを追加する。
+JSONL repositoryはappend-only方式で保存し、`get_run(run_id)` と `list_steps(run_id)` で最新runとstep一覧を読み戻す。trace参照、再実行、評価用途ではこのread APIを使う。
 
 ## 10. 権限と安全性
 ### 10.1 AccessContext
@@ -369,7 +369,7 @@ Discordでは長い `detail_markdown` やtraceはattachmentまたはephemeral詳
 ## 12. 統合入力受付との関係
 統合入力受付は、入力本文、source指定、mode指定、depth指定、ユーザー権限情報を受け取り、分類結果に基づいてルーティングする。
 
-現行実装では、`EntryQueryRouter` が `direct_rag` と `openclaw` の2値を判定し、複雑質問をOpenClawへ渡している。またCLI/HTTP/Discordの `depth=deep` は `AgenticSearchService` を起動する。総合エージェント実装では、Agentic Search専用起動経路を削除し、複合依頼および深掘り検索は `comprehensive_agent` routeへ統一する。
+現行実装では、`IntegratedInputRouter` と `IntegratedRoutingPolicy` が複合依頼と深掘り検索を判定し、`IntegratedInputUsecase` が `ComprehensiveAgentService.run()` を呼び出す。複合依頼および深掘り検索は `comprehensive_agent` routeへ統一され、OpenClawや旧AgenticSearch専用の入口には分岐しない。
 
 本設計では、統合入力受付の分類結果を次のように拡張する。
 
@@ -409,26 +409,7 @@ Discordでは長い `detail_markdown` やtraceはattachmentまたはephemeral詳
 - 推定コスト
 - 再計画回数
 
-## 14. AgenticSearch削除方針
-現行の `AgenticSearchService.search()` は、`depth=deep` の検索経路として維持しない。総合エージェント導入時にAgenticSearch関連コードを削除し、ComprehensiveAgentへ置き換える。
+## 14. 旧AgenticSearchとの境界
+現行コードではAgenticSearch専用service、request/response、CLI/HTTP/Discordの専用branchは使わない。`agent_runs` と `agent_steps` の保存基盤だけを再利用し、metadataには `route="comprehensive_agent"` を入れて総合エージェントrunとして区別する。
 
-削除対象は次の通り。
-
-- `AgenticSearchService`
-- `AgenticSearchRequest`
-- `AgenticSearchResponse`
-- Agentic Search専用の `SEARCH` / `READ` state
-- CLI、HTTP、DiscordのAgentic Search専用起動分岐
-- Agentic Search前提のテスト、fixture、payload期待値
-
-再利用してよいものは、総合エージェントの概念に合う汎用部品に限る。
-
-- `AgentRun`
-- `AgentStep`
-- `AgentBudget`
-- `ToolSchema`
-- `AgentTraceRepository`
-- `agent_runs`
-- `agent_steps`
-
-ただし、名称やpayloadがAgentic Search専用の意味を持つ場合は、ComprehensiveAgent向けに改名・再定義する。`depth=deep` は互換経路として残さず、必要であれば統合入力受付が `comprehensive_agent` routeを選ぶための入力ヒントとして扱う。
+今後同種の深掘り検索を追加する場合も、旧AgenticSearchを復活させず、`ToolSchemaRegistry` にread-only toolを追加し、PLAN / TOOL / VERIFY / ANSWERの状態機械へ統合する。

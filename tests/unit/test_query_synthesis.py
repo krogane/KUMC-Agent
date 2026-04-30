@@ -36,6 +36,11 @@ class _FastMaterialRouter:
         )
 
 
+class _FailingRouter:
+    def route(self, *_args, **_kwargs):
+        raise AssertionError("router should not be called")
+
+
 class _Synthesizer:
     def synthesize(self, **_kwargs):
         return QuerySynthesisResult("合成された検索クエリ", used=True, fallback=False)
@@ -63,8 +68,15 @@ class _Retrieval:
 
 
 class _Generation:
+    def __init__(self) -> None:
+        self.no_rag_calls: list[dict[str, object]] = []
+
     def generate_rag_answer(self, **_kwargs):
         return Answer(text="回答", route="rag", sources=[], metadata={})
+
+    def generate_no_rag(self, **kwargs):
+        self.no_rag_calls.append(kwargs)
+        return Answer(text="NoRAG回答", route="no_rag", sources=[], metadata={})
 
 
 def _config() -> RagConfig:
@@ -135,6 +147,33 @@ class QuerySynthesisTests(unittest.TestCase):
 
             self.assertEqual(answer.route, "rag")
             self.assertEqual(answer.metadata["routing_decision"]["material_names"], [])
+            self.assertFalse(answer.metadata["query_synthesis"]["used"])
+
+    def test_no_rag_route_override_skips_router_and_retrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            retrieval = _Retrieval(Path(tmp) / "data" / "index")
+            generation = _Generation()
+            service = RagService(
+                config=_config(),
+                router=_FailingRouter(),
+                retrieval=retrieval,
+                generation=generation,
+                reranker=None,
+                query_synthesizer=_Synthesizer(),
+            )
+
+            answer = service.answer(
+                query="こんにちは",
+                route_override="no_rag",
+                disable_history=True,
+            )
+
+            self.assertEqual(answer.text, "NoRAG回答")
+            self.assertEqual(answer.route, "no_rag")
+            self.assertEqual(answer.sources, [])
+            self.assertEqual(retrieval.queries, [])
+            self.assertEqual(len(generation.no_rag_calls), 1)
+            self.assertEqual(answer.metadata["routing_decision"]["target_model"], "no_rag")
             self.assertFalse(answer.metadata["query_synthesis"]["used"])
 
 

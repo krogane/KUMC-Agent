@@ -7,6 +7,8 @@ Minecraft Wiki RAGは、ユーザーの入力クエリをもとに、日本語�
 
 本設計は `docs/design/kumc-agent.md` の「2. Minecraft Wiki RAG」を上位仕様とし、詳細部分は現行実装の `infra/connectors/minecraft_wiki.py`、`features/ingestion`、`features/rag`、`infra/retrieval` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先するが、本設計ではMinecraft Version / Minecraft Edition判定と属性フィルタリングは扱わない。
 
+現行実装では、Minecraft Wiki RAGは `RagService.answer(route_override="minecraft_wiki")` によって通常RAGから分岐する。`force_disable_additional_memory=True`、recency off、material search無効、Minecraft Wiki専用top-k / sparse / rerank / parent cap設定を適用し、検索対象は `source_type="minecraft_wiki"` のchunkだけに制限する。
+
 ## 2. 対象範囲
 対象機能は次の通り。
 
@@ -57,7 +59,7 @@ Minecraft Wiki RAGの正式入口は、サークル情報RAGと同じく `ChatAn
 
 次の入口はすべて同じMinecraft Wiki RAG経路へ接続する。
 
-- Discord `/ask source=minecraft_wiki`
+- Discordの統合入力受付で `source=minecraft_wiki`
 - HTTP / 統合入力受付の `minecraft_wiki_rag`
 - CLI `chat`
 - CLI `tool rag --scope minecraft_wiki`
@@ -211,12 +213,16 @@ Raw記事をMinecraft Wiki専用設定の文字数で再帰分割する。
 分割結果が第1チャンクと同一の場合は、回答時の親チャンク重複を避けるため `skip_parent_context=true` を付与する。
 
 ### 5.6 Summary Chunking
-第1 Recursive Chunkを専用LLMで要約する。
+第1 Recursive Chunkを専用LLMで要約し、同時にその第1 Chunkが単体で検索結果として意味を持つ文章かを判定する。
 
 - stage: `summary`
 - 既定文字数: `minecraft_wiki_rag.chunking.summary_characters`
 - 使用LLM: `minecraft_wiki_rag.chunking.summary_llm_provider` と `summary_gemini_model`
-- LLM利用不可または失敗時は第1チャンク先頭をfallback要約にする。
+- LLM応答は内部的に `searchable`、`summary`、`reason` を持つJSONとして扱う。
+- `searchable=false` が明示された第1 ChunkはSummary Chunkを作らず、その第1 Chunkから派生した第2 Recursive Chunk、sparse chunk、Summary Chunkも検索インデックスへ入れない。
+- 見出しだけ、ページ番号だけ、記号列、壊れた表セル、ナビゲーション断片、OCRノイズ、文脈なしの単語列などは `searchable=false` とする。
+- 固有名詞・日時・数値・条件・説明関係があり、単体で検索ヒットとして意味を持つ場合は `searchable=true` とする。
+- LLM利用不可、API失敗、JSON不正、旧形式の非JSON応答では誤除外を避け、検索対象に残す。要約本文は第1 Chunk先頭または旧形式応答をfallbackとして使う。
 - 回答時の親チャンクとして使う。
 - metadataに `parent_chunk_id` を保持する。
 

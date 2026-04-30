@@ -20,6 +20,11 @@ from kumc_agent.features.indexing.service import IndexingService
 from kumc_agent.infra.indexing.chunks import Chunk as LegacyChunk
 from kumc_agent.infra.indexing.chunks import load_chunks, write_chunks
 from kumc_agent.infra.indexing.chunking import summery_chunk_jsonl_dir
+from kumc_agent.infra.indexing.summary_searchability import (
+    SummarySearchabilityDecision,
+    load_summary_searchability_decisions,
+    summary_decision_sidecar_path,
+)
 
 
 class _StubLLM:
@@ -166,6 +171,137 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
             )
 
             self.assertEqual(summary, "abcdef")
+
+    def test_summary_json_searchable_true_builds_summary_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = _StubLLM(
+                response_text='{"searchable": true, "summary": "意味のある要約", "reason": "本文あり"}'
+            )
+            service = IndexingService(
+                storage=object(),  # type: ignore[arg-type]
+                embedder=object(),  # type: ignore[arg-type]
+                faiss_index=object(),  # type: ignore[arg-type]
+                bm25_index=object(),  # type: ignore[arg-type]
+                ingestion_dir=Path(tmp),
+                app_config=_runtime_config(data_dir=Path(tmp), provider="gemini"),  # type: ignore[arg-type]
+                summary_llm=llm,
+            )
+
+            chunks = service._build_summary_chunks_for_first_chunks(  # noqa: SLF001
+                first_chunks=[
+                    Chunk(
+                        id="parent-1",
+                        document_id="doc-1",
+                        text="KUMCの例会は土曜日に開催します。",
+                        index=0,
+                        metadata={"chunk_id": 0},
+                    )
+                ],
+                target_characters=40,
+                include_index_in_hash=True,
+            )
+
+            self.assertEqual(len(chunks), 1)
+            self.assertEqual(chunks[0].text, "意味のある要約")
+            self.assertEqual(chunks[0].metadata["parent_chunk_uid"], "parent-1")
+
+    def test_summary_json_searchable_false_skips_summary_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = _StubLLM(
+                response_text='{"searchable": false, "summary": "", "reason": "見出しだけ"}'
+            )
+            service = IndexingService(
+                storage=object(),  # type: ignore[arg-type]
+                embedder=object(),  # type: ignore[arg-type]
+                faiss_index=object(),  # type: ignore[arg-type]
+                bm25_index=object(),  # type: ignore[arg-type]
+                ingestion_dir=Path(tmp),
+                app_config=_runtime_config(data_dir=Path(tmp), provider="gemini"),  # type: ignore[arg-type]
+                summary_llm=llm,
+            )
+
+            chunks = service._build_summary_chunks_for_first_chunks(  # noqa: SLF001
+                first_chunks=[
+                    Chunk(
+                        id="parent-1",
+                        document_id="doc-1",
+                        text="1",
+                        index=0,
+                        metadata={"chunk_id": 0},
+                    )
+                ],
+                target_characters=40,
+                include_index_in_hash=True,
+            )
+
+            self.assertEqual(chunks, [])
+
+    def test_summary_invalid_json_keeps_chunk_with_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = _StubLLM(response_text='{"searchable": false,')
+            service = IndexingService(
+                storage=object(),  # type: ignore[arg-type]
+                embedder=object(),  # type: ignore[arg-type]
+                faiss_index=object(),  # type: ignore[arg-type]
+                bm25_index=object(),  # type: ignore[arg-type]
+                ingestion_dir=Path(tmp),
+                app_config=_runtime_config(data_dir=Path(tmp), provider="gemini"),  # type: ignore[arg-type]
+                summary_llm=llm,
+            )
+
+            chunks = service._build_summary_chunks_for_first_chunks(  # noqa: SLF001
+                first_chunks=[
+                    Chunk(
+                        id="parent-1",
+                        document_id="doc-1",
+                        text="abcdefghijklmnop",
+                        index=0,
+                        metadata={"chunk_id": 0},
+                    )
+                ],
+                target_characters=6,
+                include_index_in_hash=True,
+            )
+
+            self.assertEqual(len(chunks), 1)
+            self.assertEqual(chunks[0].text, "abcdefghijklmnop")
+
+    def test_repository_summary_strips_html_and_marks_cta_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = IndexingService(
+                storage=object(),  # type: ignore[arg-type]
+                embedder=object(),  # type: ignore[arg-type]
+                faiss_index=object(),  # type: ignore[arg-type]
+                bm25_index=object(),  # type: ignore[arg-type]
+                ingestion_dir=Path(tmp),
+                app_config=_runtime_config(data_dir=Path(tmp), provider="none"),  # type: ignore[arg-type]
+            )
+
+            chunks = service._build_summary_chunks_for_first_chunks(  # noqa: SLF001
+                first_chunks=[
+                    Chunk(
+                        id="parent-1",
+                        document_id="doc-1",
+                        text="<p>コメントはDiscordで受け付けます。BOOTHも見てください。</p>",
+                        index=0,
+                        metadata={"source_type": "hatenablog", "chunk_id": 0},
+                    )
+                ],
+                target_characters=80,
+                include_index_in_hash=True,
+            )
+
+            self.assertEqual(len(chunks), 1)
+            self.assertEqual(
+                chunks[0].text,
+                "コメントはDiscordで受け付けます。BOOTHも見てください。",
+            )
+            self.assertEqual(chunks[0].metadata["summary_fallback_used"], True)
+            self.assertEqual(chunks[0].metadata["summary_cta_origin"], "source_text")
+            self.assertEqual(
+                chunks[0].metadata["summary_cta_terms"],
+                ["コメント", "Discord", "BOOTH"],
+            )
 
     def test_summary_batch_size_controls_parallelism(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,21 +455,21 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
                 )
             tracker = _ParallelStubLLM(response_text="要約")
 
-            def _fake_run_llm_chunking(**kwargs):  # noqa: ANN001
+            def _fake_run_llm_summary_decision(**kwargs):  # noqa: ANN001
                 tracker.generate(
                     system_prompt="",
                     user_prompt=str(kwargs["prompt"]),
                     temperature=0.0,
                     max_output_tokens=64,
                 )
-                return ["要約"]
+                return SummarySearchabilityDecision.keep(summary="要約")
 
             with patch.dict(
                 os.environ,
                 {"PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE": "{text}"},
             ), patch(
-                "kumc_agent.infra.indexing.chunking._run_llm_chunking",
-                side_effect=_fake_run_llm_chunking,
+                "kumc_agent.infra.indexing.chunking._run_llm_summary_decision",
+                side_effect=_fake_run_llm_summary_decision,
             ):
                 summery_chunk_jsonl_dir(
                     input_chunk_dir=input_dir,
@@ -361,6 +497,116 @@ class IndexingSummaryChunkingLLMTests(unittest.TestCase):
             self.assertEqual(tracker.calls, 4)
             self.assertGreaterEqual(tracker.max_in_flight, 2)
             self.assertLessEqual(tracker.max_in_flight, 2)
+
+    def test_legacy_summary_chunking_writes_decisions_and_skips_unsearchable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            input_path = input_dir / "source.jsonl"
+            write_chunks(
+                input_path,
+                [
+                    LegacyChunk(
+                        text="1",
+                        metadata={"source_type": "docs", "chunk_id": 0},
+                    ),
+                    LegacyChunk(
+                        text="KUMCの例会は土曜日に開催します。",
+                        metadata={"source_type": "docs", "chunk_id": 1},
+                    ),
+                ],
+            )
+            decisions = [
+                SummarySearchabilityDecision.exclude(reason="noise"),
+                SummarySearchabilityDecision.keep(summary="例会は土曜日です。"),
+            ]
+
+            with patch.dict(
+                os.environ,
+                {"PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE": "{text}"},
+            ), patch(
+                "kumc_agent.infra.indexing.chunking._run_llm_summary_decision",
+                side_effect=decisions,
+            ):
+                summery_chunk_jsonl_dir(
+                    input_chunk_dir=input_dir,
+                    output_chunk_dir=output_dir,
+                    config=SimpleNamespace(
+                        summery_provider="gemini",
+                        summery_max_retries=1,
+                        summery_batch_size=1,
+                        summery_characters=20,
+                        summery_gemini_model="gemini-test",
+                        summery_temperature=0.0,
+                        summery_max_output_tokens=64,
+                        gemini_api_key="key",
+                        gemini_summary_requests_per_minute=100,
+                    ),
+                    skip_existing=False,
+                    update_existing=True,
+                    sync_deleted=True,
+                )
+
+            output_path = output_dir / "source.jsonl"
+            output_chunks = load_chunks(output_path)
+            sidecar = load_summary_searchability_decisions(
+                summary_decision_sidecar_path(output_path)
+            )
+            self.assertEqual([chunk.text for chunk in output_chunks], ["例会は土曜日です。"])
+            self.assertFalse(sidecar["0"].searchable)
+            self.assertTrue(sidecar["1"].searchable)
+
+    def test_legacy_summary_strips_html_and_marks_cta_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            write_chunks(
+                input_dir / "hatenablog.jsonl",
+                [
+                    LegacyChunk(
+                        text="<p>コメントはDiscordで受け付けます。BOOTHも見てください。</p>",
+                        metadata={"source_type": "hatenablog", "chunk_id": 0},
+                    )
+                ],
+            )
+
+            with patch.dict(
+                os.environ,
+                {"PROMPT_SUMMERY_CHUNK_DEFAULT_TEMPLATE": "{text}"},
+            ):
+                summery_chunk_jsonl_dir(
+                    input_chunk_dir=input_dir,
+                    output_chunk_dir=output_dir,
+                    config=SimpleNamespace(
+                        summery_provider="none",
+                        summery_max_retries=1,
+                        summery_batch_size=1,
+                        summery_characters=80,
+                        summery_gemini_model="gemini-test",
+                        summery_temperature=0.0,
+                        summery_max_output_tokens=64,
+                        gemini_api_key="",
+                        gemini_summary_requests_per_minute=100,
+                    ),
+                    skip_existing=False,
+                    update_existing=True,
+                    sync_deleted=True,
+                )
+
+            output_chunks = load_chunks(output_dir / "hatenablog.jsonl")
+            self.assertEqual(
+                output_chunks[0].text,
+                "コメントはDiscordで受け付けます。BOOTHも見てください。",
+            )
+            self.assertEqual(output_chunks[0].metadata["summary_fallback_used"], True)
+            self.assertEqual(
+                output_chunks[0].metadata["summary_cta_terms"],
+                ["コメント", "Discord", "BOOTH"],
+            )
 
 
 if __name__ == "__main__":

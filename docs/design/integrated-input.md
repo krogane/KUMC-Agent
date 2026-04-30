@@ -7,7 +7,7 @@
 
 本設計は `docs/design/kumc-agent.md` の「11. 統合入力受付」を上位仕様とする。詳細部分は現行実装の `domain.models.retrieval.AccessContext`、`domain.models.retrieval.RetrievalQuery`、`domain.models.workflow.WorkRequest`、`domain.models.workflow.WorkResponse`、`features.workflow.service.WorkflowService`、`frontends.discord.app`、`frontends.http.app`、`cli.py` を参照する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
-`usecases.chat.entry.ChatEntryUsecase`、`features.rag.components.entry_routing.EntryQueryRouter`、およびCLI/HTTP/Discordに分散している既存 `/ask` 分岐は削除対象とし、入口処理は `IntegratedInputUsecase` に統一する。後方互換adapterは置かず、必要な振る舞いは `IntegratedInputUsecase` と `IntegratedInputRouter` に移植する。
+入口処理は `IntegratedInputUsecase` に統一する。旧 `ChatEntryUsecase`、旧 `EntryQueryRouter`、OpenClawへの2値分類、CLI/HTTP/Discordごとの個別 `/ask` 分岐は現行の標準経路では使わない。後方互換adapterは置かず、必要な振る舞いは `IntegratedInputUsecase`、`IntegratedInputRouter`、`IntegratedRoutingPolicy` に集約する。
 
 ## 2. 対象範囲
 対象機能は次の通り。
@@ -17,7 +17,7 @@
 - 専用LLMまたは決定的fallbackによる入力意図分類
 - intent、source_filters、risk、freshness要否、属性フィルタ、必要機能の抽出
 - ルーティング前のGuild、role、admin設定の解決
-- サークル情報RAG、Minecraft Wiki RAG、メンバー検索、画像検索、タスク管理、イベント管理、サーバー管理、総合エージェントへのルーティング
+- NoRAG回答、サークル情報RAG、Minecraft Wiki RAG、メンバー検索、画像検索、タスク管理、イベント管理、サーバー管理、総合エージェントへのルーティング
 - 副作用を含む依頼の承認フロー連携
 - ルーティング先の出力をDiscordへ送信する最終出力制御
 - CLI、HTTP向けの同等payload出力
@@ -26,20 +26,21 @@
 
 対象外は、各ルーティング先の内部実装、承認後の副作用実行、自律エージェントの定期起動である。ただし、統合入力受付は副作用候補や承認待ち候補を受け取り、利用者へ提示する。
 
-## 3. 現行実装との差分
-現行実装では統合入力受付の責務が複数箇所に分散している。
+## 3. 現行実装同期状況
+現行実装では、`apps/integrated_input.py` が `IntegratedInputUsecase` を組み立て、CLI `ask`、HTTP/Discord adapter、worker/automationから利用できる統一入口として扱う。入力分類はLLMが使える場合はGemini、使えない場合は決定的fallbackで行い、副作用語彙を含むfallbackでは候補作成を行わず確認質問へ寄せる。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| Discord入口 | `/ask`、`/work`、`/approval` が個別に各serviceを呼ぶ | 通常入力は `IntegratedInputUsecase` が受け、route結果に応じて各機能へ委譲する。既存 `/ask` handlerの分岐は削除する |
-| 分類 | `EntryQueryRouter` が `direct_rag` / `openclaw` の2値を返す | `EntryQueryRouter` を削除し、`IntegratedInputRouter` がintent、必要機能、risk、freshness、source_filters、attribute_filtersを返す |
-| ルーティング先 | CLI/HTTP/Discordで `source == member`、`depth == deep` などを個別判定 | 個別分岐を削除し、統一された `IntegratedRoute` によって8系統へ分岐する |
-| 総合エージェント昇格 | `depth=deep` で総合エージェントを起動 | 複数機能が必要な入力は総合エージェントへ昇格する |
-| 権限 | `AccessContext` は各入口で作る | 統合入力受付で必ず解決し、全ルーティング先へ渡す |
-| Discord送信 | 各command handlerが直接 `followup.send` する | ルーティング先はresponseを返すだけにし、Discord送信は統合入力受付に限定する |
-| payload | CLI/HTTPごとにpayload整形が重複 | 安定フィールドをトップレベル、診断情報を `metadata` に統一する |
-| sanitization | CLI/HTTPに類似処理が重複 | 共通sanitizerでsecret、巨大context、raw promptを除外する |
-| fallback | OpenClaw失敗時にlocal RAGへfallback | OpenClaw経路は削除する。分類失敗時は副作用を直接実行せず、read-only routeまたは確認質問へfallbackする |
+| 項目 | 現行実装 |
+| --- | --- |
+| 入力 | `IntegratedInputRequest` が `text`, `source`, `mode`, `depth`, `history_scope`, `frontend`, `AccessContext`, `metadata` を保持する |
+| 分類 | `IntegratedInputRouter` が `route`, `intent`, `required_features`, `source_filters`, `attribute_filters`, `risk`, `freshness_required`, `needs_clarification` を返す |
+| policy | `IntegratedRoutingPolicy` が明示source、server操作、複数feature、`depth=deep`、admin_onlyを最終補正する |
+| ルーティング先 | `no_rag`, `circle_rag`, `minecraft_wiki_rag`, `member_search`, `image_search`, `task_management`, `event_management`, `server_management`, `comprehensive_agent`, `clarify`, `deny` |
+| RAG | `ChatAnswerUsecase` が設定されている場合は `RagService.answer()` を使い、NoRAGは `route_override="no_rag"`、Minecraft Wikiは `route_override="minecraft_wiki"` を渡す |
+| workflow | member/image/task/event/serverは `WorkflowService.run(WorkRequest(...))` へ委譲し、候補・承認・正本結果を `IntegratedInputResponse` へ詰め替える |
+| 総合エージェント | 複数機能または深掘りRAGでは `ComprehensiveAgentRequest` を作り、`allow_write_tools` はadminかつ候補/承認riskのときだけ許可する |
+| 副作用境界 | 直接正本変更につながる `task_done`, `event_complete`, `*_notify`, `server_operation_execute` はdispatch前にclarifyまたは候補化し、response側でも正本変更混入をguardする |
+| payload | 主結果だけをトップレベルに置き、route、intent、risk、trace、routing decision、handler、latencyは `metadata` 配下に置く |
+| sanitization | `sanitize_payload()` / `sanitize_payload_metadata()` でraw prompt、巨大context、secretを除外または短縮する |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -55,6 +56,7 @@ flowchart TD
   N --> A["AccessResolver"]
   A --> R["IntegratedInputRouter"]
   R --> P{"route"}
+  P -->|no_rag| NR["NoRAG Generation"]
   P -->|circle_rag| CR["Retrieval Ask"]
   P -->|minecraft_wiki_rag| MR["Retrieval Ask / Minecraft source"]
   P -->|member_search| MS["Workflow member_search"]
@@ -63,7 +65,8 @@ flowchart TD
   P -->|event_management| ES["Workflow event_*"]
   P -->|server_management| SS["Workflow mc_*"]
   P -->|comprehensive_agent| CA["Comprehensive Agent"]
-  CR --> O["OutputEnvelope"]
+  NR --> O["OutputEnvelope"]
+  CR --> O
   MR --> O
   MS --> O
   IS --> O
@@ -82,6 +85,7 @@ flowchart TD
 | domain | 入力request、分類結果、route、出力envelope | 新規 `domain.models.integrated_input`, `domain.models.retrieval`, `domain.models.workflow` |
 | usecase | 入力正規化、分類、権限解決、route実行、出力整形 | 新規 `usecases.integrated_input.entry.IntegratedInputUsecase` |
 | router | LLM分類、schema validation、fallback | 新規 `features.rag.components.integrated_input_routing.IntegratedInputRouter` |
+| no_rag | 既存ツール不要な一般応答 | `features.rag.service.RagService` の NoRAG generation |
 | retrieval | サークル情報RAG、Minecraft Wiki RAG | `apps.retrieval`, `domain.models.retrieval.RetrievalQuery` |
 | workflow | メンバー、画像、タスク、イベント、サーバー管理 | `features.workflow.service.WorkflowService` |
 | comprehensive_agent | 複数機能が必要な依頼の昇格先 | `apps.agentic`, `features.agentic.comprehensive.ComprehensiveAgentService` |
@@ -104,7 +108,7 @@ flowchart TD
 | `frontend` | `discord`、`cli`、`http` |
 | `metadata` | request id、interaction idなど内部診断情報 |
 
-現行の `ChatEntryRequest.query` 相当の入力、`RetrievalQuery.source_filter`、`RetrievalQuery.mode`、`RetrievalQuery.depth`、`AccessContext` を統合した形とする。`ChatEntryRequest` 自体は削除対象であり、新規実装では参照しない。
+現行の旧 `ChatEntryRequest.query` 相当の入力、`RetrievalQuery.source_filter`、`RetrievalQuery.mode`、`RetrievalQuery.depth`、`AccessContext` を統合した形とする。`ChatEntryRequest` は現行経路では参照しない。
 
 本文が空の場合はrouteを実行せず、空または入力不足responseを返す。副作用を含む可能性があるのに必要情報が不足している場合は、候補作成や承認申請を行わず、確認質問を返す。
 
@@ -134,7 +138,7 @@ admin判定のtrust boundaryはfrontendごとに固定する。
 統合入力受付は `AccessContext` を全ルーティング先に渡す。route先で別の権限文脈を作り直してはならない。
 
 ## 7. 分類設計
-分類器は `IntegratedInputRouter` として実装する。現行 `EntryQueryRouter` は削除対象であり、LLM呼び出し、JSON抽出、retry、fallbackは `IntegratedInputRouter` に必要な形で再実装する。
+分類器は `IntegratedInputRouter` として実装する。LLM呼び出し、JSON抽出、retry、fallbackはこのrouterに集約し、旧 `EntryQueryRouter` 形式の `direct_rag` / `openclaw` 判定は使わない。
 
 ### 7.1 分類出力
 分類結果は次の形にする。
@@ -157,6 +161,7 @@ admin判定のtrust boundaryはfrontendごとに固定する。
 
 | route | ルーティング先 |
 | --- | --- |
+| `no_rag` | 既存ツールを使わないNoRAG回答 |
 | `circle_rag` | サークル情報RAG |
 | `minecraft_wiki_rag` | Minecraft Wiki RAG |
 | `member_search` | メンバー検索 |
@@ -174,6 +179,7 @@ admin判定のtrust boundaryはfrontendごとに固定する。
 LLM分類結果に加えて、次の決定的規則を適用する。
 
 - `required_features` が2つ以上の場合は `comprehensive_agent` へ昇格する。
+- `source == all` かつ既存機能の特徴がなく、`risk == read_only` の一般応答だけ `no_rag` とする。`no_rag` では `required_features` は空にする。
 - `source == minecraft_wiki` の明示指定がある場合は、分類が曖昧でも `minecraft_wiki_rag` を優先する。
 - `source == member` の明示指定がある場合は、分類が曖昧でも `member_search` を優先する。
 - `source == image` の明示指定がある場合は、分類が曖昧でも `image_search` を優先する。
@@ -181,31 +187,37 @@ LLM分類結果に加えて、次の決定的規則を適用する。
 - `source == event` またはイベント作成・更新・通知の意図が明確な場合は `event_management` とする。
 - 明示sourceは初期featureとして扱う。本文から別機能も検出され、`required_features` が2つ以上になった場合は明示sourceより総合エージェント昇格を優先する。
 - サーバー状態確認、起動、停止、再起動、バックアップなどは `server_management` とする。
+- `KUMC`、`サークル`、`資料`、`過去`、`根拠`、`確認`、`調べ` など資料検索の意図がある場合、および `source == drive|discord|notion|hatena|x|crafters_colony` が明示された場合は `no_rag` にせず `circle_rag` とする。
 - 副作用がある依頼は、route先で直接実行せず、候補作成または承認待ちに限定する。
 - 分類失敗時は `risk=read_only` としてread-only routeへfallbackするか確認質問にする。作成、更新、削除、通知、完了、承認などの副作用語彙を含む場合は必ず確認質問にし、副作用候補は作らない。
 
 ## 8. ルーティング先
-### 8.1 サークル情報RAG
+### 8.1 NoRAG回答
+既存の検索、workflow、サーバー操作、総合エージェントのどれも不要なread-only入力は、`ChatAnswerUsecase` 経由で `route_override="no_rag"` を指定し、`RagService` のNoRAG generationへ委譲する。
+
+この経路ではRAG検索、Minecraft Wiki検索、rerank、material search、workflow、comprehensive agentを呼ばない。出力の `metadata.route` と `metadata.handler` は `no_rag` とし、診断情報は引き続き `metadata.routing_decision` 配下へ格納する。
+
+### 8.2 サークル情報RAG
 `RetrievalQuery(text=text, source_filter=source_filter, mode=mode, depth=depth, access=access)` を `retrieval.ask.ask()` へ渡す。
 
 `source_filter` が `all`、`drive`、`discord`、`notion`、`hatena`、`x`、`crafters_colony` の場合に使う。回答前filterとcitation整形はRAG側の責務とする。
 
-### 8.2 Minecraft Wiki RAG
+### 8.3 Minecraft Wiki RAG
 `source_filter="minecraft_wiki"` としてRAGへ渡す。Minecraft Wiki専用serviceが追加された場合も、統合入力受付から見た出力契約は `AskResponse` 相当に揃える。
 
 Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に必要な場合は、総合エージェントへ昇格する。
 
-### 8.3 メンバー検索
+### 8.4 メンバー検索
 `WorkflowService.run(WorkRequest(work_type="member_search", instruction=text, access=access))` へ委譲する。
 
 出力は `WorkResponse.member_profiles` を主結果として扱う。内部score、検索語、raw profile生成ログは `metadata` 配下に入れ、外部出力前にマスクする。
 
-### 8.4 画像検索
+### 8.5 画像検索
 `WorkflowService.run(WorkRequest(work_type="image_search", instruction=text, access=access))` へ委譲する。
 
 出力は `WorkResponse.assets` を主結果として扱う。`downloaded_image_path`、`original_image_ref`、長いOCR全文、周辺本文は外部payloadから除外または短縮する。
 
-### 8.5 タスク管理
+### 8.6 タスク管理
 タスク管理routeでは、分類されたintentに応じて `WorkRequest.work_type` を選ぶ。
 
 | intent | work_type |
@@ -223,7 +235,7 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 
 副作用境界はタスク管理側の設計に従う。統合入力受付はdispatch前に直接正本更新work_typeを遮断し、承認前に正本変更が起きたかどうかをresponseの主結果とstatusで確認し、最終出力では候補と実行済みを明確に区別する。
 
-### 8.6 イベント管理
+### 8.7 イベント管理
 イベント管理routeでは、分類されたintentに応じて `WorkRequest.work_type` を選ぶ。
 
 | intent | work_type |
@@ -244,12 +256,12 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 
 日時や場所が不足する場合は、候補作成前に確認質問を返す。event追加にはtitleと日時、event更新・削除・完了にはevent id、schedule追加には日時をdispatch前に要求する。freshnessが必要な依頼では、現行のイベント一覧または関連scheduleを確認してから回答する。
 
-### 8.7 サーバー管理
+### 8.8 サーバー管理
 サーバー状態確認は `mc_status`、操作依頼は `mc_request` へ委譲する。
 
 サーバー操作は副作用が大きいため、統合入力受付は `risk=approval_required` として扱う。承認前にサーバー操作を直接実行してはならない。出力は `server_operations` を候補として提示する。
 
-### 8.8 副作用境界
+### 8.9 副作用境界
 統合入力受付はworkflow dispatch前にwork_typeを次の境界で扱う。
 
 | 境界 | work_type例 | 統合入力受付での扱い |
@@ -260,7 +272,7 @@ Minecraftサーバー操作の依頼とMinecraft Wikiの知識照会が同時に
 
 不足情報の最小条件は、task更新・完了・削除ではtask id、event更新・削除・完了ではevent id、event追加ではtitleと日時、schedule追加では日時、server操作では操作内容である。不足している場合はroute先を呼ばず `clarify` を返す。
 
-### 8.9 総合エージェント
+### 8.10 総合エージェント
 `required_features` が2つ以上、または単一機能では成功条件を満たせない場合は総合エージェントへ渡す。
 
 総合エージェントには、本文、分類結果、AccessContext、source_filters、attribute_filters、risk、depthを渡す。副作用のある依頼は `candidate_only` または `approval_required` として扱い、直接実行を許可しない。
@@ -319,7 +331,7 @@ trace保存用metadataも無制限には保存しない。大きな本文断片�
 | 状況 | 挙動 |
 | --- | --- |
 | 空入力 | routeを実行せず空responseまたは入力不足message |
-| 分類LLM失敗 | read-only RAG fallbackまたは確認質問。副作用候補は作らない |
+| 分類LLM失敗 | read-only NoRAG/RAG fallbackまたは確認質問。副作用候補は作らない |
 | 分類schema不正 | retry後にfallback。raw出力は `metadata` に短縮保存 |
 | 権限不足 | `deny` routeとして権限不足を返す |
 | ルーティング先例外 | route名とtrace idをmetadataに残し、利用者には短い失敗message |
@@ -350,7 +362,7 @@ pytestは未導入の前提で、既存のunittest方式に合わせる。
 | router parse | 拡張schemaをparseできる |
 | router fallback | LLM失敗時に副作用routeへ行かない |
 | access | Discord/CLI/HTTPから同じAccessContextが作られる |
-| route direct | 単一RAG、Minecraft Wiki、member、imageが正しいserviceへ委譲される |
+| route direct | NoRAG、単一RAG、Minecraft Wiki、member、imageが正しいserviceへ委譲される |
 | route workflow | task/event/serverのwork_type選択が正しい |
 | side effect boundary | read-onlyでは候補を作らず、direct mutation work_typeは候補化またはclarifyになる |
 | master invariance | 統合入力受付経由の完了・通知依頼で正本task/eventが直接変更されない |
@@ -358,17 +370,16 @@ pytestは未導入の前提で、既存のunittest方式に合わせる。
 | payload | 診断情報が `metadata` 配下に入る |
 | sanitizer | raw prompt、context、secret、画像local pathが外部payloadに出ない |
 | Discord output | 送信処理が統合入力受付adapterに集約される |
-| removed entrypoints | `ChatEntryUsecase`、`EntryQueryRouter`、CLI/HTTP/Discordの旧 `/ask` 分岐が削除され、`IntegratedInputUsecase` 経由だけになる |
+| retired entrypoints | `ChatEntryUsecase`、`EntryQueryRouter`、CLI/HTTP/Discordの旧 `/ask` 分岐を通常入力経路へ戻さず、`IntegratedInputUsecase` 経由だけになる |
 
-## 14. 移行方針
-本機能では互換経路を残さず、入口を `IntegratedInputUsecase` に統一する。
+## 14. 現行移行状態
+互換経路を残さず、入口は `IntegratedInputUsecase` に統一する方針で実装済みである。
 
-実装時は次を行う。
+現行維持条件は次の通り。
 
-1. 新しいdomain model、`IntegratedInputRouter`、`IntegratedInputUsecase` を追加する。
-2. `ChatEntryUsecase`、`ChatEntryRequest`、`EntryRoutingDecision`、`EntryRoute`、`EntryQueryRouter` を削除する。
-3. CLI `ask`、HTTP `/ask`、Discord `/ask` の個別分岐を削除し、すべて `IntegratedInputUsecase` を呼ぶ薄いadapterに置き換える。
-4. `direct_rag` / `openclaw` の2値分類とOpenClaw入口は廃止する。
-5. `/work` と `/approval` は明示的な管理・承認操作として残してよいが、通常依頼の入口にはしない。
-6. 各route先からDiscord送信責務を取り除き、response返却のみにする。
-7. 旧入口に対応するテストは削除または統合入力受付のテストへ置き換える。
+1. `ChatEntryUsecase`、`ChatEntryRequest`、`EntryRoutingDecision`、`EntryRoute`、`EntryQueryRouter` を新規経路へ戻さない。
+2. CLI `ask`、HTTP `/ask`、Discord `/ask` は薄いadapterとして `IntegratedInputUsecase` を呼ぶ。
+3. `direct_rag` / `openclaw` の2値分類とOpenClaw入口は通常入力経路に復活させない。
+4. `/work` と `/approval` は明示的な管理・承認操作として残してよいが、通常依頼の自然言語入口にはしない。
+5. 各route先はresponseを返し、Discord送信責務はfrontend adapterに限定する。
+6. 回帰テストは `tests/unit/test_integrated_input.py` とCLI payload系テストで、route、side effect boundary、metadata方針を確認する。

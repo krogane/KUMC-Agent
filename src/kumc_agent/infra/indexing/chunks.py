@@ -36,6 +36,9 @@ def chunk_embedding_text(chunk: Chunk) -> str:
         published_at = str(chunk.metadata.get("crafters_colony_published_at") or "").strip()
         if published_at:
             metadata_lines.append(f"crafters_colony_published_at: {published_at}")
+        updated_at = str(chunk.metadata.get("crafters_colony_updated_at") or "").strip()
+        if updated_at:
+            metadata_lines.append(f"crafters_colony_updated_at: {updated_at}")
         article_url = str(chunk.metadata.get("crafters_colony_article_url") or "").strip()
         if article_url:
             metadata_lines.append(f"crafters_colony_article_url: {article_url}")

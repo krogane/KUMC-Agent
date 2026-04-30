@@ -14,6 +14,10 @@ from kumc_agent.infra.automation import AutomationRepository
 from kumc_agent.infra.ingestion.repository import IngestionRepository
 from kumc_agent.infra.minecraft import ServerOperationRepository
 from kumc_agent.infra.workflow import WorkflowRepository
+from kumc_agent.features.workflow.extraction_window import (
+    build_extraction_window,
+    changed_at_from_metadata,
+)
 
 _OPEN_TASK_STATUSES = {"todo", "doing", "blocked"}
 
@@ -24,6 +28,7 @@ class SnapshotCollectorConfig:
     event_lookahead_days: int = 7
     stale_task_hours: int = 72
     recent_run_limit: int = 20
+    rag_delta_lookback_days: int = 1
     rag_delta_lookback_hours: int = 24
 
 
@@ -283,12 +288,15 @@ class AutonomousSnapshotCollector:
 
     def _collect_rag_delta(self, now: datetime) -> list[SnapshotItem]:
         assert self.ingestion_repository is not None
-        since = now - timedelta(hours=max(1, int(self.config.rag_delta_lookback_hours)))
+        window = build_extraction_window(
+            lookback_days=self.config.rag_delta_lookback_days,
+            extraction_at=now,
+        )
         by_source: dict[str, dict[str, Any]] = {}
         for chunk in self.ingestion_repository.load_active_chunks():
             metadata = dict(chunk.metadata)
-            changed_at = _changed_at(metadata)
-            if changed_at is None or changed_at < since:
+            changed_at = changed_at_from_metadata(metadata)
+            if changed_at is None or changed_at < window.since:
                 continue
             source_item_id = str(
                 metadata.get("source_item_id")
@@ -346,6 +354,7 @@ class AutonomousSnapshotCollector:
                         "external_id": payload["external_id"],
                         "changed_at": payload["changed_at"].isoformat(),
                         "chunk_count": len(payload["chunks"]),
+                        **window.as_metadata(),
                     },
                     citations=tuple(payload["citations"][:3]),
                 )
@@ -384,39 +393,6 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _changed_at(metadata: dict[str, Any]) -> datetime | None:
-    for key in (
-        "updated_at",
-        "source_updated_at",
-        "created_at",
-        "source_created_at",
-        "published_at",
-        "message_timestamp",
-        "hatenablog_updated_at",
-        "hatenablog_created_at",
-        "indexed_at",
-        "ingested_at",
-    ):
-        value = metadata.get(key)
-        if value:
-            parsed = _parse_datetime(value)
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def _parse_datetime(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        return _aware(value)
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        return _aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
-    except ValueError:
-        return None
 
 
 def _compact(text: str, limit: int) -> str:

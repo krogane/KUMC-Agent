@@ -26,6 +26,18 @@ from kumc_agent.infra.indexing.date_metadata import (
 from kumc_agent.infra.indexing.chunks import Chunk, load_chunks, write_chunks
 from kumc_agent.infra.indexing.constants import FILE_ID_SEPARATOR, MESSAGE_SEPARATORS
 from kumc_agent.infra.indexing.llm_client import generate_text
+from kumc_agent.infra.indexing.summary_searchability import (
+    SummarySearchabilityDecision,
+    build_summary_searchability_prompt,
+    normalize_summary_parent_id,
+    parse_summary_searchability_response,
+    summary_decision_sidecar_path,
+    write_summary_searchability_decisions,
+)
+from kumc_agent.infra.indexing.summary_quality import (
+    sanitize_summary_text,
+    summary_quality_metadata,
+)
 from kumc_agent.infra.indexing.utils import ensure_dir, sanitize_filename
 from kumc_agent.infra.indexing.sparse_normalizer import SparseNormalizer, SparseNormalizerConfig
 
@@ -34,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _METADATA_KEYS = (
     "source_file_name",
+    "source_kind",
     "source_type",
     "source_date",
     "updated_at",
@@ -89,10 +102,19 @@ _METADATA_KEYS = (
     "sensitivity",
     "sensitivity_findings",
     "hatenablog_title",
+    "hatenablog_entry_id",
     "hatenablog_created_at",
+    "hatenablog_updated_at",
     "hatenablog_url",
+    "hatenablog_html_normalized",
+    "hatenablog_image_count",
+    "hatenablog_images",
+    "hatenablog_related_link_count",
+    "hatenablog_related_links",
     "crafters_colony_title",
+    "crafters_colony_article_id",
     "crafters_colony_published_at",
+    "crafters_colony_updated_at",
     "crafters_colony_article_url",
     "notion_database_id",
     "notion_page_id",
@@ -190,7 +212,9 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
         "hatenablog_created_at",
         "hatenablog_url",
         "crafters_colony_title",
+        "crafters_colony_article_id",
         "crafters_colony_published_at",
+        "crafters_colony_updated_at",
         "crafters_colony_article_url",
         "source_date",
         "updated_at",
@@ -247,7 +271,11 @@ def _load_drive_metadata(source_path: Path) -> dict[str, object]:
             "slide_number",
             "normalized_record_id",
             "duplicate_group_size",
+            "hatenablog_image_count",
+            "hatenablog_related_link_count",
         } and isinstance(value, int):
+            metadata[key] = value
+        elif key == "hatenablog_html_normalized" and isinstance(value, bool):
             metadata[key] = value
     return metadata
 
@@ -268,9 +296,11 @@ def _build_base_metadata(
 
     metadata: dict[str, object] = {
         "source_file_name": source_file_name,
+        "source_kind": source_type,
         "source_type": source_type,
         "source_date": drive_metadata.get("source_date", SOURCE_DATE_UNKNOWN),
-        "updated_at": drive_metadata.get("updated_at", ""),
+        "updated_at": drive_metadata.get("updated_at")
+        or drive_metadata.get("crafters_colony_updated_at", ""),
         "meeting_date": "",
         "meeting_label": "",
         "drive_file_name": drive_file_name,
@@ -278,11 +308,29 @@ def _build_base_metadata(
         "drive_file_path": drive_file_path,
         "drive_file_id": drive_file_id,
         "hatenablog_title": drive_metadata.get("hatenablog_title", ""),
+        "hatenablog_entry_id": drive_metadata.get("hatenablog_entry_id", ""),
         "hatenablog_created_at": drive_metadata.get("hatenablog_created_at", ""),
+        "hatenablog_updated_at": drive_metadata.get("hatenablog_updated_at", ""),
         "hatenablog_url": drive_metadata.get("hatenablog_url", ""),
+        "hatenablog_html_normalized": drive_metadata.get("hatenablog_html_normalized", False),
+        "hatenablog_image_count": drive_metadata.get("hatenablog_image_count", 0),
+        "hatenablog_images": drive_metadata.get("hatenablog_images", []),
+        "hatenablog_related_link_count": drive_metadata.get(
+            "hatenablog_related_link_count",
+            0,
+        ),
+        "hatenablog_related_links": drive_metadata.get("hatenablog_related_links", []),
         "crafters_colony_title": drive_metadata.get("crafters_colony_title", ""),
+        "crafters_colony_article_id": drive_metadata.get(
+            "crafters_colony_article_id",
+            "",
+        ),
         "crafters_colony_published_at": drive_metadata.get(
             "crafters_colony_published_at",
+            "",
+        ),
+        "crafters_colony_updated_at": drive_metadata.get(
+            "crafters_colony_updated_at",
             "",
         ),
         "crafters_colony_article_url": drive_metadata.get(
@@ -643,6 +691,19 @@ def _cleanup_stale_jsonl_outputs(*, output_dir: Path, expected_names: set[str]) 
         except Exception as exc:
             logger.warning(
                 "Failed to remove stale chunk mtime sidecar %s: %s",
+                sidecar.name,
+                exc,
+            )
+    for sidecar in output_dir.glob("*.summary_decisions.json"):
+        chunk_name = sidecar.name[: -len(".summary_decisions.json")] + ".jsonl"
+        if chunk_name in expected_names:
+            continue
+        try:
+            sidecar.unlink()
+            logger.info("Removed stale summary decision sidecar: %s", sidecar.name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove stale summary decision sidecar %s: %s",
                 sidecar.name,
                 exc,
             )
@@ -1452,7 +1513,8 @@ def summery_chunk_jsonl_dir(
 
     expected_output_names = {path.name for path in jsonl_files}
     output_chunks_by_path: dict[Path, list[Chunk]] = {}
-    summary_jobs: list[tuple[Path, str, dict[str, object], str]] = []
+    decisions_by_path: dict[Path, list[tuple[object, SummarySearchabilityDecision]]] = {}
+    summary_jobs: list[tuple[Path, str, dict[str, object], str, str, str]] = []
     processed_paths: list[Path] = []
     input_path_by_output_path: dict[Path, Path] = {}
     summary_requests_per_minute = getattr(
@@ -1462,10 +1524,23 @@ def summery_chunk_jsonl_dir(
     )
     summary_model = config.summery_gemini_model
 
-    def _run_summary_prompt(prompt: str, *, source_name: str) -> list[str] | None:
-        return _run_llm_chunking(
+    def _run_summary_prompt(
+        prompt: str,
+        *,
+        source_name: str,
+        fallback_summary: str,
+    ) -> SummarySearchabilityDecision:
+        disabled = provider.strip().lower() in {"", "none", "off", "disabled", "false", "0"}
+        if disabled:
+            return SummarySearchabilityDecision.keep(
+                summary=fallback_summary,
+                reason="provider_disabled",
+                fallback_used=True,
+            )
+        return _run_llm_summary_decision(
             prompt=prompt,
             source_name=source_name,
+            fallback_summary=fallback_summary,
             provider=provider,
             api_key=config.gemini_api_key,
             gemini_requests_per_minute=summary_requests_per_minute,
@@ -1475,8 +1550,7 @@ def summery_chunk_jsonl_dir(
             max_retries=max_retries,
             action_label="Summery chunking",
             gemini_rate_limiter_name=index_summary_rate_limiter_name(),
-            output_format="raw_text",
-            response_mime_type="text/plain",
+            response_mime_type="application/json",
         )
 
     for path in jsonl_files:
@@ -1487,11 +1561,12 @@ def summery_chunk_jsonl_dir(
             skip_existing=skip_existing,
             update_existing=update_existing,
             action_label="summery chunking",
-        ):
+        ) and summary_decision_sidecar_path(out_path).exists():
             continue
         processed_paths.append(out_path)
         input_path_by_output_path[out_path] = path
         output_chunks_by_path[out_path] = []
+        decisions_by_path[out_path] = []
 
         chunks = load_chunks(path)
         if not chunks:
@@ -1532,51 +1607,95 @@ def summery_chunk_jsonl_dir(
                 source_type=source_type,
                 drive_file_path=drive_file_path,
             )
-            summary_jobs.append((out_path, path.name, base_metadata, prompt))
+            prompt = build_summary_searchability_prompt(prompt)
+            fallback_summary = str(source_text or "").strip()[: config.summery_characters]
+            summary_jobs.append(
+                (
+                    out_path,
+                    path.name,
+                    base_metadata,
+                    prompt,
+                    fallback_summary,
+                    source_text,
+                )
+            )
 
-    batch_results: list[list[str] | None] = [None] * len(summary_jobs)
+    batch_results: list[SummarySearchabilityDecision | None] = [None] * len(summary_jobs)
     for batch_start in range(0, len(summary_jobs), summary_batch_size):
         batch = summary_jobs[batch_start : batch_start + summary_batch_size]
         if len(batch) == 1:
-            _out_path, source_name, _metadata, prompt = batch[0]
+            _out_path, source_name, _metadata, prompt, fallback_summary, _source_text = batch[0]
             batch_results[batch_start] = _run_summary_prompt(
                 prompt,
                 source_name=source_name,
+                fallback_summary=fallback_summary,
             )
             continue
 
         with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            futures: dict[Future[list[str] | None], int] = {}
-            for offset, (_out_path, source_name, _metadata, prompt) in enumerate(batch):
+            futures: dict[Future[SummarySearchabilityDecision], int] = {}
+            for offset, (
+                _out_path,
+                source_name,
+                _metadata,
+                prompt,
+                fallback_summary,
+                _source_text,
+            ) in enumerate(batch):
                 futures[
                     executor.submit(
                         _run_summary_prompt,
                         prompt,
                         source_name=source_name,
+                        fallback_summary=fallback_summary,
                     )
                 ] = batch_start + offset
             for future in as_completed(futures):
                 batch_results[futures[future]] = future.result()
 
     output_indexes: dict[Path, int] = {path: 0 for path in processed_paths}
-    for (out_path, _source_name, base_metadata, _prompt), chunk_texts in zip(
+    for (
+        out_path,
+        _source_name,
+        base_metadata,
+        _prompt,
+        _fallback_summary,
+        source_text,
+    ), decision in zip(
         summary_jobs,
         batch_results,
         strict=False,
     ):
-        if chunk_texts is None:
+        if decision is None:
             continue
-        for chunk_text in chunk_texts:
-            metadata = dict(base_metadata)
-            metadata["chunk_id"] = output_indexes[out_path]
-            metadata = _with_stage(metadata, "summery")
-            output_chunks_by_path[out_path].append(
-                Chunk(text=chunk_text, metadata=metadata)
+        parent_id = normalize_summary_parent_id(base_metadata.get("parent_chunk_id"))
+        decisions_by_path.setdefault(out_path, []).append((parent_id, decision))
+        if not decision.searchable:
+            continue
+        chunk_text = sanitize_summary_text(decision.summary)
+        if not chunk_text:
+            continue
+        metadata = dict(base_metadata)
+        metadata["chunk_id"] = output_indexes[out_path]
+        metadata.update(
+            summary_quality_metadata(
+                source_text=str(source_text or ""),
+                summary_text=chunk_text,
+                decision=decision,
             )
-            output_indexes[out_path] += 1
+        )
+        metadata = _with_stage(metadata, "summery")
+        output_chunks_by_path[out_path].append(
+            Chunk(text=chunk_text, metadata=metadata)
+        )
+        output_indexes[out_path] += 1
 
     for out_path in processed_paths:
         write_chunks(out_path, output_chunks_by_path.get(out_path, []))
+        write_summary_searchability_decisions(
+            path=summary_decision_sidecar_path(out_path),
+            decisions=decisions_by_path.get(out_path, []),
+        )
         input_path = input_path_by_output_path[out_path]
         _write_chunk_mtime_sidecar(chunk_path=out_path, input_path=input_path)
         logger.info(
@@ -1749,6 +1868,67 @@ def _parse_llm_summary(response: str, *, source_name: str) -> list[str]:
     if not text:
         raise ValueError(f"LLM produced no summary for {source_name}")
     return [text]
+
+
+def _run_llm_summary_decision(
+    *,
+    prompt: str,
+    source_name: str,
+    fallback_summary: str,
+    provider: str,
+    api_key: str,
+    gemini_requests_per_minute: int,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    max_retries: int,
+    action_label: str,
+    gemini_rate_limiter_name: str = "",
+    response_mime_type: str | None = "application/json",
+) -> SummarySearchabilityDecision:
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = generate_text(
+                provider=provider,
+                api_key=api_key,
+                prompt=prompt,
+                model=model,
+                system_prompt=get_llm_chunk_system_prompt(),
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                response_mime_type=response_mime_type,
+                gemini_requests_per_minute=gemini_requests_per_minute,
+                gemini_rate_limiter_name=gemini_rate_limiter_name,
+            )
+            return parse_summary_searchability_response(
+                response,
+                fallback_summary=fallback_summary,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_retries:
+                logger.warning(
+                    "%s failed for %s (attempt %d/%d): %s",
+                    action_label,
+                    source_name,
+                    attempt,
+                    max_retries,
+                    exc,
+                )
+                continue
+            logger.error(
+                "%s failed for %s after %d attempts",
+                action_label,
+                source_name,
+                max_retries,
+            )
+    return SummarySearchabilityDecision.keep(
+        summary=fallback_summary,
+        reason=str(last_error or "generation_failed"),
+        fallback_used=True,
+        parse_failed=True,
+    )
 
 
 def _run_llm_chunking(

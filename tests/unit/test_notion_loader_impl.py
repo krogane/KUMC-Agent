@@ -213,7 +213,13 @@ class NotionLoaderImplTests(unittest.TestCase):
                     return parent
                 return child
 
-            def render_page(*, api_token: str, page: NotionPage, references: set[tuple[str, str]] | None = None) -> str:
+            def render_page(
+                *,
+                api_token: str,
+                page: NotionPage,
+                references: set[tuple[str, str]] | None = None,
+                **_kwargs,
+            ) -> str:
                 if page.page_id == parent.page_id and references is not None:
                     references.add(("page", child.page_id))
                 return f"# {page.title}\n\nbody\n"
@@ -257,7 +263,13 @@ class NotionLoaderImplTests(unittest.TestCase):
             )
             db_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
-            def render_page(*, api_token: str, page: NotionPage, references: set[tuple[str, str]] | None = None) -> str:
+            def render_page(
+                *,
+                api_token: str,
+                page: NotionPage,
+                references: set[tuple[str, str]] | None = None,
+                **_kwargs,
+            ) -> str:
                 if page.page_id == parent.page_id and references is not None:
                     references.add(("database", db_id))
                 return f"# {page.title}\n\nbody\n"
@@ -302,6 +314,97 @@ class NotionLoaderImplTests(unittest.TestCase):
         )
 
         self.assertEqual(references, {("page", "99999999999999999999999999999999")})
+
+    def test_metadata_includes_access_path_and_asset_audit_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td)
+            page = NotionPage(
+                page_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                title="Page A",
+                url="https://www.notion.so/workspace/page-a",
+                last_edited_time="2026-01-01T00:00:00Z",
+                created_time="2026-01-01T00:00:00Z",
+            )
+
+            def collect_blocks(**_kwargs):
+                return {
+                    "results": [
+                        {
+                            "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                            "type": "image",
+                            "has_children": False,
+                            "image": {"caption": []},
+                        }
+                    ],
+                    "has_more": False,
+                }
+
+            with (
+                patch.object(notion_impl, "_retrieve_page", return_value=page),
+                patch.object(notion_impl, "_notion_request_json", side_effect=collect_blocks),
+            ):
+                stats = notion_impl.download_notion_database_pages(
+                    api_token="token",
+                    database_ids=[],
+                    page_ids=[page.page_id],
+                    output_dir=output_dir,
+                    skip_existing=True,
+                    update_existing=True,
+                    sync_deleted=True,
+                    default_visibility="public",
+                    return_stats=True,
+                )
+
+            self.assertEqual(stats.pages_seen, 1)
+            metadata = notion_impl._read_page_metadata(
+                next((output_dir / "pages").glob("*.md"))
+            )
+            self.assertEqual(metadata["access_scope"]["visibility"], "public")
+            self.assertEqual(metadata["notion_page_path"], "Page A")
+            self.assertEqual(metadata["notion_asset_count"], 1)
+            self.assertEqual(metadata["notion_unsupported_block_types"], ["image"])
+
+    def test_misclassified_database_id_is_retried_as_page(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td)
+            page = NotionPage(
+                page_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                title="Page A",
+                url="https://www.notion.so/workspace/page-a",
+                last_edited_time="2026-01-01T00:00:00Z",
+                created_time="2026-01-01T00:00:00Z",
+            )
+
+            with (
+                patch.object(
+                    notion_impl,
+                    "_list_database_pages",
+                    side_effect=RuntimeError("Provided ID is a page, not a database. Use the retrieve page API instead"),
+                ),
+                patch.object(notion_impl, "_retrieve_page", return_value=page),
+                patch.object(
+                    notion_impl,
+                    "_render_page_markdown",
+                    return_value="# Page A\n\nbody\n",
+                ),
+            ):
+                stats = notion_impl.download_notion_database_pages(
+                    api_token="token",
+                    database_ids=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+                    page_ids=[],
+                    output_dir=output_dir,
+                    skip_existing=True,
+                    update_existing=True,
+                    sync_deleted=True,
+                    return_stats=True,
+                )
+
+            self.assertEqual(stats.pages_updated, 1)
+            self.assertEqual(
+                stats.misclassified_database_ids,
+                ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",),
+            )
+            self.assertTrue((output_dir / "pages").exists())
 
 
 if __name__ == "__main__":

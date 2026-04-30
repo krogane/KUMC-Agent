@@ -24,6 +24,12 @@ from kumc_agent.features.rag.config import RagConfig, RagGenerationSettings
 from kumc_agent.features.rag.service import RagService
 from kumc_agent.features.indexing.service import IndexBuildResult, IndexingService
 from kumc_agent.infra.connectors.minecraft_wiki import MinecraftWikiConnector
+from kumc_agent.infra.indexing.chunks import Chunk as LegacyChunk
+from kumc_agent.infra.indexing.chunks import load_chunks, write_chunks
+from kumc_agent.infra.indexing.summary_searchability import (
+    load_summary_searchability_decisions,
+    summary_decision_sidecar_path,
+)
 from kumc_agent.usecases.indexing.build import BuildIndexRequest, BuildIndexUsecase
 
 
@@ -545,6 +551,55 @@ class MinecraftWikiRagTests(unittest.TestCase):
         self.assertIn("記事名: 丸石", summary)
         self.assertIn("丸石は石を採掘すると得られる。", summary)
         self.assertIn("表や箇条書きの情報は文章として保持", llm.user_prompt)
+
+    def test_minecraft_wiki_summary_skips_unsearchable_chunk(self) -> None:
+        class _SummaryLLM:
+            def generate(self, *, system_prompt, user_prompt, temperature, max_output_tokens):  # noqa: ANN001, ARG002
+                return '{"searchable": false, "summary": "", "reason": "見出しだけ"}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            input_path = input_dir / "wiki.jsonl"
+            write_chunks(
+                input_path,
+                [
+                    LegacyChunk(
+                        text="== 入手 ==",
+                        metadata={"chunk_id": 0, "minecraft_wiki_title": "丸石"},
+                    )
+                ],
+            )
+            service = object.__new__(IndexingService)
+            service._minecraft_wiki_summary_llm = _SummaryLLM()
+            service._runtime = SimpleNamespace(
+                minecraft_wiki_rag=SimpleNamespace(
+                    chunking=SimpleNamespace(
+                        summary_characters=80,
+                        summary_batch_size=1,
+                        summary_llm_provider="gemini",
+                        summary_temperature=0.0,
+                        summary_max_output_tokens=128,
+                    )
+                )
+            )
+
+            service._build_minecraft_wiki_summary_chunks(  # noqa: SLF001
+                input_chunk_dir=input_dir,
+                output_chunk_dir=output_dir,
+                skip_existing=False,
+                update_existing=True,
+                sync_deleted=True,
+            )
+
+            output_path = output_dir / "wiki.jsonl"
+            self.assertEqual(load_chunks(output_path), [])
+            decisions = load_summary_searchability_decisions(
+                summary_decision_sidecar_path(output_path)
+            )
+            self.assertFalse(decisions["0"].searchable)
 
     def test_manual_build_refreshes_minecraft_wiki_connector(self) -> None:
         class _Loader:

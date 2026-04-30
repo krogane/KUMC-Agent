@@ -25,7 +25,7 @@
 対象外は、ユーザー承認が必要なTask/Event候補の自動承認、サーバー管理操作、任意shell command実行である。
 
 ## 3. 実装方針
-2026-04時点の実装は、自動更新の正本を `features.ingestion` が保存する `source_items`、`documents`、`chunks`、`sync_cursors` とし、公開indexは `AutoIndexUpdateUsecase` が1 run単位で構築・検査・publishする。
+2026-04-30時点の実装は、自動更新の正本を `features.ingestion` が保存する `source_items`、`documents`、`chunks`、`sync_cursors` とし、公開indexは `AutoIndexUpdateUsecase` が1 run単位で構築・検査・publishする。
 
 | 項目 | 実装方針 |
 | --- | --- |
@@ -37,6 +37,7 @@
 | 画像 | raw sourceから画像候補をscanし、caption/OCR/feature vectorをstaging snapshot配下の `image_search` indexへ構築する |
 | member_profiles | Guild memberのfingerprint差分で必要なprofileだけ再生成し、退会・除外profileをinactiveとして検索除外する |
 | Task/Event | workflow repositoryのTask/Event正本だけを `task_event` indexへ投影し、削除済みTaskとcanceled Eventは除外する |
+| Task/Event抽出 | `workflow_extraction.lookback_days` の rolling 24h × n 以内のtimestampを持つactive chunkだけを候補抽出に渡し、時刻不明chunkは除外する |
 | 削除・権限喪失 | `source_items/chunks.index_status` とFile fallbackの状態ログを検索index構築前に反映し、raw fileが残っていてもactive indexへ入れない |
 | 品質確認 | Dense/Sparse artifact load、chunk急減、smoke query、禁止status混入、画像/member/task_event index loadを検査する |
 | publish/rollback | staging成果物を `data/index/releases/{snapshot_id}` にpublishし、`current.json` のatomic更新で公開する。publish失敗時はprevious snapshotへrollbackして `metadata.rollback` に保存する |
@@ -65,6 +66,8 @@ flowchart TD
 ## 5. 起動と実行制御
 ### 5.1 スケジュール
 設定は現行の `configs/main/scheduler.yaml` と `RuntimeConfig.scheduler` を使う。
+
+Task/Event候補抽出に渡すRAG差分の対象期間は `configs/main/workflow_extraction.yaml` の `workflow_extraction.lookback_days` を使う。この値は抽出開始時刻から rolling 24h × n として解釈する。
 
 | 設定 | 説明 |
 | --- | --- |
@@ -96,6 +99,8 @@ flowchart TD
 
 File/Redis lock は実行中に heartbeat でleaseを延長する。`scheduler.auto_index_max_runtime_minutes` を超えた run は失敗扱いにし、TTL切れによる二重起動を防ぐ。
 
+File fallbackの実行履歴には、実行開始時の `running` 行を永続追記せず、成功・失敗・キャンセル・skipなどの終端状態だけを保存する。これにより、途中でstaging artifactが作られた後でも `indexing_runs` 上に新しい未完了runが残り続ける状態を避ける。
+
 ## 6. データモデル
 ### 6.1 IndexingRun
 主ログは現行の `domain.models.operations.IndexingRun` と `indexing_runs` tableを使う。
@@ -104,7 +109,7 @@ File/Redis lock は実行中に heartbeat でleaseを延長する。`scheduler.a
 | --- | --- |
 | `id` | run id。`auto-index:{timestamp}:{trigger}` など |
 | `source_kind` | source別runの場合はsource名、全体runの場合は `all` |
-| `status` | `running`, `succeeded`, `failed`, `skipped`, `rolled_back` |
+| `status` | `running`, `succeeded`, `failed`, `cancelled`, `skipped`, `rolled_back` |
 | `seen` | 検査したsource item数 |
 | `changed` | 新規・更新・権限変更として処理した件数 |
 | `skipped` | checksum/revision一致で処理しなかった件数 |
@@ -118,8 +123,9 @@ File/Redis lock は実行中に heartbeat でleaseを延長する。`scheduler.a
 | --- | --- |
 | `trigger` | `schedule`, `manual`, `worker`, `automation` |
 | `source_results` | source別件数 |
+| `workflow_extraction` | Task/Event候補抽出の結果。`lookback_days`、`extraction_since`、`extraction_at`、`selected_chunks`、`excluded_older_chunks`、`excluded_missing_timestamp_chunks` を含める |
 | `changed_items` | 外部出力可能な範囲の再index対象ID |
-| `stage_results` | raw、chunk、embedding、sparse、image、member、task_eventの結果 |
+| `stage_results` | raw、chunk、embedding、sparse、source別quality、image、member、task_eventの結果 |
 | `quality_check` | smoke check結果 |
 | `index_snapshot_id` | 更新対象snapshot |
 | `previous_snapshot_id` | rollback元 |
@@ -217,6 +223,8 @@ sourceごとのcursorは `sync_cursors` に保存する。cursorを持つsource�
 
 `index_status in deleted/quarantined/permission_lost` のchunkはDense/Sparse/回答コンテキストから除外する。
 
+Notionでは、raw Markdown、sidecar metadata、ingestion repository、最終indexに含まれる `notion_page_id` のcoverageを `indexing.notion_quality` で検査し、結果を `stage_results.notion_quality.metadata` に保存する。coverage不足、短文率超過、heading/url only率超過、重複率超過は `policy=warn` では警告、`policy=fail` ではpublish前停止の対象にする。auto-index run metadataには `notion_repository_coverage_ratio`、`notion_index_coverage_ratio`、`notion_unique_page_ids` など、運用確認に必要な集計値を昇格して保存できる。
+
 ### 9.3 embedding / sparse index
 Dense indexは第2 Recursive ChunkとSummary Chunkを対象に構築する。Sparse indexは通常BM25とステミング転置インデックスを作る。
 
@@ -243,6 +251,8 @@ publish中に失敗した場合は `previous` snapshotへ `current.json` を戻�
 | 代表クエリで1件以上返る | 重大失敗またはdegraded |
 | 権限外sourceが検索結果に混入しない | 重大失敗 |
 | `index_status=deleted/quarantined/permission_lost` が返らない | 重大失敗 |
+| Notion raw / repository / index coverageが閾値を下回らない | `indexing.notion_quality.policy` に従い警告または重大失敗 |
+| Notion低情報量・重複本文の比率が閾値を超えない | `indexing.notion_quality.policy` に従い警告または重大失敗 |
 | 画像/member/task/event indexがロードできる | 対象feature有効時は重大失敗 |
 
 重大失敗では新indexを公開しない。すでに公開済みの場合は直前snapshotへrollbackする。
@@ -294,6 +304,8 @@ CLIや外部連携payloadのトップレベルは安定フィールドだけに�
 | `quality_min_chunk_ratio` | `configs/main/scheduler.yaml` | 前回比chunk数の下限 |
 | `quality_smoke_queries` | `configs/main/scheduler.yaml` または `configs/main/index_quality.yaml` | 代表クエリ |
 | `rollback_keep_snapshots` | `configs/main/scheduler.yaml` | 保存snapshot数 |
+| `indexing.notion_quality.*` | `configs/main/indexing.yaml` | Notion raw / repository / index coverage、短文率、heading-only率、重複率の閾値と `warn` / `fail` policy |
+| `integrations.notion.default_visibility` | `configs/main/integrations.yaml` | Notion raw sidecar / chunk metadataの既定公開範囲。初期値は `public` |
 
 `.env` または `.env.example` のどちらか一方で項目を追加・削除する場合は、必ず他方にも反映する。
 
@@ -319,7 +331,9 @@ pytestは未導入前提のため、既存方式に合わせて `unittest` で�
 - checksum/revision/ACL hashによる差分判定
 - deletionとpermission_lostの検索除外
 - `IndexingRun` の保存内容
+- auto-index runが成功・失敗・キャンセル・skipの終端状態として保存され、新規 `running` 履歴が残らないこと
 - stagingからcurrentへのatomic publish
 - 品質smoke check失敗時のrollback
+- Notion quality payloadとcoverage集計が `metadata.stage_results.notion_quality` とrun metadataに保存されること
 - CLI/worker/automation payloadで診断情報が `metadata` 配下に入ること
 - `src/kumc_agent/infra/legacy` に依存しないこと

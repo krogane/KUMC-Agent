@@ -57,6 +57,7 @@ class IngestionRepository(Protocol):
 @dataclass(frozen=True)
 class FileIngestionRepository:
     root_dir: Path
+    auto_compact: bool = True
 
     def load_checksums(self, source_kind: str) -> dict[str, str]:
         return {
@@ -106,6 +107,7 @@ class FileIngestionRepository:
                 "updated_at": datetime.now(UTC).isoformat(),
             },
         )
+        self._compact_after_write(source_kind=cursor.source_kind)
         return cursor
 
     def load_active_chunks(self, *, source_kinds: tuple[str, ...] = tuple()) -> list[Chunk]:
@@ -141,6 +143,7 @@ class FileIngestionRepository:
                 _append_jsonl(self.root_dir / "chunk_acl_entries.jsonl", entry)
         for finding in findings:
             _append_jsonl(self.root_dir / "secret_findings.jsonl", asdict(finding))
+        self._compact_after_write(source_kind=raw.source_kind)
 
     def mark_deleted(
         self,
@@ -158,6 +161,25 @@ class FileIngestionRepository:
                 "index_status": status,
                 "deleted_at": datetime.now(UTC).isoformat(),
             },
+        )
+        self._compact_after_write(source_kind=source_kind)
+
+    def compact_history(
+        self,
+        *,
+        source_kinds: tuple[str, ...] = tuple(),
+    ) -> dict[str, object]:
+        return compact_file_ingestion_history(
+            root_dir=self.root_dir,
+            source_kinds=source_kinds,
+        )
+
+    def _compact_after_write(self, *, source_kind: str) -> None:
+        if not self.auto_compact:
+            return
+        compact_file_ingestion_history(
+            root_dir=self.root_dir,
+            source_kinds=(source_kind,),
         )
 
 
@@ -465,10 +487,353 @@ def build_ingestion_repository(
     return FileIngestionRepository(root_dir=fallback_dir)
 
 
+def compact_file_ingestion_history(
+    *,
+    root_dir: Path,
+    source_kinds: tuple[str, ...] = tuple(),
+) -> dict[str, object]:
+    root_dir.mkdir(parents=True, exist_ok=True)
+    source_filter = {str(value) for value in source_kinds if str(value).strip()}
+    before_quality = build_file_ingestion_quality_report(
+        root_dir=root_dir,
+        source_kinds=source_kinds,
+    )
+    files = (
+        "source_items.jsonl",
+        "source_deletes.jsonl",
+        "documents.jsonl",
+        "chunks.jsonl",
+        "chunk_acl_entries.jsonl",
+        "secret_findings.jsonl",
+        "sync_cursors.jsonl",
+    )
+    before_counts = {
+        name: len(_read_jsonl(root_dir / name))
+        for name in files
+        if (root_dir / name).exists()
+    }
+
+    source_item_rows = _read_jsonl(root_dir / "source_items.jsonl")
+    delete_rows = _read_jsonl(root_dir / "source_deletes.jsonl")
+    document_rows = _read_jsonl(root_dir / "documents.jsonl")
+    chunk_rows = _read_jsonl(root_dir / "chunks.jsonl")
+    acl_rows = _read_jsonl(root_dir / "chunk_acl_entries.jsonl")
+    finding_rows = _read_jsonl(root_dir / "secret_findings.jsonl")
+    cursor_rows = _read_jsonl(root_dir / "sync_cursors.jsonl")
+
+    latest_deletes = _latest_payloads(
+        delete_rows,
+        key_fn=_source_item_key,
+        source_filter=source_filter,
+    )
+
+    passthrough_source_items: list[dict[str, object]] = []
+    selected_source_items: list[dict[str, object]] = []
+    selected_source_item_ids: set[str] = set()
+    for payload in source_item_rows:
+        if not _source_matches(payload, source_filter):
+            passthrough_source_items.append(payload)
+            continue
+        selected_source_items.append(payload)
+        source_item_id = str(payload.get("id") or "")
+        if source_item_id:
+            selected_source_item_ids.add(source_item_id)
+
+    latest_source_items = _latest_payloads(
+        selected_source_items,
+        key_fn=_source_item_key,
+        source_filter=set(),
+    )
+    active_source_items: list[dict[str, object]] = []
+    active_source_item_ids: set[str] = set()
+    for key, payload in latest_source_items.items():
+        compacted = dict(payload)
+        latest_delete = latest_deletes.get(key)
+        index_status = str(
+            (latest_delete or {}).get("index_status")
+            or compacted.get("index_status")
+            or "active"
+        )
+        compacted["index_status"] = index_status
+        if index_status != "active":
+            continue
+        source_item_id = str(compacted.get("id") or "")
+        if source_item_id:
+            active_source_item_ids.add(source_item_id)
+        active_source_items.append(compacted)
+    source_items_by_id = {
+        str(payload.get("id") or ""): payload
+        for payload in active_source_items
+        if str(payload.get("id") or "")
+    }
+
+    source_items_out = passthrough_source_items + active_source_items
+
+    selected_delete_rows: list[dict[str, object]] = []
+    passthrough_delete_rows: list[dict[str, object]] = []
+    for payload in delete_rows:
+        if _source_matches(payload, source_filter):
+            continue
+        passthrough_delete_rows.append(payload)
+    selected_delete_rows = list(latest_deletes.values())
+    delete_out = passthrough_delete_rows + selected_delete_rows
+
+    passthrough_documents: list[dict[str, object]] = []
+    selected_documents: list[dict[str, object]] = []
+    selected_document_ids: set[str] = set()
+    for payload in document_rows:
+        source_item_id = str(payload.get("source_item_id") or "")
+        if source_item_id not in selected_source_item_ids:
+            passthrough_documents.append(payload)
+            continue
+        selected_documents.append(payload)
+        document_id = str(payload.get("id") or "")
+        if document_id:
+            selected_document_ids.add(document_id)
+
+    latest_documents = _latest_payloads(
+        selected_documents,
+        key_fn=lambda payload: str(payload.get("source_item_id") or ""),
+        source_filter=set(),
+    )
+    active_documents = []
+    for payload in latest_documents.values():
+        source_item_id = str(payload.get("source_item_id") or "")
+        if source_item_id not in active_source_item_ids:
+            continue
+        active_documents.append(
+            _enrich_document_payload(
+                payload,
+                source_item=source_items_by_id.get(source_item_id),
+            )
+        )
+    active_document_ids = {
+        str(payload.get("id") or "")
+        for payload in active_documents
+        if str(payload.get("id") or "")
+    }
+    documents_out = passthrough_documents + active_documents
+
+    passthrough_chunks: list[dict[str, object]] = []
+    selected_chunks: list[dict[str, object]] = []
+    selected_chunk_ids: set[str] = set()
+    for payload in chunk_rows:
+        document_id = str(payload.get("document_id") or "")
+        if document_id not in selected_document_ids:
+            passthrough_chunks.append(payload)
+            continue
+        selected_chunks.append(payload)
+        chunk_id = str(payload.get("id") or "")
+        if chunk_id:
+            selected_chunk_ids.add(chunk_id)
+
+    latest_chunks = _latest_payloads(
+        selected_chunks,
+        key_fn=lambda payload: str(payload.get("id") or ""),
+        source_filter=set(),
+    )
+    active_chunks = [
+        payload
+        for payload in latest_chunks.values()
+        if str(payload.get("document_id") or "") in active_document_ids
+        and str(payload.get("index_status") or "active") == "active"
+    ]
+    active_chunk_ids = {
+        str(payload.get("id") or "")
+        for payload in active_chunks
+        if str(payload.get("id") or "")
+    }
+    chunks_out = passthrough_chunks + active_chunks
+
+    acl_out = _compact_chunk_acl_entries(
+        rows=acl_rows,
+        selected_chunk_ids=selected_chunk_ids,
+        active_chunk_ids=active_chunk_ids,
+        compact_all=not source_filter,
+    )
+    finding_out = _compact_secret_findings(
+        rows=finding_rows,
+        selected_source_item_ids=selected_source_item_ids,
+        active_source_item_ids=active_source_item_ids,
+        selected_chunk_ids=selected_chunk_ids,
+        active_chunk_ids=active_chunk_ids,
+        compact_all=not source_filter,
+    )
+    cursor_out = _compact_sync_cursors(rows=cursor_rows, source_filter=source_filter)
+
+    outputs = {
+        "source_items.jsonl": source_items_out,
+        "source_deletes.jsonl": delete_out,
+        "documents.jsonl": documents_out,
+        "chunks.jsonl": chunks_out,
+        "chunk_acl_entries.jsonl": acl_out,
+        "secret_findings.jsonl": finding_out,
+        "sync_cursors.jsonl": cursor_out,
+    }
+    for name, rows in outputs.items():
+        path = root_dir / name
+        if path.exists() or rows:
+            _write_jsonl_atomic(path, rows)
+
+    current_views = write_file_ingestion_current_views(root_dir=root_dir)
+    after_quality = build_file_ingestion_quality_report(
+        root_dir=root_dir,
+        source_kinds=source_kinds,
+    )
+    quality_payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "source_kinds": sorted(source_filter),
+        "before_compaction": before_quality,
+        "after_compaction": after_quality,
+        "current_views": current_views,
+    }
+    _write_json_atomic(root_dir / "ingestion_quality_report.json", quality_payload)
+
+    after_counts = {
+        name: len(_read_jsonl(root_dir / name))
+        for name in files
+        if (root_dir / name).exists()
+    }
+    return {
+        "status": "succeeded",
+        "source_kinds": sorted(source_filter),
+        "files": {
+            name: {
+                "before": before_counts.get(name, 0),
+                "after": after_counts.get(name, 0),
+            }
+            for name in files
+            if name in before_counts or name in after_counts
+        },
+        "active_source_items": len(active_source_item_ids),
+        "active_documents": len(active_document_ids),
+        "active_chunks": len(active_chunk_ids),
+        "current_views": current_views,
+        "quality_report": quality_payload,
+    }
+
+
+def write_file_ingestion_current_views(*, root_dir: Path) -> dict[str, object]:
+    current = _current_file_ingestion_rows(root_dir=root_dir)
+    outputs = {
+        "current_source_items.jsonl": current["source_items"],
+        "current_documents.jsonl": current["documents"],
+        "current_chunks.jsonl": current["chunks"],
+        "current_chunk_acl_entries.jsonl": current["chunk_acl_entries"],
+    }
+    for name, rows in outputs.items():
+        _write_jsonl_atomic(root_dir / name, list(rows))
+    return {
+        name: len(rows)
+        for name, rows in outputs.items()
+    }
+
+
+def build_file_ingestion_quality_report(
+    *,
+    root_dir: Path,
+    source_kinds: tuple[str, ...] = tuple(),
+) -> dict[str, object]:
+    source_filter = {str(value) for value in source_kinds if str(value).strip()}
+    source_items = _read_jsonl(root_dir / "source_items.jsonl")
+    deletes = _read_jsonl(root_dir / "source_deletes.jsonl")
+    documents = _read_jsonl(root_dir / "documents.jsonl")
+    chunks = _read_jsonl(root_dir / "chunks.jsonl")
+    acl_entries = _read_jsonl(root_dir / "chunk_acl_entries.jsonl")
+    source_by_id = {
+        str(payload.get("id") or ""): str(payload.get("source_kind") or "")
+        for payload in source_items
+        if str(payload.get("id") or "")
+    }
+    document_source_by_id: dict[str, str] = {}
+    for payload in documents:
+        source_kind = _source_kind_for_document(payload, source_by_id=source_by_id)
+        document_id = str(payload.get("id") or "")
+        if document_id:
+            document_source_by_id[document_id] = source_kind
+
+    return {
+        "source_kinds": sorted(source_filter),
+        "files": {
+            "source_items.jsonl": _duplicate_report(
+                rows=source_items,
+                source_filter=source_filter,
+                source_fn=lambda payload: str(payload.get("source_kind") or ""),
+                key_fn=_source_item_key,
+            ),
+            "source_deletes.jsonl": _duplicate_report(
+                rows=deletes,
+                source_filter=source_filter,
+                source_fn=lambda payload: str(payload.get("source_kind") or ""),
+                key_fn=_source_item_key,
+            ),
+            "source_deletes_active.jsonl": _duplicate_report(
+                rows=[
+                    payload
+                    for payload in deletes
+                    if str(payload.get("index_status") or "") == "active"
+                ],
+                source_filter=source_filter,
+                source_fn=lambda payload: str(payload.get("source_kind") or ""),
+                key_fn=_source_item_key,
+            ),
+            "documents.jsonl": _duplicate_report(
+                rows=documents,
+                source_filter=source_filter,
+                source_fn=lambda payload: _source_kind_for_document(
+                    payload,
+                    source_by_id=source_by_id,
+                ),
+                key_fn=lambda payload: str(payload.get("source_item_id") or payload.get("id") or ""),
+            ),
+            "chunks.jsonl": _duplicate_report(
+                rows=chunks,
+                source_filter=source_filter,
+                source_fn=lambda payload: _source_kind_for_chunk(
+                    payload,
+                    document_source_by_id=document_source_by_id,
+                ),
+                key_fn=lambda payload: str(payload.get("id") or ""),
+            ),
+            "chunk_acl_entries.jsonl": _duplicate_report(
+                rows=acl_entries,
+                source_filter=set(),
+                source_fn=lambda _payload: "",
+                key_fn=lambda payload: "|".join(
+                    (
+                        str(payload.get("chunk_id") or ""),
+                        str(payload.get("acl_type") or ""),
+                        str(payload.get("acl_value") or ""),
+                    )
+                ),
+            ),
+        },
+    }
+
+
 def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fw:
         fw.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def _write_jsonl_atomic(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fw:
+        for payload in rows:
+            fw.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    tmp_path.replace(path)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 def _apply_file_deletes(
@@ -567,6 +932,338 @@ def _latest_payloads_by_key(path: Path, key_fn) -> dict[str, dict[str, object]]:
     return latest
 
 
+def _latest_payloads(
+    rows: list[dict[str, object]],
+    *,
+    key_fn,
+    source_filter: set[str],
+) -> dict[str, dict[str, object]]:
+    latest: dict[str, dict[str, object]] = {}
+    for payload in rows:
+        if not _source_matches(payload, source_filter):
+            continue
+        key = key_fn(payload)
+        if key:
+            latest[str(key)] = payload
+    return latest
+
+
+def _current_file_ingestion_rows(*, root_dir: Path) -> dict[str, list[dict[str, object]]]:
+    source_item_rows = _read_jsonl(root_dir / "source_items.jsonl")
+    delete_rows = _read_jsonl(root_dir / "source_deletes.jsonl")
+    document_rows = _read_jsonl(root_dir / "documents.jsonl")
+    chunk_rows = _read_jsonl(root_dir / "chunks.jsonl")
+    acl_rows = _read_jsonl(root_dir / "chunk_acl_entries.jsonl")
+
+    latest_source_items = _latest_payloads(
+        source_item_rows,
+        key_fn=_source_item_key,
+        source_filter=set(),
+    )
+    latest_deletes = _latest_payloads(
+        delete_rows,
+        key_fn=_source_item_key,
+        source_filter=set(),
+    )
+    active_source_items: list[dict[str, object]] = []
+    active_source_item_ids: set[str] = set()
+    for key, payload in latest_source_items.items():
+        current = dict(payload)
+        latest_delete = latest_deletes.get(key)
+        index_status = str(
+            (latest_delete or {}).get("index_status")
+            or current.get("index_status")
+            or "active"
+        )
+        current["index_status"] = index_status
+        if index_status != "active":
+            continue
+        source_item_id = str(current.get("id") or "")
+        if source_item_id:
+            active_source_item_ids.add(source_item_id)
+        active_source_items.append(current)
+
+    source_items_by_id = {
+        str(payload.get("id") or ""): payload
+        for payload in active_source_items
+        if str(payload.get("id") or "")
+    }
+    latest_documents = _latest_payloads(
+        [
+            payload
+            for payload in document_rows
+            if str(payload.get("source_item_id") or "") in active_source_item_ids
+        ],
+        key_fn=lambda payload: str(payload.get("source_item_id") or ""),
+        source_filter=set(),
+    )
+    active_documents: list[dict[str, object]] = []
+    active_document_ids: set[str] = set()
+    for payload in latest_documents.values():
+        source_item_id = str(payload.get("source_item_id") or "")
+        enriched = _enrich_document_payload(
+            payload,
+            source_item=source_items_by_id.get(source_item_id),
+        )
+        active_documents.append(enriched)
+        document_id = str(enriched.get("id") or "")
+        if document_id:
+            active_document_ids.add(document_id)
+
+    latest_chunks = _latest_payloads(
+        chunk_rows,
+        key_fn=lambda payload: str(payload.get("id") or ""),
+        source_filter=set(),
+    )
+    active_chunks = [
+        payload
+        for payload in latest_chunks.values()
+        if str(payload.get("document_id") or "") in active_document_ids
+        and str(payload.get("index_status") or "active") == "active"
+    ]
+    active_chunk_ids = {
+        str(payload.get("id") or "")
+        for payload in active_chunks
+        if str(payload.get("id") or "")
+    }
+    active_acl_entries = _current_chunk_acl_entries(
+        rows=acl_rows,
+        active_chunk_ids=active_chunk_ids,
+    )
+    return {
+        "source_items": active_source_items,
+        "documents": active_documents,
+        "chunks": active_chunks,
+        "chunk_acl_entries": active_acl_entries,
+    }
+
+
+def _source_matches(payload: dict[str, object], source_filter: set[str]) -> bool:
+    if not source_filter:
+        return True
+    return str(payload.get("source_kind") or "") in source_filter
+
+
+def _source_item_key(payload: dict[str, object]) -> str:
+    source_kind = str(payload.get("source_kind") or "")
+    external_id = str(payload.get("external_id") or "")
+    if not source_kind or not external_id:
+        return ""
+    return f"{source_kind}:{external_id}"
+
+
+def _enrich_document_payload(
+    payload: dict[str, object],
+    *,
+    source_item: dict[str, object] | None,
+) -> dict[str, object]:
+    enriched = dict(payload)
+    source_kind = str(enriched.get("source_kind") or "").strip()
+    external_id = str(enriched.get("external_id") or "").strip()
+    if source_item is not None:
+        source_kind = source_kind or str(source_item.get("source_kind") or "").strip()
+        external_id = external_id or str(source_item.get("external_id") or "").strip()
+    if source_kind:
+        enriched["source_kind"] = source_kind
+        enriched.setdefault("source_type", source_kind)
+        metadata = dict(enriched.get("metadata") or {})
+        metadata.setdefault("source_kind", source_kind)
+        metadata.setdefault("source_type", source_kind)
+        if external_id:
+            metadata.setdefault("external_id", external_id)
+        enriched["metadata"] = metadata
+    if external_id:
+        enriched["external_id"] = external_id
+    return enriched
+
+
+def _source_kind_for_document(
+    payload: dict[str, object],
+    *,
+    source_by_id: dict[str, str],
+) -> str:
+    source_kind = str(payload.get("source_kind") or payload.get("source_type") or "")
+    if source_kind:
+        return source_kind
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        source_kind = str(metadata.get("source_kind") or metadata.get("source_type") or "")
+        if source_kind:
+            return source_kind
+    return source_by_id.get(str(payload.get("source_item_id") or ""), "")
+
+
+def _source_kind_for_chunk(
+    payload: dict[str, object],
+    *,
+    document_source_by_id: dict[str, str],
+) -> str:
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        source_kind = str(metadata.get("source_kind") or metadata.get("source_type") or "")
+        if source_kind:
+            return source_kind
+    return document_source_by_id.get(str(payload.get("document_id") or ""), "")
+
+
+def _duplicate_report(
+    *,
+    rows: list[dict[str, object]],
+    source_filter: set[str],
+    source_fn,
+    key_fn,
+) -> dict[str, object]:
+    counts_by_source: dict[str, dict[str, object]] = {}
+    key_counts_by_source: dict[str, dict[str, int]] = {}
+    total_rows = 0
+    for payload in rows:
+        source_kind = source_fn(payload)
+        if source_filter and source_kind not in source_filter:
+            continue
+        key = str(key_fn(payload) or "")
+        if not key:
+            continue
+        total_rows += 1
+        source_bucket = source_kind or "unknown"
+        key_counts = key_counts_by_source.setdefault(source_bucket, {})
+        key_counts[key] = key_counts.get(key, 0) + 1
+    for source_kind, key_counts in key_counts_by_source.items():
+        row_count = sum(key_counts.values())
+        unique_count = len(key_counts)
+        duplicate_keys = {
+            key: count
+            for key, count in sorted(key_counts.items())
+            if count > 1
+        }
+        counts_by_source[source_kind] = {
+            "rows": row_count,
+            "unique_keys": unique_count,
+            "duplicate_rows": row_count - unique_count,
+            "duplicate_keys": len(duplicate_keys),
+            "duplicate_key_counts": duplicate_keys,
+        }
+    unique_total = sum(len(value) for value in key_counts_by_source.values())
+    return {
+        "rows": total_rows,
+        "unique_keys": unique_total,
+        "duplicate_rows": total_rows - unique_total,
+        "by_source": counts_by_source,
+    }
+
+
+def _compact_chunk_acl_entries(
+    *,
+    rows: list[dict[str, object]],
+    selected_chunk_ids: set[str],
+    active_chunk_ids: set[str],
+    compact_all: bool,
+) -> list[dict[str, object]]:
+    if not selected_chunk_ids and not compact_all:
+        return rows
+    out: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for payload in rows:
+        chunk_id = str(payload.get("chunk_id") or "")
+        if chunk_id in selected_chunk_ids and chunk_id not in active_chunk_ids:
+            continue
+        if selected_chunk_ids and chunk_id not in selected_chunk_ids:
+            out.append(payload)
+            continue
+        key = (
+            chunk_id,
+            str(payload.get("acl_type") or ""),
+            str(payload.get("acl_value") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        if chunk_id in active_chunk_ids:
+            out.append(payload)
+    return out
+
+
+def _current_chunk_acl_entries(
+    *,
+    rows: list[dict[str, object]],
+    active_chunk_ids: set[str],
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for payload in rows:
+        chunk_id = str(payload.get("chunk_id") or "")
+        if chunk_id not in active_chunk_ids:
+            continue
+        key = (
+            chunk_id,
+            str(payload.get("acl_type") or ""),
+            str(payload.get("acl_value") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(payload)
+    return out
+
+
+def _compact_secret_findings(
+    *,
+    rows: list[dict[str, object]],
+    selected_source_item_ids: set[str],
+    active_source_item_ids: set[str],
+    selected_chunk_ids: set[str],
+    active_chunk_ids: set[str],
+    compact_all: bool,
+) -> list[dict[str, object]]:
+    if not selected_source_item_ids and not selected_chunk_ids and not compact_all:
+        return rows
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for payload in rows:
+        source_item_id = str(payload.get("source_item_id") or "")
+        chunk_id = str(payload.get("chunk_id") or "")
+        belongs_to_selected = (
+            source_item_id in selected_source_item_ids
+            or chunk_id in selected_chunk_ids
+        )
+        if not belongs_to_selected:
+            if compact_all:
+                continue
+            out.append(payload)
+            continue
+        if (
+            source_item_id not in active_source_item_ids
+            and chunk_id not in active_chunk_ids
+        ):
+            continue
+        finding_id = str(payload.get("id") or "")
+        if finding_id and finding_id in seen:
+            continue
+        if finding_id:
+            seen.add(finding_id)
+        out.append(payload)
+    return out
+
+
+def _compact_sync_cursors(
+    *,
+    rows: list[dict[str, object]],
+    source_filter: set[str],
+) -> list[dict[str, object]]:
+    passthrough: list[dict[str, object]] = []
+    selected: list[dict[str, object]] = []
+    for payload in rows:
+        if _source_matches(payload, source_filter):
+            selected.append(payload)
+        else:
+            passthrough.append(payload)
+    latest = _latest_payloads(
+        selected,
+        key_fn=lambda payload: str(payload.get("source_kind") or ""),
+        source_filter=set(),
+    )
+    return passthrough + list(latest.values())
+
+
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         return []
@@ -608,9 +1305,15 @@ def _source_item_payload(
 
 def _document_payload(document: NormalizedDocument) -> dict[str, object]:
     metadata = _metadata_with_terms(document.source_kind, document.metadata)
+    metadata.setdefault("source_kind", document.source_kind)
+    metadata.setdefault("source_type", document.source_kind)
+    metadata.setdefault("external_id", document.external_id)
     return {
         "id": document.id,
         "source_item_id": document.source_item_id,
+        "source_kind": document.source_kind,
+        "source_type": document.source_kind,
+        "external_id": document.external_id,
         "version": document.version,
         "title": document.title,
         "normalized_text": document.normalized_text,

@@ -94,6 +94,45 @@ class IncrementalConnector(DummyConnector):
 
 
 class IngestionServiceTests(unittest.TestCase):
+    def test_raw_snapshot_key_uses_file_tool_safe_hatenablog_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = ObjectStorageSection(
+                endpoint_url="",
+                bucket="",
+                region="ap-northeast-1",
+                access_key_id="",
+                secret_access_key="",
+                prefix="test",
+                use_ssl=True,
+            )
+            store = RawSnapshotStore(
+                config=config,
+                local_root=root / "objects",
+                s3=S3ObjectStorageClient(config),
+            )
+            key = store.put(
+                SourceRawItem(
+                    source_kind="hatenablog",
+                    external_id="hatenablog:/entry/2025/04/21/160000",
+                    title="Hatena",
+                    text="body",
+                    canonical_url="https://kumc.hatenablog.com/entry/2025/04/21/160000",
+                    checksum="abcdef0123456789",
+                    metadata={
+                        "hatenablog_url": (
+                            "https://kumc.hatenablog.com/entry/2025/04/21/160000"
+                        )
+                    },
+                )
+            )
+
+            self.assertEqual(
+                key,
+                "test/raw/hatenablog/entry/2025/04/21/160000/abcdef0123456789.txt",
+            )
+            self.assertNotIn(":", key)
+
     def test_backfill_detects_checksum_and_secret_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

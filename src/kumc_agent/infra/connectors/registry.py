@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from kumc_agent.config.schema import RuntimeConfig
+from kumc_agent.domain.models.source import SourceDeleteItem, SourceRawItem
 from kumc_agent.domain.ports.connectors import SourceConnector
 from kumc_agent.infra.connectors.base import LoaderBackedConnector
 from kumc_agent.infra.connectors.file_scanner import (
+    iter_x_posts,
     iter_raw_files,
     iter_structured_jsonl_records,
 )
@@ -16,6 +18,7 @@ from kumc_agent.infra.loaders.google_drive import GoogleDriveLoader
 from kumc_agent.infra.loaders.hatenablog import HatenaBlogLoader
 from kumc_agent.infra.loaders.notion import NotionLoader
 from kumc_agent.infra.loaders.x import XPostsLoader
+from kumc_agent.usecases.ingestion.notion_audit import annotate_notion_raw_items
 
 
 def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]:
@@ -84,12 +87,22 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
                 database_ids=config.integrations.notion.database_ids,
                 page_ids=config.integrations.notion.page_ids,
                 ingestion_dir=ingestion_dir,
+                default_visibility=config.integrations.notion.default_visibility,
             ),
-            raw_items=lambda: iter_raw_files(
-                source_kind="notion",
-                root_dir=ingestion_dir / "notion",
-                extensions={".md"},
-                default_visibility="admin",
+            raw_items=lambda: annotate_notion_raw_items(
+                iter_raw_files(
+                    source_kind="notion",
+                    root_dir=ingestion_dir / "notion",
+                    extensions={".md"},
+                    default_visibility=config.integrations.notion.default_visibility,
+                ),
+                min_text_bytes=config.indexing.notion_quality.min_text_bytes,
+                min_nonempty_characters=(
+                    config.indexing.notion_quality.min_nonempty_characters
+                ),
+                quarantine_low_information=(
+                    config.indexing.notion_quality.quarantine_low_information
+                ),
             ),
             normalized_format="markdown",
         )
@@ -112,12 +125,7 @@ def build_source_connectors(config: RuntimeConfig) -> dict[str, SourceConnector]
         connectors["x"] = LoaderBackedConnector(
             source_kind="x",
             loader=XPostsLoader(ingestion_dir=ingestion_dir),
-            raw_items=lambda: iter_raw_files(
-                source_kind="x",
-                root_dir=ingestion_dir / "x",
-                extensions={".jsonl"},
-                default_visibility="public",
-            ),
+            raw_items=lambda: _x_post_raw_items(ingestion_dir),
             normalized_format="plain",
         )
     if config.features.sources.crafters_colony:
@@ -188,3 +196,14 @@ def _google_drive_doc_raw_items(ingestion_dir: Path):
         not in structured_drive_ids
     ]
     return [*structured, *fallback]
+
+
+def _x_post_raw_items(ingestion_dir: Path) -> list[SourceRawItem | SourceDeleteItem]:
+    return [
+        SourceDeleteItem(source_kind="x", external_id="x:posts.jsonl"),
+        *iter_x_posts(
+            source_kind="x",
+            root_dir=ingestion_dir / "x",
+            default_visibility="public",
+        ),
+    ]

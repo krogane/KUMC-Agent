@@ -21,6 +21,7 @@ from kumc_agent.domain.models.workflow import (
 )
 
 IntegratedRoute = Literal[
+    "no_rag",
     "circle_rag",
     "minecraft_wiki_rag",
     "member_search",

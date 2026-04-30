@@ -38,6 +38,7 @@ from kumc_agent.config.schema import (
     RagGenerationSection,
     IndexingChunkingSection,
     IndexingRefreshSection,
+    IndexingNotionQualitySection,
     IndexingSection,
     IndexingSheetsQualitySection,
     IndexingStagesSection,
@@ -83,6 +84,7 @@ from kumc_agent.config.schema import (
     SummarizationSection,
     TaskManagementSection,
     VCSection,
+    WorkflowExtractionSection,
 )
 
 MAIN_FILES = (
@@ -103,6 +105,7 @@ MAIN_FILES = (
     "server_management.yaml",
     "event_management.yaml",
     "task_management.yaml",
+    "workflow_extraction.yaml",
     "vc.yaml",
 )
 
@@ -319,6 +322,13 @@ def _resolve_optional_path_str(base_dir: Path, value: str) -> str:
     return str(_resolve_path(base_dir, raw))
 
 
+def _visibility_or_default(value: object, *, default: str) -> str:
+    visibility = str(value or "").strip().lower()
+    if visibility in {"public", "guild", "role", "private", "admin"}:
+        return visibility
+    return default
+
+
 def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     updated = dict(config)
     infrastructure = updated.get("infrastructure")
@@ -488,6 +498,12 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     event_management.setdefault("auto_extract_after_index_update", True)
     event_management.setdefault("timezone", "Asia/Tokyo")
 
+    workflow_extraction = updated.get("workflow_extraction")
+    if not isinstance(workflow_extraction, dict):
+        workflow_extraction = {}
+        updated["workflow_extraction"] = workflow_extraction
+    workflow_extraction.setdefault("lookback_days", 1)
+
     features = updated.get("features")
     if not isinstance(features, dict):
         features = {}
@@ -540,12 +556,6 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(generation, dict):
         generation = {}
         rag["generation"] = generation
-    idea_generation = generation.get("idea_generation")
-    if not isinstance(idea_generation, dict):
-        idea_generation = {}
-        generation["idea_generation"] = idea_generation
-    idea_generation.setdefault("prompt_name", "answer_idea")
-    idea_generation.setdefault("temperature", 0.0)
 
     summarization = updated.get("summarization")
     if not isinstance(summarization, dict):
@@ -565,6 +575,7 @@ def _backfill_default_config_values(config: dict[str, Any]) -> dict[str, Any]:
     notion.setdefault("api_token", "")
     notion.setdefault("database_ids", [])
     notion.setdefault("page_ids", [])
+    notion.setdefault("default_visibility", "public")
     openclaw = integrations.get("openclaw")
     if not isinstance(openclaw, dict):
         openclaw = {}
@@ -782,6 +793,7 @@ def load_runtime_config(*, base_dir: Path | None = None) -> RuntimeConfig:
                 "comprehensive_agent.yaml",
                 "event_management.yaml",
                 "task_management.yaml",
+                "workflow_extraction.yaml",
             }
             and not path.exists()
         ):
@@ -818,6 +830,7 @@ def _to_runtime_config(
     comprehensive_agent = merged.get("comprehensive_agent", {})
     task_management = merged.get("task_management", {})
     event_management = merged.get("event_management", {})
+    workflow_extraction = merged.get("workflow_extraction", {})
     infrastructure = merged.get("infrastructure", {})
     features = merged["features"]
     image_search_raw = features.get("image_search", {})
@@ -842,7 +855,6 @@ def _to_runtime_config(
     rag_prompt_texts = rag.get("prompt_texts", {})
     rag_generation_rag = rag_generation.get("rag", {})
     rag_generation_no_rag = rag_generation.get("no_rag", {})
-    rag_generation_idea = rag_generation.get("idea_generation", {})
     indexing_chunking = indexing.get("chunking", {})
     indexing_stages = indexing.get("stages", {})
     indexing_refresh = indexing.get("refresh", {})
@@ -855,6 +867,9 @@ def _to_runtime_config(
     indexing_sheets_quality = indexing.get("sheets_quality", {})
     if not isinstance(indexing_sheets_quality, dict):
         indexing_sheets_quality = {}
+    indexing_notion_quality = indexing.get("notion_quality", {})
+    if not isinstance(indexing_notion_quality, dict):
+        indexing_notion_quality = {}
     ops_ragas_metrics = ops.get("ragas_metrics", {})
     database = infrastructure.get("database", {})
     redis = infrastructure.get("redis", {})
@@ -999,11 +1014,6 @@ def _to_runtime_config(
         default_prompt_name="answer_no_rag",
         fallback=rag_generation_profile,
     )
-    idea_generation_profile = _build_generation_profile(
-        rag_generation_idea,
-        default_prompt_name="answer_idea",
-        fallback=no_rag_generation_profile,
-    )
     routing_provider = str(
         rag_routing.get(
             "provider",
@@ -1052,7 +1062,6 @@ def _to_runtime_config(
         base_dir=base_dir,
         app=AppSection(
             command_prefix=str(app["command_prefix"]),
-            index_command_prefix=str(app["index_command_prefix"]),
             max_input_characters=int(app["max_input_characters"]),
             log_level=str(app["log_level"]),
             data_dir=_resolve_path(base_dir, str(app["data_dir"])),
@@ -1260,6 +1269,9 @@ def _to_runtime_config(
                 event_management.get("auto_extract_after_index_update", True)
             ),
             timezone=str(event_management.get("timezone", "Asia/Tokyo")),
+        ),
+        workflow_extraction=WorkflowExtractionSection(
+            lookback_days=max(1, int(workflow_extraction.get("lookback_days", 1))),
         ),
         infrastructure=InfrastructureSection(
             database=DatabaseSection(
@@ -1662,7 +1674,6 @@ def _to_runtime_config(
             generation=RagGenerationSection(
                 rag=rag_generation_profile,
                 no_rag=no_rag_generation_profile,
-                idea_generation=idea_generation_profile,
             ),
             prompt_texts=RagPromptTextSection(
                 empty_context=str(
@@ -1867,6 +1878,33 @@ def _to_runtime_config(
                 ),
                 min_non_empty_cells=int(
                     indexing_sheets_quality.get("min_non_empty_cells", 1)
+                ),
+            ),
+            notion_quality=IndexingNotionQualitySection(
+                enabled=bool(indexing_notion_quality.get("enabled", True)),
+                policy=str(indexing_notion_quality.get("policy", "warn")).strip().lower()
+                or "warn",
+                min_text_bytes=int(indexing_notion_quality.get("min_text_bytes", 200)),
+                min_nonempty_characters=int(
+                    indexing_notion_quality.get("min_nonempty_characters", 50)
+                ),
+                max_short_document_ratio=float(
+                    indexing_notion_quality.get("max_short_document_ratio", 0.4)
+                ),
+                max_heading_only_ratio=float(
+                    indexing_notion_quality.get("max_heading_only_ratio", 0.3)
+                ),
+                max_duplicate_text_ratio=float(
+                    indexing_notion_quality.get("max_duplicate_text_ratio", 0.05)
+                ),
+                min_repository_coverage_ratio=float(
+                    indexing_notion_quality.get("min_repository_coverage_ratio", 1.0)
+                ),
+                min_index_coverage_ratio=float(
+                    indexing_notion_quality.get("min_index_coverage_ratio", 1.0)
+                ),
+                quarantine_low_information=bool(
+                    indexing_notion_quality.get("quarantine_low_information", True)
                 ),
             ),
         ),
@@ -2110,6 +2148,10 @@ def _to_runtime_config(
                     for value in notion_page_ids_raw
                     if str(value).strip()
                 ],
+                default_visibility=_visibility_or_default(
+                    notion.get("default_visibility", "public"),
+                    default="public",
+                ),
             ),
             minecraft_wiki=IntegrationMinecraftWikiSection(
                 page_titles=minecraft_page_titles,

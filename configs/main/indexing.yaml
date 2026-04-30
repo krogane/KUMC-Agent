@@ -9,7 +9,7 @@ indexing:
     summary_llm_provider: "gemini"
     summary_gemini_model: "gemini-2.5-flash-lite"
     summary_temperature: 0.0
-    summary_max_output_tokens: 1024
+    summary_max_output_tokens: 4096
     summary_thinking_level: "minimal"
   stages:
     second_recursive_enabled: true
@@ -41,6 +41,17 @@ indexing:
     fail_fast: false
     max_empty_row_ratio: 0.8
     min_non_empty_cells: 1
+  notion_quality:
+    enabled: true
+    policy: "warn"
+    min_text_bytes: 200
+    min_nonempty_characters: 50
+    max_short_document_ratio: 0.4
+    max_heading_only_ratio: 0.3
+    max_duplicate_text_ratio: 0.05
+    min_repository_coverage_ratio: 1.0
+    min_index_coverage_ratio: 1.0
+    quarantine_low_information: true
 
 minecraft_wiki_rag:
   chunking:

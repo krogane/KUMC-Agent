@@ -137,6 +137,28 @@ class IntegratedInputUsecase:
                 warnings=("permission denied",),
                 metadata=self._decision_metadata(denied, handler="deny"),
             )
+        if decision.route == "no_rag":
+            if self.chat_answer_service is None:
+                return IntegratedInputResponse(
+                    text="NoRAG回答モデルが未設定です。",
+                    confidence="low",
+                    warnings=("chat_answer_service is not configured",),
+                    metadata=self._decision_metadata(decision, handler="no_rag"),
+                )
+            return self._from_rag_answer(
+                self.chat_answer_service.execute(
+                    ChatRequest(
+                        query=request.text,
+                        question_author=access.user_id or None,
+                        history_scope=request.history_scope or self._history_scope(request, access),
+                        force_fast_mode=request.mode == "fast",
+                        access_context=access,
+                        route_override="no_rag",
+                    )
+                ),
+                decision,
+                handler="no_rag",
+            )
         if decision.route == "circle_rag" and self.chat_answer_service is not None:
             return self._from_rag_answer(
                 self.chat_answer_service.execute(

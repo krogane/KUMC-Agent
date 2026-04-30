@@ -24,21 +24,22 @@
 
 対象外は、承認後の副作用実行、任意の外部投稿、サーバー操作の実行、タスク・イベント正本の直接更新、ユーザー入力に対する即時応答である。ユーザー入力の即時処理は統合入力受付または総合エージェントが担当する。
 
-## 3. 現行実装との差分
-現行実装には、Automation、Workflow、Agent trace、Audit logの土台がある。ただし、`kumc-agent.md` の自律エージェントそのものを表すサービスは未実装である。
+## 3. 現行実装同期状況
+現行実装では、`AutonomousAgentService`、`AutonomousSnapshotCollector`、`AutonomousPlanner`、`AutonomousIntegratedInputAdapter`、`AutonomousVerifier` が導入済みである。CLIは `kumc-agent autonomous`、アプリ組み立ては `apps/autonomous_agent.py`、workerやschedulerからの起動は `AutonomousAgentRequest(trigger, slot, scopes, dry_run, idempotency_key)` を使う。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| 定期実行 | `AutomationService` に schedule rule と `AutomationRun` がある | 自律エージェント専用の定期runを作り、1日にn回の起動時刻を設定で管理する |
-| 実行単位 | `AutomationRule` ごとの action plan | 自律エージェントrunごとにPLAN / TOOL / VERIFY stepを `AgentRun` / `AgentStep` として保存する |
-| 二重実行防止 | `AutomationRun.idempotency_key` がある | 自律エージェントでも対象日、slot、scopeから安定 `idempotency_key` を作る |
-| 状況収集 | Workflow repositoryにTask/Event/Candidate/Approvalがある | Snapshot collectorでタスク、イベント、承認待ち、RAG差分、サーバー確認事項を収集する |
-| 判断 | Automationはrule actionを展開する | 自律エージェントPlannerが期限、直近イベント、未決事項、新規資料、サーバー確認事項を判定する |
-| TOOL | Automationは一部allowlist actionを内部実行できる | 自律エージェントは統合入力受付または既存serviceを通し、外部副作用は承認候補に限定する |
-| VERIFY | Automationはmode/riskでblocked判定する | 自律エージェントは「再検索」「何もしない」「通知」「許可申請」「候補作成」のいずれかを選ぶ |
-| 出力 | AutomationResponse、WorkResponse | AutonomousAgentResponseを追加し、提案・通知・承認申請・ログだけを主結果として返す |
-| 監査 | AutomationとWorkflowはAuditEventを残せる | 自律エージェントrun、判断理由、参照対象、候補ID、通知予定を監査ログに残す |
-| 設定 | `configs/main/scheduler.yaml` と機能別configがある | `configs/main/autonomous_agent.yaml` を追加し、起動時刻や対象scopeを保存する |
+| 項目 | 現行実装 |
+| --- | --- |
+| 定期実行 | `configs/main/autonomous_agent.yaml` の `enabled`, `schedule_times`, `timezone`, `scopes` を使う。`enabled=false` のschedule/automation triggerは `blocked` として履歴保存する |
+| 実行単位 | runごとに `AgentRun` を作り、`PLAN`、`TOOL`、`VERIFY` を `AgentStep` として保存する |
+| 二重実行防止 | slot、scope、timezone、guild、通知先、lookaheadから `idempotency_key` を作り、`AutomationRepository.get_run_by_idempotency_key()` で重複を止める |
+| 状況収集 | Workflow repository、ingestion repository、server operation repository、automation repository、agent trace repositoryからsnapshotを集める |
+| RAG差分 | `workflow_extraction.lookback_days` を `SnapshotCollectorConfig.rag_delta_lookback_days` として使い、timestamp付きactive chunkだけを対象にする |
+| 判断 | deterministic plannerが期限近接、期限超過、停滞、イベント不足情報、RAG差分、承認待ちserver/automationを判定し、LLM plannerが有効なら補完する |
+| TOOL | `AutonomousIntegratedInputAdapter` 経由で統合入力受付へ問い合わせ、dry-run時は副作用を記録しない |
+| VERIFY | verifierが `AutonomousDecision` を返し、`retry_search` の場合だけ予算内で再計画する |
+| 出力 | `AutonomousAgentResponse` に通知提案、承認要求、candidate refs、typed refs、warnings、`metadata.run_id` などを返す |
+| 監査 | plan/tool/verify/proposal/block/failure/duplicateを `AuditEvent` とAgent traceに残す |
+| 設定 | `configs/main/autonomous_agent.yaml` と `configs/main/workflow_extraction.yaml` を使う。APIキーやtokenを追加する場合だけ `.env` / `.env.example` を更新する |
 
 実装では `src/kumc_agent/infra/legacy` を参照・依存しない。
 
@@ -88,11 +89,14 @@ flowchart TD
 
 `enabled=false` の場合、Automation/schedule経由runは `blocked` として履歴と監査に記録し、PLAN/TOOLは実行しない。CLI手動runは検証用途として実行できる。
 
-起動時刻は `.env` ではなく `configs/main/autonomous_agent.yaml` に保存する。トークン、APIキー、DB接続情報などを追加する場合だけ `.env` / `.env.example` を更新する。
+起動時刻は `.env` ではなく `configs/main/autonomous_agent.yaml` に保存する。RAG差分やTask/Event差分抽出の対象期間は `configs/main/workflow_extraction.yaml` に保存する。トークン、APIキー、DB接続情報などを追加する場合だけ `.env` / `.env.example` を更新する。
 
 設定例:
 
 ```yaml
+workflow_extraction:
+  lookback_days: 1
+
 autonomous_agent:
   enabled: true
   schedule_times: ["08:00", "13:00", "20:00"]
@@ -104,6 +108,7 @@ autonomous_agent:
     tasks: 2
     events: 7
   duplicate_suppression_hours: 24
+  # Deprecated: RAG delta extraction uses workflow_extraction.lookback_days.
   rag_delta_lookback_hours: 24
   access:
     system_user_id: "system"
@@ -173,7 +178,7 @@ PLANの入力snapshotには次を含める。
 | `automation` | waiting_approvalまたはblockedのAutomationRun、次回実行予定 |
 | `recent_runs` | 直近の自律エージェントrunと同一対象の通知履歴 |
 
-RAG差分の正データソースは ingestion repository の active chunks とする。`updated_at`、`source_updated_at`、`created_at`、`source_created_at`、`published_at`、`message_timestamp`、`indexed_at`、`ingested_at` などのmetadata時刻が `rag_delta_lookback_hours` 以内のsourceを差分として扱う。差分itemには `source_item_id`、`source_kind`、`external_id`、短いsummary、最大数件のcitationだけを入れる。
+RAG差分の正データソースは ingestion repository の active chunks とする。`workflow_extraction.lookback_days` を共通設定として使い、抽出開始時刻から rolling 24h × n 以内のtimestampを持つsourceだけを差分として扱う。判定対象のmetadata keyは `updated_at`、`source_updated_at`、`created_at`、`source_created_at`、`published_at`、`message_timestamp`、`hatenablog_updated_at`、`hatenablog_created_at`、`indexed_at`、`ingested_at` とし、時刻が無いchunkは除外する。差分itemには `source_item_id`、`source_kind`、`external_id`、短いsummary、最大数件のcitation、`extraction_since` などの抽出窓metadataだけを入れる。
 
 大きな本文断片や検索contextはsnapshotに直接保持しない。必要な場合はcitation id、source id、短い要約、取得条件だけを保持する。
 
@@ -223,7 +228,7 @@ TOOLでは、PLANの結果に基づき、必要な確認を統合入力受付へ
 | サーバー確認 | `Minecraftサーバーの未承認操作 {operation_id} の承認依頼文を作って` | ApprovalRequestProposal |
 
 ### 7.2 直接呼び出しを許可する内部service
-統合入力受付が未実装または循環依存になる初期段階では、限定されたadapterを通じて既存serviceを呼んでよい。
+現行実装では `AutonomousIntegratedInputAdapter` が統合入力受付を呼び、dry-run時は副作用実行を抑止する。循環依存を避けるため、adapterは `AutonomousQuery` を `IntegratedInputRequest` または同等のworkflow callへ変換する薄い境界として扱う。
 
 | adapter | 呼び出し先 | 許可される結果 |
 | --- | --- | --- |
@@ -320,7 +325,7 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 ### 9.2 通知
 `kumc-agent.md` では「特定チャンネルにメッセージを送る」がVERIFYの選択肢に含まれる。一方で自律エージェントの制約として外部投稿は承認フローを通す必要がある。
 
-この矛盾は `kumc-agent.md` 内の「外部投稿、サーバー操作、タスク/イベント正本更新は承認フローを通す」を優先し、初期実装では通知本文を `NotificationProposal` として作成する。実際のDiscord送信は、承認済みの通知候補または通知専用の低リスクallowlistが設定された場合のみ、別コンポーネントが行う。
+この矛盾は `kumc-agent.md` 内の「外部投稿、サーバー操作、タスク/イベント正本更新は承認フローを通す」を優先し、現行実装では通知本文を `NotificationProposal` として作成する。実際のDiscord送信は、承認済みの通知候補または通知専用の低リスクallowlistが設定された場合のみ、別コンポーネントが行う。
 
 ### 9.3 ログ
 自律エージェントは次のログを保存する。
@@ -404,7 +409,8 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 | `lookahead_days.tasks` | タスク確認対象日数 |
 | `lookahead_days.events` | イベント確認対象日数 |
 | `duplicate_suppression_hours` | 同一対象への通知抑制時間 |
-| `rag_delta_lookback_hours` | RAG差分として扱うingestion chunkの更新時間幅 |
+| `workflow_extraction.lookback_days` | Task/Event差分抽出と自律エージェントRAG差分に共通で使う抽出対象日数 |
+| `rag_delta_lookback_hours` | 非推奨。互換のため残すが、新規実装では `workflow_extraction.lookback_days` を使う |
 | `access.system_user_id` | 自律エージェントのsystem actor user id |
 | `access.guild_id` | 統合入力受付へ渡す既定guild |
 | `access.role_ids` | system actorに付与するrole |
@@ -459,7 +465,7 @@ VERIFYの出力は `AgentStep(state="VERIFY")` として保存する。
 評価基盤では `target="agentic"` または専用 `target="autonomous_agent"` を使い、tool単位の成否、安全性、承認境界を記録する。
 
 ## 16. 実装上の注意
-- `features.agentic.service.AgenticSearchService` は現状古いAgentic Search実装であり、自律エージェントから直接依存しない。
+- 自律エージェントは総合エージェントや旧深掘り検索の内部実装へ直接依存せず、統合入力受付adapterを境界にする。
 - `AgentRun`、`AgentStep`、`AgentBudget`、`AgentTraceRepository` は汎用trace部品として再利用する。
 - Automationの `auto_run` allowlistは内部action向けであり、自律エージェントの外部副作用許可として使わない。
 - 通知本文の作成とDiscord送信は分離する。自律エージェントは原則 `NotificationProposal` までを作る。

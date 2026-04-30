@@ -33,9 +33,6 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
         (base / "assets" / "prompts" / "answer_no_rag.md").write_text(
             '{"answer": "...", "sources": []}', encoding="utf-8"
         )
-        (base / "assets" / "prompts" / "answer_idea.md").write_text(
-            '{"answer": "...", "sources": ["1"]}', encoding="utf-8"
-        )
         (base / "assets" / "prompts" / "routing.md").write_text("routing", encoding="utf-8")
         (base / "assets" / "prompts" / "summarization.md").write_text("sum", encoding="utf-8")
 
@@ -44,7 +41,6 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                 """
                 app:
                   command_prefix: "/ai"
-                  index_command_prefix: "/ai build-index"
                   max_input_characters: 1024
                   log_level: "INFO"
                   data_dir: "data"
@@ -72,9 +68,6 @@ class ChatIndexEvalIntegrationTests(unittest.TestCase):
                       max_output_tokens: 128
                       thinking_level: "minimal"
                       prompt_name: "answer_no_rag"
-                    idea_generation:
-                      prompt_name: "answer_idea"
-                      temperature: 0.0
                 integrations:
                   discord: {bot_token: ""}
                   drive: {folder_id: "", google_application_credentials: "", max_files: 0}

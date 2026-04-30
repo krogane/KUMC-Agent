@@ -25,7 +25,6 @@ class ConfigLoadingTests(unittest.TestCase):
                 """
                 app:
                   command_prefix: "/ai"
-                  index_command_prefix: "/ai build-index"
                   max_input_characters: 1024
                   log_level: "INFO"
                   data_dir: "data"
@@ -67,9 +66,6 @@ class ConfigLoadingTests(unittest.TestCase):
                       max_output_tokens: 128
                       thinking_level: "minimal"
                       prompt_name: "answer_no_rag"
-                    idea_generation:
-                      prompt_name: "answer_idea"
-                      temperature: 0.0
                 indexing:
                   chunking:
                     summary_batch_size: 1
@@ -358,6 +354,7 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertTrue(config.event_management.auto_extract_after_index_update)
             self.assertEqual(config.event_management.prompt_name, "event_extraction.md")
             self.assertEqual(config.event_management.timezone, "Asia/Tokyo")
+            self.assertEqual(config.workflow_extraction.lookback_days, 1)
             self.assertTrue(config.comprehensive_agent.enabled)
             self.assertEqual(config.comprehensive_agent.planner.provider, "gemini")
             self.assertEqual(config.comprehensive_agent.planner.gemini_model, "gemini-x")
@@ -410,6 +407,7 @@ class ConfigLoadingTests(unittest.TestCase):
                 config.integrations.notion.page_ids,
                 ["env-page-primary", "env-page-secondary"],
             )
+            self.assertEqual(config.integrations.notion.default_visibility, "public")
             self.assertEqual(
                 config.integrations.hatenablog.blog_url,
                 "https://example.hatenablog.com/",
@@ -434,6 +432,8 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config.indexing.chunking.summary_temperature, 0.1)
             self.assertEqual(config.indexing.chunking.summary_max_output_tokens, 96)
             self.assertEqual(config.indexing.chunking.summary_thinking_level, "minimal")
+            self.assertEqual(config.indexing.notion_quality.policy, "warn")
+            self.assertEqual(config.indexing.notion_quality.min_repository_coverage_ratio, 1.0)
             self.assertTrue(config.indexing.embedding_cache.enabled)
             self.assertTrue(config.indexing.embedding_cache.compact_after_publish)
             self.assertTrue(
@@ -477,6 +477,46 @@ class ConfigLoadingTests(unittest.TestCase):
                 config = load_runtime_config(base_dir=base)
 
         self.assertEqual(config.summarization.target_characters, 123)
+
+    def test_workflow_extraction_lookback_days_loaded_and_clamped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._prepare_base(base)
+            (base / "configs" / "main" / "workflow_extraction.yaml").write_text(
+                "workflow_extraction:\n  lookback_days: 3\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_OPENAI_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+            self.assertEqual(config.workflow_extraction.lookback_days, 3)
+
+            (base / "configs" / "main" / "workflow_extraction.yaml").write_text(
+                "workflow_extraction:\n  lookback_days: 0\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "KUMC_DISCORD_BOT_TOKEN": "token",
+                    "KUMC_GEMINI_API_KEY": "key",
+                    "KUMC_DRIVE_FOLDER_ID": "folder",
+                    "KUMC_OPENAI_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                config = load_runtime_config(base_dir=base)
+            self.assertEqual(config.workflow_extraction.lookback_days, 1)
 
     def test_member_profile_guild_ids_fall_back_to_discord_allow_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,8 +609,6 @@ class ConfigLoadingTests(unittest.TestCase):
                     "KUMC_GEMINI_API_KEY": "key",
                     "KUMC_DRIVE_FOLDER_ID": "folder",
                     "KUMC_RAG_GENERATION_NO_RAG_GEMINI_MODEL": "gemini-no-rag",
-                    "KUMC_RAG_IDEA_PROMPT_NAME": "idea_generation",
-                    "KUMC_RAG_IDEA_TEMPERATURE": "0.8",
                 },
                 clear=False,
             ):
@@ -581,11 +619,6 @@ class ConfigLoadingTests(unittest.TestCase):
                 config.rag.generation.no_rag.gemini_model,
                 "gemini-no-rag",
             )
-            self.assertEqual(
-                config.rag.generation.idea_generation.prompt_name,
-                "idea_generation",
-            )
-            self.assertEqual(config.rag.generation.idea_generation.temperature, 0.8)
 
 
 if __name__ == "__main__":

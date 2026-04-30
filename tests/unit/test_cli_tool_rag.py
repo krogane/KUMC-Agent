@@ -130,6 +130,22 @@ class CliToolRagTests(unittest.TestCase):
         self.assertEqual(args.source, "minecraft_wiki")
         self.assertEqual(args.format, "markdown")
 
+    def test_ingest_compact_command_accepts_source_filter(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(
+            [
+                "ingest",
+                "compact",
+                "--source",
+                "crafters_colony",
+            ]
+        )
+
+        self.assertEqual(args.command, "ingest")
+        self.assertEqual(args.ingest_command, "compact")
+        self.assertEqual(args.source, ["crafters_colony"])
+
     def test_tool_rag_multi_query_returns_results_array(self) -> None:
         chat_answer = _FakeChatAnswer(
             [

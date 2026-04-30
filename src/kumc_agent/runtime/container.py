@@ -524,6 +524,7 @@ def build_runtime_context(*, base_dir: Path | None = None) -> RuntimeContext:
             database_ids=config.integrations.notion.database_ids,
             page_ids=config.integrations.notion.page_ids,
             ingestion_dir=config.app.ingestion_dir,
+            default_visibility=config.integrations.notion.default_visibility,
         )
         if config.features.sources.notion
         else None

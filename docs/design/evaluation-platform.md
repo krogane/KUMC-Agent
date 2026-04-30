@@ -33,20 +33,21 @@
 
 本設計における「完全実装」は、本番外部投稿、本番サーバー操作、本番Task/Event正本更新を行わず、リポジトリ単体で再現可能な `full regression` を指す。外部SaaSや本番データとの連携は将来拡張であり、完全実装の必須条件には含めない。
 
-## 3. 現行実装との差分
-現行実装はRAGAS評価の実行基盤を持つが、評価基盤全体としては未整備である。
+## 3. 現行実装同期状況
+現行実装では、RAGAS互換評価に加えて、target別EvalSet、adapter、assertion engine、safety assertion、batch runner、CLI smoke/full/safety/acl が実装済みである。評価は本番外部副作用を起こさず、`data/eval/sets/{target}/{suite}.jsonl` と fake/deterministic adapter を使ってローカルで再現する。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| RAG評価 | `EvaluateRagasUsecase` がJSONLを読み込み、回答生成後にRAGASを実行する | サークル情報RAGとMinecraft Wiki RAGの評価セットを分離し、引用精度、検索recall、権限違反も評価する |
-| eval dataset | `data/eval/ragas.jsonl` の `question` / `query` と `ground_truth(s)` を読む | target別のEvalSet schemaを定義し、RAGAS互換形式へ変換できる |
-| metrics | `exact_match`, `token_overlap`, `ragas_metrics` | target別metrics、合否、重大失敗、安全性ゼロ許容、コスト、レイテンシを統一記録する |
-| result | `result_path` にRAGAS結果JSONを書ける | `EvalRun` とresults artifactへ全評価結果を保存し、失敗ケースを追跡可能にする |
-| answer cache | RAGAS回答生成cacheを持つ | target別adapterでも再現性のためcache/fixtureを使える |
-| CLI | `eval ragas` のみ | `eval run --target ... --suite ...` と互換の `eval ragas` を提供する |
-| 機能別評価 | 未実装 | 独自評価セット、fixture、adapter、assertion engineを追加する |
-| 安全性評価 | prompt injection red teamの一部実装はある | 全targetで権限、secret、副作用境界を共通評価する |
-| payload方針 | `ragas_metrics` / `ragas_metadata` がCLIトップレベルに出る | 新規payloadは主結果だけをトップレベルに置き、診断情報は `metadata` 配下に置く |
+| 項目 | 現行実装 |
+| --- | --- |
+| RAG評価 | `EvaluateRagasUsecase` と `rag_circle` / `rag_minecraft` adapterを使う。`eval ragas` は互換入口として残る |
+| eval dataset | `data/eval/sets/{target}/{suite}.jsonl` を `load_eval_set()` が読み込み、`EvalCase` / `EvalAssertion` に正規化する |
+| metrics | `MetricsAggregator` がpass rate、latency、assertion、target別metricsを集計し、RAGAS側は `ragas_metrics` をmetadataとして扱う |
+| result | `EvalRunner` が `EvalRunResult` / `EvalBatchResult` を `data/eval/results/*.json` に保存し、`OperationsRepository.save_eval_run()` へも保存できる |
+| answer cache | RAGAS回答生成cacheは `ops.ragas_answer_cache_*` で制御する。通常targetはfixture/deterministic adapterで再現性を担保する |
+| CLI | `eval run --target ... --suite ...`、`eval smoke`、`eval full`、`eval safety`、`eval acl`、`eval ragas` を提供する |
+| 機能別評価 | `member_search`、`image_search`、`task_management`、`event_management`、`message_posting`、`automation`、`server_management`、`integrated_input`、`agentic`、`autonomous_agent` のEvalSetを持つ |
+| 安全性評価 | `SafetyAssertionEngine` がsecret、危険shell、prompt injection、metadata policy、未承認副作用を共通検出する |
+| 欠損EvalSet | `evaluation.missing_eval_set_policy` と `suite_min_cases` で、deterministic smokeだけ欠損許容、full/safetyは失敗にできる |
+| payload方針 | CLIとartifactの主結果は安定フィールドに置き、adapter詳細、request、artifact path、安全性詳細は `metadata` 配下に置く |
 
 `src/kumc_agent/infra/legacy` は参照・依存しない。
 
@@ -684,4 +685,4 @@ secret検出は過検知を避けるため、API key/token/password、Discord in
 
 ## 16. 実装同期状況
 
-実装同期状況や監査結果は、規範仕様と混ざらないよう `docs/explanation/` 配下に記録する。本ファイルは達成すべき設計仕様を中心に維持する。
+実装同期状況や監査結果は、規範仕様と混ざらないよう `docs/explanations/` 配下に記録する。本ファイルは現行の実装契約と、今後も守るべき評価設計を中心に維持する。

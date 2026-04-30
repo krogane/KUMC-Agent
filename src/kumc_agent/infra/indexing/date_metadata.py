@@ -67,6 +67,11 @@ def source_date_from_crafters_colony_published_at(value: str | None) -> str:
     return normalized or SOURCE_DATE_UNKNOWN
 
 
+def source_date_from_crafters_colony_timestamp(value: str | None) -> str:
+    normalized = normalize_source_date(value)
+    return normalized or SOURCE_DATE_UNKNOWN
+
+
 def source_date_from_vc_path(path: Path | str | None) -> str:
     if path is None:
         return SOURCE_DATE_UNKNOWN
@@ -141,8 +146,12 @@ def infer_source_date(
         )
 
     if source_type == "crafters_colony":
-        return source_date_from_crafters_colony_published_at(
-            str(meta.get("crafters_colony_published_at") or "")
+        return source_date_from_crafters_colony_timestamp(
+            str(
+                meta.get("crafters_colony_updated_at")
+                or meta.get("crafters_colony_published_at")
+                or ""
+            )
         )
 
     if source_type == "notion":

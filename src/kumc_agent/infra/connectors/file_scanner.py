@@ -8,6 +8,36 @@ from urllib.parse import quote
 from kumc_agent.domain.models.source import AccessScope, SourceRawItem
 from kumc_agent.utils.hashing import stable_hash
 
+_X_POST_METADATA_ALLOWLIST = frozenset(
+    {
+        "source_type",
+        "source_kind",
+        "source_file_name",
+        "source_date",
+        "guild_id",
+        "guild_name",
+        "category_id",
+        "category_name",
+        "channel_id",
+        "channel_name",
+        "message_id",
+        "message_timestamp",
+        "author_id",
+        "author_name",
+        "x_post_id",
+        "x_post_url",
+        "x_author_handle",
+        "x_media_urls",
+        "x_media",
+        "x_expanded_urls",
+        "x_account_id",
+        "x_account_username",
+        "x_account_display_name",
+        "visibility",
+        "access_scope",
+    }
+)
+
 
 def read_sidecar_metadata(path: Path) -> dict[str, object]:
     sidecar = path.with_suffix(path.suffix + ".meta.json")
@@ -60,6 +90,7 @@ def iter_raw_files(
                 or metadata.get("notion_last_edited_time")
                 or metadata.get("hatenablog_updated_at")
                 or metadata.get("hatenablog_created_at")
+                or metadata.get("crafters_colony_updated_at")
                 or metadata.get("crafters_colony_published_at")
                 or metadata.get("source_date")
                 or ""
@@ -193,6 +224,100 @@ def iter_structured_jsonl_records(
     return out
 
 
+def iter_x_posts(
+    *,
+    source_kind: str,
+    root_dir: Path,
+    default_visibility: str = "public",
+) -> list[SourceRawItem]:
+    path = root_dir / "posts.jsonl"
+    if not path.exists() or not path.is_file():
+        return []
+    out: list[SourceRawItem] = []
+    file_metadata = read_sidecar_metadata(path)
+    with path.open("r", encoding="utf-8") as fr:
+        for line_no, line in enumerate(fr, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            record = payload.get("record")
+            if not isinstance(record, dict):
+                record = payload
+            text = str(record.get("text") or payload.get("text") or "").strip()
+            raw_metadata = record.get("metadata") or payload.get("metadata") or {}
+            if not isinstance(raw_metadata, dict):
+                raw_metadata = {}
+            metadata = _sanitize_x_post_metadata(
+                {
+                    **file_metadata,
+                    **{str(key): value for key, value in raw_metadata.items()},
+                }
+            )
+            metadata["source_type"] = "x_posts"
+            metadata["source_kind"] = source_kind
+            metadata["raw_relative_path"] = "posts.jsonl"
+            metadata["structured_record_line"] = line_no
+            post_id = str(
+                metadata.get("x_post_id")
+                or metadata.get("message_id")
+                or payload.get("id")
+                or ""
+            ).strip()
+            if not text or not post_id:
+                continue
+            metadata["x_post_id"] = post_id
+            metadata.setdefault("message_id", post_id)
+            handle = str(metadata.get("x_author_handle") or "").strip().lstrip("@")
+            timestamp = str(metadata.get("message_timestamp") or "").strip()
+            created_at = _parse_datetime(timestamp)
+            canonical_url = str(metadata.get("x_post_url") or "").strip()
+            if not canonical_url:
+                canonical_url = _x_post_url(post_id=post_id, handle=handle)
+                metadata["x_post_url"] = canonical_url
+            title_date = str(metadata.get("source_date") or "").strip().replace("/", "-")
+            if not title_date and created_at is not None:
+                title_date = created_at.date().isoformat()
+            title = f"X post @{handle or 'unknown'}"
+            if title_date:
+                title = f"{title} {title_date}"
+            checksum = stable_hash(
+                json.dumps(
+                    {"text": text, "metadata": metadata},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+            out.append(
+                SourceRawItem(
+                    source_kind=source_kind,
+                    external_id=post_id,
+                    title=title,
+                    text=text,
+                    canonical_url=canonical_url,
+                    author_id=handle,
+                    created_at=created_at,
+                    updated_at=created_at
+                    or datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                    access_scope=_access_scope(
+                        source_kind=source_kind,
+                        metadata=metadata,
+                        default_visibility=default_visibility,
+                    ),
+                    raw_path=f"{path}#{line_no}",
+                    checksum=checksum,
+                    metadata=metadata,
+                )
+            )
+    return out
+
+
 def _read_text(path: Path) -> str:
     if path.suffix.lower() == ".jsonl":
         texts: list[str] = []
@@ -254,6 +379,7 @@ def _canonical_url(
         "notion_url",
         "hatenablog_url",
         "crafters_colony_article_url",
+        "x_post_url",
         "url",
     ):
         value = str(metadata.get(key) or "").strip()
@@ -301,6 +427,42 @@ def _access_scope(
         user_ids=user_ids,
         source_acl_hash=stable_hash(json.dumps(metadata, ensure_ascii=False, sort_keys=True)),
     )
+
+
+def _sanitize_x_post_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    sanitized = {
+        str(key): value
+        for key, value in metadata.items()
+        if str(key) in _X_POST_METADATA_ALLOWLIST
+    }
+    media_urls = sanitized.get("x_media_urls")
+    if isinstance(media_urls, str):
+        sanitized["x_media_urls"] = [media_urls]
+    elif isinstance(media_urls, list):
+        sanitized["x_media_urls"] = [
+            str(item) for item in media_urls if str(item).strip()
+        ]
+    media = sanitized.get("x_media")
+    if isinstance(media, list):
+        sanitized["x_media"] = [
+            item
+            for item in media
+            if isinstance(item, dict)
+        ]
+    expanded_urls = sanitized.get("x_expanded_urls")
+    if isinstance(expanded_urls, str):
+        sanitized["x_expanded_urls"] = [expanded_urls]
+    elif isinstance(expanded_urls, list):
+        sanitized["x_expanded_urls"] = [
+            str(item) for item in expanded_urls if str(item).strip()
+        ]
+    return sanitized
+
+
+def _x_post_url(*, post_id: str, handle: str) -> str:
+    if handle:
+        return f"https://x.com/{handle}/status/{post_id}"
+    return f"https://x.com/i/web/status/{post_id}"
 
 
 def _parse_datetime(value: str) -> datetime | None:

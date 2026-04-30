@@ -7,7 +7,6 @@ from pathlib import Path
 @dataclass(frozen=True)
 class AppSection:
     command_prefix: str
-    index_command_prefix: str
     max_input_characters: int
     log_level: str
     data_dir: Path
@@ -194,6 +193,11 @@ class EventManagementSection:
     prompt_name: str
     auto_extract_after_index_update: bool
     timezone: str
+
+
+@dataclass(frozen=True)
+class WorkflowExtractionSection:
+    lookback_days: int
 
 
 @dataclass(frozen=True)
@@ -416,7 +420,6 @@ class RagGenerationProfileSection:
 class RagGenerationSection:
     rag: RagGenerationProfileSection
     no_rag: RagGenerationProfileSection
-    idea_generation: RagGenerationProfileSection
 
 
 @dataclass(frozen=True)
@@ -507,6 +510,20 @@ class IndexingDocsQualitySection:
 
 
 @dataclass(frozen=True)
+class IndexingNotionQualitySection:
+    enabled: bool
+    policy: str
+    min_text_bytes: int
+    min_nonempty_characters: int
+    max_short_document_ratio: float
+    max_heading_only_ratio: float
+    max_duplicate_text_ratio: float
+    min_repository_coverage_ratio: float
+    min_index_coverage_ratio: float
+    quarantine_low_information: bool
+
+
+@dataclass(frozen=True)
 class IndexingSection:
     chunking: IndexingChunkingSection
     stages: IndexingStagesSection
@@ -514,6 +531,7 @@ class IndexingSection:
     embedding_cache: IndexingEmbeddingCacheSection
     docs_quality: IndexingDocsQualitySection
     sheets_quality: IndexingSheetsQualitySection
+    notion_quality: IndexingNotionQualitySection
 
 
 @dataclass(frozen=True)
@@ -609,6 +627,7 @@ class IntegrationNotionSection:
     api_token: str
     database_ids: list[str]
     page_ids: list[str]
+    default_visibility: str
 
 
 @dataclass(frozen=True)
@@ -751,6 +770,7 @@ class RuntimeConfig:
     comprehensive_agent: ComprehensiveAgentSection
     task_management: TaskManagementSection
     event_management: EventManagementSection
+    workflow_extraction: WorkflowExtractionSection
     infrastructure: InfrastructureSection
     features: FeatureSection
     minecraft_wiki_rag: MinecraftWikiRagSection

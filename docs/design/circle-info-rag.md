@@ -5,6 +5,8 @@
 
 本設計は `docs/design/kumc-agent.md` の「1. サークル情報RAG」を上位仕様とし、詳細部分は現行実装の `features/rag`、`features/indexing`、`infra/indexing`、`infra/loaders`、`infra/retrieval` 周辺を参照して定義する。現行実装と `kumc-agent.md` が矛盾する場合は `kumc-agent.md` を優先する。
 
+現行実装では、回答入口は `ChatAnswerUsecase` / `RagService.answer()` であり、統合入力受付からは `circle_rag` routeとして呼び出される。index作成は `IndexingService` と `AutoIndexUpdateUsecase` が担当し、ingestion repository backed buildを優先しつつ、既存raw/chunk pipelineを互換fallbackとして扱う。CLIや外部tool payloadでは、routing、fast mode、query synthesis、traceなどの診断情報は `metadata` 配下に置く。
+
 ## 2. 対象範囲
 対象機能は次の通り。
 
@@ -18,7 +20,7 @@
 - 引用・出典出力
 - CLIや外部連携向けpayload整形
 
-対象外は Minecraft Wiki RAG、メンバー検索、画像検索、workflow系の `/ask` extractive retrieval である。ただし、サークル情報RAGをDiscordやCLIから呼び出す経路は対象に含める。
+対象外は Minecraft Wiki RAG、メンバー検索、画像検索、workflow系の候補抽出である。ただし、サークル情報RAGを統合入力受付、Discord、CLI、tool bridgeから呼び出す経路は対象に含める。
 
 ## 3. 全体構成
 サークル情報RAGは、オフラインのインデックス作成系とオンラインの回答系に分かれる。
@@ -119,7 +121,9 @@ Driveファイルの日付は、Drive更新日時、ファイル名・パスに�
 指定ページまたはデータベース配下のページを再帰的に取得し、Markdownとして保存する。
 
 - metadataにはページ名、ページパス、ページID、URL、作成日時、最終編集日時を保持する。
-- ページ画像はOCRと画像認識説明文を本文に含める。
+- metadataには `visibility` と `access_scope.visibility` も保持する。既定値は `integrations.notion.default_visibility` で、上位仕様どおり初期値は `public` とする。
+- ページ階層は `notion_page_path` と `notion_page_path_parts` に保存し、同名ページの区別、citation、資料名検索に使う。
+- 画像・添付・PDF・動画・embedは本文にprivate URLを出さず、まず `notion_asset_count` と `notion_unsupported_block_types` として検出状態を保存する。OCRと画像認識説明文を本文へ含める場合は、private asset URLを外部payloadへ出さない取得・マスク方針を別途満たす。
 
 ## 5. インデックス作成
 ### 5.1 保存先
@@ -135,6 +139,8 @@ Driveファイルの日付は、Drive更新日時、ファイル名・パスに�
 | Dense Index | `data/index` |
 | Keyword Index | `data/index/keyword/*.json` |
 | 資料名検索インデックス | `data/index/material_catalog.json` または後述の資料名転置インデックス |
+
+repository-backed build では、Notionの互換chunk成果物を `data/chunks/first_rec_chunk/notion/{page_id}.jsonl` のようにsource別ディレクトリ配下へ保存する。旧形式の `data/chunks/*/notion.jsonl` は現行buildの正本ではなく、再生成時には stale file として削除される。
 
 ### 5.2 第1 Recursive Chunking
 Rawテキストを情報源に応じたseparatorで再帰分割する。
@@ -158,12 +164,16 @@ DiscordとXはメッセージ境界を尊重し、日付行と送信者名を保
 分割結果が第1チャンクと同一の場合は、回答時に親チャンクを重複追加しないため `skip_parent_context=true` を付与できる。
 
 ### 5.4 Summary Chunking
-第1 Recursive Chunkを専用LLMで要約する。
+第1 Recursive Chunkを専用LLMで要約し、同時にその第1 Chunkが単体で検索結果として意味を持つ文章かを判定する。
 
 - stage: `summary`
 - 既定文字数: `indexing.chunking.summary_characters`
 - 使用LLM: `indexing.chunking.summary_llm_provider` と `summary_gemini_model`
-- LLM利用不可または失敗時は第1チャンク先頭をfallback要約にする。
+- LLM応答は内部的に `searchable`、`summary`、`reason` を持つJSONとして扱う。
+- `searchable=false` が明示された第1 ChunkはSummary Chunkを作らず、その第1 Chunkから派生した第2 Recursive Chunk、sparse chunk、Summary Chunkも検索インデックスへ入れない。
+- 見出しだけ、ページ番号だけ、記号列、壊れた表セル、ナビゲーション断片、OCRノイズ、文脈なしの単語列などは `searchable=false` とする。
+- 固有名詞・日時・数値・条件・説明関係があり、単体で検索ヒットとして意味を持つ場合は `searchable=true` とする。
+- LLM利用不可、API失敗、JSON不正、旧形式の非JSON応答では誤除外を避け、検索対象に残す。要約本文は第1 Chunk先頭または旧形式応答をfallbackとして使う。
 - 回答時の親チャンクとして使う。
 - metadataに `parent_chunk_id` を保持する。
 
@@ -209,6 +219,15 @@ DiscordとXはメッセージ境界を尊重し、日付行と送信者名を保
 | `notion` | ページパス、ページ名 |
 
 検索用にはUnicode NFKC正規化、casefold、日付表記正規化、区切り文字除去、ラベル語除去を行う。現行の `material_catalog.json` のalias照合は補助情報として利用できるが、設計上は資料名転置インデックスを主経路とする。
+
+### 5.8 Notion品質ゲート
+Notion raw / repository / index の不一致を検出するため、`indexing.notion_quality` を使ってNotion専用の品質監査を行う。
+
+- `policy` は `warn` / `fail` を扱う。初期値は `warn` とし、運用データを整えた後に `fail` へ切り替えられる。
+- raw Markdownとsidecar metadataの件数、必須metadata、短文率、heading/url only率、完全一致本文の重複率、repository coverage、index coverageを検査する。
+- quality payload は `stage_results.notion_quality.metadata` に保存し、本文サンプル、検索context、secretを含めない。
+- 低情報量ページには `quality_flags` を付与し、設定で有効な場合は `index_status=quarantined` として通常検索から除外する。
+- 完全一致本文には `duplicate_group_id` と `duplicate_group_size` を付与し、検索・資料名表示・要約で重複を扱えるようにする。
 
 ## 6. ルーティング
 ### 6.1 入力
@@ -269,7 +288,7 @@ LLMの出力はJSONのみとし、パース不能時は安全側のデフォル�
 | `x_posts` | 全ユーザー |
 | `notion` | 全ユーザー |
 
-チャンクmetadataに `access_scope` が存在する場合は、上記既定ポリシーよりも具体的な制御として適用する。ただし `redaction_policy=deny`、`index_status in deleted/quarantined/permission_lost` のチャンクは常に除外する。
+Notionの既定公開範囲は `integrations.notion.default_visibility` で設定でき、初期値は `public` とする。raw sidecarまたはchunk metadataに `access_scope` が存在する場合は、上記既定ポリシーよりも具体的な制御として適用する。ただし `redaction_policy=deny`、`index_status in deleted/quarantined/permission_lost` のチャンクは常に除外する。
 
 ### 7.5 Recency補正
 Dense検索結果とSparse検索結果それぞれに対してRecency補正を行う。

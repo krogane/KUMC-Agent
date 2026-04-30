@@ -102,7 +102,7 @@ class IngestionChunker:
         if document.source_kind == "discord":
             return "message_window"
         if document.source_kind == "x":
-            return "tweet"
+            return "x_post"
         if document.source_kind == "minecraft_wiki":
             return "wiki_section" if section_title else "wiki_article"
         if document.normalized_format == "csv_as_text":

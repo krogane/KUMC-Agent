@@ -17,6 +17,7 @@ from kumc_agent.domain.models.autonomous_agent import (
     AutonomousAgentSnapshot,
     AutonomousCheck,
     AutonomousPlan,
+    SnapshotItem,
     AutonomousToolResult,
 )
 from kumc_agent.domain.models.chunk import Chunk
@@ -256,10 +257,38 @@ class AutonomousAgentTests(unittest.TestCase):
                             "source_title": "準備資料",
                             "updated_at": now.isoformat(),
                         },
-                    )
+                    ),
+                    Chunk(
+                        id="chunk-old",
+                        document_id="doc-old",
+                        text="古い資料です。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-old",
+                            "source_kind": "drive",
+                            "external_id": "drive-old",
+                            "source_title": "古い資料",
+                            "updated_at": (now - timedelta(days=2)).isoformat(),
+                        },
+                    ),
+                    Chunk(
+                        id="chunk-missing-time",
+                        document_id="doc-missing-time",
+                        text="時刻不明の資料です。",
+                        index=0,
+                        metadata={
+                            "source_item_id": "source-missing",
+                            "source_kind": "drive",
+                            "external_id": "drive-missing",
+                            "source_title": "時刻不明資料",
+                        },
+                    ),
                 ]
             ),
-            config=SnapshotCollectorConfig(rag_delta_lookback_hours=24),
+            config=SnapshotCollectorConfig(
+                rag_delta_lookback_days=1,
+                rag_delta_lookback_hours=24,
+            ),
         )
 
         snapshot = collector.collect(scopes=("rag_delta",), now=now)
@@ -267,6 +296,31 @@ class AutonomousAgentTests(unittest.TestCase):
         self.assertEqual(len(snapshot.rag_delta), 1)
         self.assertEqual(snapshot.rag_delta[0].id, "source-1")
         self.assertEqual(snapshot.rag_delta[0].citations[0].chunk_id, "chunk-1")
+        self.assertEqual(snapshot.rag_delta[0].metadata["lookback_days"], 1)
+        self.assertIn("extraction_since", snapshot.rag_delta[0].metadata)
+
+    def test_rag_delta_planner_query_carries_extraction_window_metadata(self) -> None:
+        item = SnapshotItem(
+            id="source-1",
+            kind="rag_delta",
+            title="準備資料",
+            metadata={
+                "source_kind": "drive",
+                "external_id": "drive-1",
+                "lookback_days": 1,
+                "extraction_since": "2026-04-27T12:00:00+00:00",
+                "extraction_at": "2026-04-28T12:00:00+00:00",
+                "changed_at": "2026-04-28T11:00:00+00:00",
+            },
+        )
+        plan = AutonomousPlanner().plan(
+            AutonomousAgentSnapshot(rag_delta=(item,), warnings=tuple())
+        )
+
+        query = plan.required_queries[0]
+        self.assertEqual(query.metadata["kind"], "rag_delta_extract")
+        self.assertEqual(query.metadata["lookback_days"], 1)
+        self.assertEqual(query.metadata["extraction_since"], "2026-04-27T12:00:00+00:00")
 
     def test_llm_planner_and_verifier_use_deterministic_guard(self) -> None:
         planner = AutonomousPlanner(

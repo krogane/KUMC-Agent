@@ -4,7 +4,7 @@ from collections import deque
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -38,6 +38,21 @@ class NotionSyncStats:
     pages_updated: int = 0
     pages_skipped: int = 0
     pages_deleted: int = 0
+    database_errors: tuple[str, ...] = tuple()
+    page_errors: tuple[str, ...] = tuple()
+    misclassified_database_ids: tuple[str, ...] = tuple()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "databases": self.databases,
+            "pages_seen": self.pages_seen,
+            "pages_updated": self.pages_updated,
+            "pages_skipped": self.pages_skipped,
+            "pages_deleted": self.pages_deleted,
+            "database_errors": list(self.database_errors),
+            "page_errors": list(self.page_errors),
+            "misclassified_database_ids": list(self.misclassified_database_ids),
+        }
 
 
 @dataclass(frozen=True)
@@ -45,6 +60,13 @@ class _PageSyncResult:
     updated: int = 0
     skipped: int = 0
     references: set[tuple[str, str]] | None = None
+    reference_titles: dict[tuple[str, str], str] | None = None
+
+
+@dataclass
+class _BlockRenderStats:
+    asset_count: int = 0
+    unsupported_block_types: set[str] = field(default_factory=set)
 
 
 def download_notion_database_pages(
@@ -56,50 +78,70 @@ def download_notion_database_pages(
     skip_existing: bool,
     update_existing: bool,
     sync_deleted: bool,
-) -> int:
+    default_visibility: str = "public",
+    return_stats: bool = False,
+) -> int | NotionSyncStats:
     ensure_dir(output_dir)
     token = (api_token or "").strip()
     if not token:
         logger.warning("Notion API token is empty. Skipping Notion sync.")
-        return 0
+        empty_stats = NotionSyncStats()
+        return empty_stats if return_stats else 0
 
     stats = NotionSyncStats()
     queued_database_ids: set[str] = set()
     queued_page_ids: set[str] = set()
     processed_database_ids: set[str] = set()
     processed_page_ids: set[str] = set()
+    database_paths: dict[str, tuple[str, ...]] = {}
+    page_paths: dict[str, tuple[str, ...]] = {}
+    database_errors: list[str] = []
+    page_errors: list[str] = []
+    misclassified_database_ids: list[str] = []
     database_queue: deque[str] = deque()
     page_queue: deque[str] = deque()
 
-    def queue_database(raw_database_id: str) -> None:
+    def queue_database(raw_database_id: str, *, path: tuple[str, ...] = tuple()) -> None:
         database_id = _normalize_notion_id(raw_database_id)
         if not database_id:
             logger.warning("Skip invalid Notion database id: %s", raw_database_id)
             return
+        if path and database_id not in database_paths:
+            database_paths[database_id] = path
         if database_id in queued_database_ids or database_id in processed_database_ids:
             return
         queued_database_ids.add(database_id)
         database_queue.append(database_id)
 
-    def queue_page(raw_page_id: str) -> None:
+    def queue_page(raw_page_id: str, *, path: tuple[str, ...] = tuple()) -> None:
         page_id = _normalize_notion_id(raw_page_id)
         if not page_id:
             logger.warning("Skip invalid Notion page id: %s", raw_page_id)
             return
+        if path and page_id not in page_paths:
+            page_paths[page_id] = path
         if page_id in queued_page_ids or page_id in processed_page_ids:
             return
         queued_page_ids.add(page_id)
         page_queue.append(page_id)
 
-    def queue_references(references: set[tuple[str, str]] | None) -> None:
+    def queue_references(
+        references: set[tuple[str, str]] | None,
+        *,
+        parent_path: tuple[str, ...],
+        reference_titles: dict[tuple[str, str], str] | None = None,
+    ) -> None:
         for ref_kind, ref_id in sorted(references or set()):
+            title = str((reference_titles or {}).get((ref_kind, ref_id)) or ref_id)
+            path = (*parent_path, title)
             if ref_kind == "database":
-                queue_database(ref_id)
+                queue_database(ref_id, path=path)
             elif ref_kind == "page":
-                queue_page(ref_id)
+                queue_page(ref_id, path=path)
 
     for raw_database_id in database_ids:
-        queue_database(raw_database_id)
+        normalized = _normalize_notion_id(raw_database_id)
+        queue_database(raw_database_id, path=(normalized or str(raw_database_id),))
     for raw_page_id in page_ids or []:
         queue_page(raw_page_id)
 
@@ -125,8 +167,17 @@ def download_notion_database_pages(
                     api_token=token,
                     database_id=database_id,
                 )
-            except Exception:
+            except Exception as exc:
+                if _looks_like_page_not_database_error(exc):
+                    logger.warning(
+                        "Notion id configured as database is a page; retrying as page: %s",
+                        database_id,
+                    )
+                    misclassified_database_ids.append(database_id)
+                    queue_page(database_id, path=database_paths.get(database_id, tuple()))
+                    continue
                 logger.exception("Failed to list Notion database pages: %s", database_id)
+                database_errors.append(database_id)
                 continue
 
             pages_seen = 0
@@ -145,6 +196,7 @@ def download_notion_database_pages(
                     continue
                 processed_page_ids.add(page_id)
                 try:
+                    page_path = (*database_paths.get(database_id, (database_id,)), page.title)
                     result = _sync_page_markdown(
                         api_token=token,
                         page=page,
@@ -152,13 +204,20 @@ def download_notion_database_pages(
                         database_id=database_id,
                         skip_existing=skip_existing,
                         update_existing=update_existing,
+                        page_path=page_path,
+                        default_visibility=default_visibility,
                     )
                 except Exception:
                     logger.exception("Failed to render Notion page markdown: %s", page_id)
+                    page_errors.append(page_id)
                     continue
                 pages_updated += result.updated
                 pages_skipped += result.skipped
-                queue_references(result.references)
+                queue_references(
+                    result.references,
+                    parent_path=page_path,
+                    reference_titles=result.reference_titles,
+                )
 
             deleted = 0
             if sync_deleted:
@@ -190,6 +249,7 @@ def download_notion_database_pages(
             page = _retrieve_page(api_token=token, page_id=page_id)
         except Exception:
             logger.exception("Failed to retrieve Notion page: %s", page_id)
+            page_errors.append(page_id)
             standalone_had_errors = True
             continue
         page_id = _normalize_notion_id(page.page_id)
@@ -198,6 +258,7 @@ def download_notion_database_pages(
         processed_page_ids.add(page_id)
         standalone_valid_page_ids.add(page_id)
         standalone_seen += 1
+        page_path = page_paths.get(page_id) or ((page.title or page_id).strip(),)
 
         try:
             result = _sync_page_markdown(
@@ -207,14 +268,21 @@ def download_notion_database_pages(
                 database_id="",
                 skip_existing=skip_existing,
                 update_existing=update_existing,
+                page_path=page_path,
+                default_visibility=default_visibility,
             )
         except Exception:
             logger.exception("Failed to render Notion page markdown: %s", page_id)
+            page_errors.append(page_id)
             standalone_had_errors = True
             continue
         standalone_updated += result.updated
         standalone_skipped += result.skipped
-        queue_references(result.references)
+        queue_references(
+            result.references,
+            parent_path=page_path,
+            reference_titles=result.reference_titles,
+        )
 
     standalone_deleted = 0
     if sync_deleted and not standalone_had_errors and pages_dir.exists():
@@ -237,6 +305,9 @@ def download_notion_database_pages(
         pages_updated=stats.pages_updated + standalone_updated,
         pages_skipped=stats.pages_skipped + standalone_skipped,
         pages_deleted=stats.pages_deleted + standalone_deleted,
+        database_errors=tuple(database_errors),
+        page_errors=tuple(page_errors),
+        misclassified_database_ids=tuple(misclassified_database_ids),
     )
 
     logger.info(
@@ -247,7 +318,7 @@ def download_notion_database_pages(
         stats.pages_skipped,
         stats.pages_deleted,
     )
-    return stats.pages_updated
+    return stats if return_stats else stats.pages_updated
 
 
 def _notion_request_json(
@@ -406,12 +477,18 @@ def _sync_page_markdown(
     database_id: str,
     skip_existing: bool,
     update_existing: bool,
+    page_path: tuple[str, ...],
+    default_visibility: str,
 ) -> _PageSyncResult:
     references: set[tuple[str, str]] = set()
+    reference_titles: dict[tuple[str, str], str] = {}
+    block_stats = _BlockRenderStats()
     markdown = _render_page_markdown(
         api_token=api_token,
         page=page,
         references=references,
+        reference_titles=reference_titles,
+        block_stats=block_stats,
     )
     output_path = _page_output_path(db_dir=output_dir, page=page)
     page_id = _normalize_notion_id(page.page_id)
@@ -423,12 +500,35 @@ def _sync_page_markdown(
         skip_existing=skip_existing,
         update_existing=update_existing,
     ):
-        return _PageSyncResult(skipped=1, references=references)
+        _write_page_metadata(
+            output_path=output_path,
+            page=page,
+            database_id=database_id,
+            page_path=page_path,
+            default_visibility=default_visibility,
+            block_stats=block_stats,
+        )
+        return _PageSyncResult(
+            skipped=1,
+            references=references,
+            reference_titles=reference_titles,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")
-    _write_page_metadata(output_path=output_path, page=page, database_id=database_id)
-    return _PageSyncResult(updated=1, references=references)
+    _write_page_metadata(
+        output_path=output_path,
+        page=page,
+        database_id=database_id,
+        page_path=page_path,
+        default_visibility=default_visibility,
+        block_stats=block_stats,
+    )
+    return _PageSyncResult(
+        updated=1,
+        references=references,
+        reference_titles=reference_titles,
+    )
 
 
 def _render_page_markdown(
@@ -436,6 +536,8 @@ def _render_page_markdown(
     api_token: str,
     page: NotionPage,
     references: set[tuple[str, str]] | None = None,
+    reference_titles: dict[tuple[str, str], str] | None = None,
+    block_stats: _BlockRenderStats | None = None,
 ) -> str:
     lines: list[str] = []
     title = (page.title or "Untitled").strip()
@@ -448,6 +550,8 @@ def _render_page_markdown(
         depth=0,
         visited=set(),
         references=references,
+        reference_titles=reference_titles,
+        block_stats=block_stats,
     )
     if body_lines:
         if lines:
@@ -466,6 +570,8 @@ def _collect_block_lines(
     depth: int,
     visited: set[str],
     references: set[tuple[str, str]] | None = None,
+    reference_titles: dict[tuple[str, str], str] | None = None,
+    block_stats: _BlockRenderStats | None = None,
 ) -> list[str]:
     if depth > _MAX_BLOCK_RECURSION_DEPTH:
         return []
@@ -496,8 +602,11 @@ def _collect_block_lines(
                 if not isinstance(row, dict):
                     continue
                 if references is not None:
-                    references.update(_collect_block_references(row))
-                block_lines = _block_to_lines(row)
+                    for ref_kind, ref_id, ref_title in _collect_block_reference_entries(row):
+                        references.add((ref_kind, ref_id))
+                        if reference_titles is not None and ref_title:
+                            reference_titles.setdefault((ref_kind, ref_id), ref_title)
+                block_lines = _block_to_lines(row, block_stats=block_stats)
                 if block_lines:
                     lines.extend(block_lines)
                 if bool(row.get("has_children", False)):
@@ -507,6 +616,8 @@ def _collect_block_lines(
                         depth=depth + 1,
                         visited=visited,
                         references=references,
+                        reference_titles=reference_titles,
+                        block_stats=block_stats,
                     )
                     if child_lines:
                         lines.extend(child_lines)
@@ -523,7 +634,16 @@ def _collect_block_lines(
 
 
 def _collect_block_references(block: dict[str, object]) -> set[tuple[str, str]]:
-    references: set[tuple[str, str]] = set()
+    return {
+        (ref_kind, ref_id)
+        for ref_kind, ref_id, _title in _collect_block_reference_entries(block)
+    }
+
+
+def _collect_block_reference_entries(
+    block: dict[str, object],
+) -> set[tuple[str, str, str]]:
+    references: set[tuple[str, str, str]] = set()
     block_type = str(block.get("type") or "").strip()
     if not block_type:
         return references
@@ -533,19 +653,19 @@ def _collect_block_references(block: dict[str, object]) -> set[tuple[str, str]]:
 
     block_id = _normalize_notion_id(str(block.get("id") or ""))
     if block_type == "child_page" and block_id:
-        references.add(("page", block_id))
+        references.add(("page", block_id, str(payload.get("title") or "").strip()))
     elif block_type == "child_database" and block_id:
-        references.add(("database", block_id))
+        references.add(("database", block_id, str(payload.get("title") or "").strip()))
     elif block_type == "link_to_page":
         link_type = str(payload.get("type") or "").strip()
         if link_type == "page_id":
             page_id = _normalize_notion_id(str(payload.get("page_id") or ""))
             if page_id:
-                references.add(("page", page_id))
+                references.add(("page", page_id, ""))
         elif link_type == "database_id":
             database_id = _normalize_notion_id(str(payload.get("database_id") or ""))
             if database_id:
-                references.add(("database", database_id))
+                references.add(("database", database_id, ""))
 
     references.update(
         _collect_rich_text_references(
@@ -561,8 +681,8 @@ def _collect_block_references(block: dict[str, object]) -> set[tuple[str, str]]:
     return references
 
 
-def _collect_rich_text_references(values: list[object]) -> set[tuple[str, str]]:
-    references: set[tuple[str, str]] = set()
+def _collect_rich_text_references(values: list[object]) -> set[tuple[str, str, str]]:
+    references: set[tuple[str, str, str]] = set()
     for value in values:
         if not isinstance(value, dict):
             continue
@@ -574,19 +694,24 @@ def _collect_rich_text_references(values: list[object]) -> set[tuple[str, str]]:
                 if isinstance(page, dict):
                     page_id = _normalize_notion_id(str(page.get("id") or ""))
                     if page_id:
-                        references.add(("page", page_id))
+                        references.add(("page", page_id, _rich_text_reference_title(value)))
             elif mention_type == "database":
                 database = mention.get("database")
                 if isinstance(database, dict):
                     database_id = _normalize_notion_id(str(database.get("id") or ""))
                     if database_id:
-                        references.add(("database", database_id))
+                        references.add(("database", database_id, _rich_text_reference_title(value)))
 
         for raw_url in _rich_text_urls(value):
             page_id = _notion_page_id_from_url(raw_url)
             if page_id:
-                references.add(("page", page_id))
+                references.add(("page", page_id, _rich_text_reference_title(value)))
     return references
+
+
+def _rich_text_reference_title(value: dict[str, object]) -> str:
+    plain = str(value.get("plain_text") or "").strip()
+    return plain if plain else ""
 
 
 def _rich_text_urls(value: dict[str, object]) -> list[str]:
@@ -618,7 +743,11 @@ def _notion_page_id_from_url(url: str) -> str:
     return _normalize_notion_id(raw)
 
 
-def _block_to_lines(block: dict[str, object]) -> list[str]:
+def _block_to_lines(
+    block: dict[str, object],
+    *,
+    block_stats: _BlockRenderStats | None = None,
+) -> list[str]:
     block_type = str(block.get("type") or "").strip()
     if not block_type:
         return []
@@ -628,6 +757,14 @@ def _block_to_lines(block: dict[str, object]) -> list[str]:
         payload = {}
 
     text = _rich_text_plain(payload.get("rich_text") if isinstance(payload.get("rich_text"), list) else [])
+    if block_type in {"image", "file", "pdf", "video", "embed"}:
+        if block_stats is not None:
+            block_stats.asset_count += 1
+            block_stats.unsupported_block_types.add(block_type)
+        caption = _rich_text_plain(
+            payload.get("caption") if isinstance(payload.get("caption"), list) else []
+        )
+        return [caption] if caption else []
 
     if block_type == "paragraph":
         return [text] if text else []
@@ -731,15 +868,33 @@ def _read_page_metadata(output_path: Path) -> dict[str, object]:
     return payload
 
 
-def _write_page_metadata(*, output_path: Path, page: NotionPage, database_id: str) -> None:
+def _write_page_metadata(
+    *,
+    output_path: Path,
+    page: NotionPage,
+    database_id: str,
+    page_path: tuple[str, ...],
+    default_visibility: str,
+    block_stats: _BlockRenderStats,
+) -> None:
+    visibility = _valid_visibility(default_visibility)
+    normalized_path = [str(value).strip() for value in page_path if str(value).strip()]
+    if not normalized_path:
+        normalized_path = [(page.title or _normalize_notion_id(page.page_id) or "Untitled")]
     metadata = {
         "source_type": "notion",
         "notion_database_id": _normalize_notion_id(database_id),
         "notion_page_id": _normalize_notion_id(page.page_id),
         "notion_title": page.title,
         "notion_url": page.url,
+        "notion_page_path": " / ".join(normalized_path),
+        "notion_page_path_parts": normalized_path,
         "notion_created_time": page.created_time,
         "notion_last_edited_time": page.last_edited_time,
+        "notion_asset_count": block_stats.asset_count,
+        "notion_unsupported_block_types": sorted(block_stats.unsupported_block_types),
+        "visibility": visibility,
+        "access_scope": {"visibility": visibility},
         "source_date": _iso_to_source_date(page.last_edited_time),
         "updated_at": page.last_edited_time,
         "synced_at": datetime.now(timezone.utc).isoformat(),
@@ -834,6 +989,11 @@ def _cleanup_deleted_pages(*, db_dir: Path, valid_page_ids: set[str]) -> int:
     return deleted
 
 
+def _looks_like_page_not_database_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "is a page, not a database" in message or "retrieve page api" in message
+
+
 def _extract_page_id_from_filename(file_name: str) -> str | None:
     if FILE_ID_SEPARATOR not in file_name:
         return None
@@ -867,6 +1027,13 @@ def _extract_id_from_url(url: str) -> str:
     if not path:
         return ""
     return path.split("-")[-1]
+
+
+def _valid_visibility(value: str) -> str:
+    visibility = str(value or "").strip().lower()
+    if visibility in {"public", "guild", "role", "private", "admin"}:
+        return visibility
+    return "public"
 
 
 def _iso_to_source_date(value: str) -> str:

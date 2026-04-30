@@ -29,19 +29,21 @@
 - 画像生成
 - 画像編集
 
-## 3. 現行実装との差分
-現行実装には、画像検索の最小限の土台だけが存在する。
+## 3. 現行実装同期状況
+現行実装では、画像検索は `ImageAssetBuildService` と `ImageSearchService` に分離されている。index更新時にingestion成果物から画像候補をscanし、Asset保存、caption/OCR、text vector、image feature vectorを作成する。検索時は `WorkflowService.image_search()` または統合入力受付の `image_search` routeから `ImageSearchService.search()` を呼ぶ。
 
-| 項目 | 現行実装 | 本設計で必要な状態 |
-| --- | --- | --- |
-| ドメインモデル | `Asset` に `source_kind`, `source_item_id`, `title`, `description`, `uri`, `media_type`, `captured_at`, `access_scope`, `rights_status`, `contains_people`, `metadata` がある | `caption`, `ocr_text`, `surrounding_text`, `feature_vector_ref`, `source_url`, `source_label`, `source_created_at`, `indexed_at` などを保持できる |
-| Repository | JSONL/Postgresへ保存し、`title`, `description`, `source_kind`, `uri` の単純部分一致で検索する | 権限フィルタ、Dense index検索、画像特徴量検索、RRF結果を扱う |
-| workflow | `image_search` が `operations.list_assets(query=...)` を呼ぶ | 専用 `ImageSearchService` を呼び、候補、説明、出典、検索metadataを返す |
-| データ取得 | 画像検索専用pipelineは未実装 | サークル情報RAGのデータ取得と共通化し、画像ファイルと周辺テキストを抽出する |
-| caption/OCR | Google Drive PDF OCRなど一部処理はあるが、画像検索Asset化は未整備 | 情報源ごとに画像説明文とOCR結果を分けて保存する |
-| index | 未実装 | FaissLikeIndexと画像特徴量vector indexを作成する |
-| 権限 | Repository検索時の権限フィルタは未実装 | 投稿媒体区分ごとにサークル情報RAGと同じ権限設定で検索前・回答前に除外する |
-| 利用申請 | 旧実装に `image_usage_request` があった | 削除する。画像検索は候補提示のみを返す |
+| 項目 | 現行実装 |
+| --- | --- |
+| ドメインモデル | `Asset` の安定フィールドに加え、`metadata.caption`, `metadata.ocr_text`, `metadata.surrounding_text`, `metadata.feature_vector_ref`, `metadata.source_url`, `metadata.source_label`, `metadata.source_created_at`, `metadata.index_status` などを保持する |
+| Repository | `OperationsRepository` がAssetをJSONL/PostgreSQLへ保存し、`list_assets()` / `get_asset()` / `save_asset()` を提供する |
+| workflow | `WorkflowService.image_search()` は専用serviceがある場合は `ImageSearchService` を呼び、未設定時はrepository検索へdegraded fallbackする |
+| データ取得 | Discord、Google Drive、X、Hatena、Crafters Colonyのingestion成果物から画像URL、Drive抽出画像、PPT media、周辺本文を候補化する |
+| caption/OCR | Gemini captionerとlocal OCR extractorを設定可能にし、失敗時は周辺テキスト・skipped/fallback metadataで検索可能性を残す |
+| index | text embeddingを `image_text_vectors.npy`、画像特徴量を `image_feature_vectors.npy`、Asset並びを `image_assets.jsonl` に保存する |
+| 画像特徴量 | CLIP系modelは `local_files_only=True` で読み込み、未配置時はlocal color/hash fallback vectorを使ってdegraded扱いにする |
+| 権限 | `ImageAccessPolicy` が `public` / `guild` / `role` / `private` / `admin` と `index_status` を検索前・出力前に適用する |
+| 利用申請 | 画像検索は候補提示のみを返し、利用申請や権利判定は行わない |
+| 設定 | `configs/main/features.yaml` の `features.image_search.*` を使う。`caption_model` はGemini model名、`ocr_model` はlocal OCR model pathとして扱う |
 
 `src/kumc_agent/infra/legacy` は参照・依存しない。
 

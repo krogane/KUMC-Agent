@@ -64,7 +64,6 @@ def _to_int_csv(raw: str) -> list[int]:
 ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding("KUMC_LOG_LEVEL", "app.log_level", str),
     EnvBinding("KUMC_COMMAND_PREFIX", "app.command_prefix", str),
-    EnvBinding("KUMC_INDEX_COMMAND_PREFIX", "app.index_command_prefix", str),
     EnvBinding("KUMC_MAX_INPUT_CHARACTERS", "app.max_input_characters", _to_int),
     EnvBinding("KUMC_DISCORD_BOT_TOKEN", "integrations.discord.bot_token", str),
     EnvBinding("KUMC_OPENCLAW_ENABLED", "integrations.openclaw.enabled", _to_bool),
@@ -415,36 +414,6 @@ ENV_BINDINGS: tuple[EnvBinding, ...] = (
     EnvBinding(
         "KUMC_RAG_GENERATION_NO_RAG_PROMPT_NAME",
         "rag.generation.no_rag.prompt_name",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_PROMPT_NAME",
-        "rag.generation.idea_generation.prompt_name",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_TEMPERATURE",
-        "rag.generation.idea_generation.temperature",
-        _to_float,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_PROVIDER",
-        "rag.generation.idea_generation.provider",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_GEMINI_MODEL",
-        "rag.generation.idea_generation.gemini_model",
-        str,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_MAX_OUTPUT_TOKENS",
-        "rag.generation.idea_generation.max_output_tokens",
-        _to_int,
-    ),
-    EnvBinding(
-        "KUMC_RAG_IDEA_THINKING_LEVEL",
-        "rag.generation.idea_generation.thinking_level",
         str,
     ),
     EnvBinding(

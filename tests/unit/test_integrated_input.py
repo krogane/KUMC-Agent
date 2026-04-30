@@ -147,6 +147,14 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(decision.intent, "create_candidate")
         self.assertEqual(decision.attribute_filters["due"], "today")
 
+        no_rag = router._parse_payload(
+            '{"route":"no_rag","intent":"question","required_features":[],"source_filters":[],"risk":"read_only"}'
+        )
+        self.assertIsNotNone(no_rag)
+        assert no_rag is not None
+        self.assertEqual(no_rag.route, "no_rag")
+        self.assertEqual(no_rag.required_features, tuple())
+
     def test_policy_prefers_explicit_source_and_escalates_multiple_features(self) -> None:
         policy = IntegratedRoutingPolicy()
         explicit = policy.apply(
@@ -171,6 +179,14 @@ class IntegratedInputTests(unittest.TestCase):
         )
         self.assertEqual(deep_rag.route, "comprehensive_agent")
 
+        general = policy.apply(
+            IntegratedInputDecision(route="circle_rag", required_features=tuple()),
+            text="こんにちは",
+            source="all",
+        )
+        self.assertEqual(general.route, "no_rag")
+        self.assertEqual(general.required_features, tuple())
+
         explicit_composite = policy.apply(
             IntegratedInputDecision(route="member_search", required_features=("member_search",)),
             text="担当候補を探してタスク候補を作って",
@@ -186,6 +202,18 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(side_effect.route, "clarify")
         self.assertEqual(side_effect.risk, "read_only")
         self.assertTrue(side_effect.needs_clarification)
+
+        no_rag = router.decide("こんにちは", source="all")
+        self.assertEqual(no_rag.route, "no_rag")
+        self.assertEqual(no_rag.required_features, tuple())
+
+        circle = router.decide("KUMCの活動を教えて", source="all")
+        self.assertEqual(circle.route, "circle_rag")
+        self.assertEqual(circle.required_features, ("circle_rag",))
+
+        explicit_source = router.decide("こんにちは", source="drive")
+        self.assertEqual(explicit_source.route, "circle_rag")
+        self.assertEqual(explicit_source.required_features, ("circle_rag",))
 
         read_only = router.decide("タスク一覧", source="task")
         self.assertEqual(read_only.route, "task_management")
@@ -237,6 +265,35 @@ class IntegratedInputTests(unittest.TestCase):
         self.assertEqual(ask.queries, [])
         self.assertNotIn("contexts", response.metadata)
         self.assertEqual(response.citations[0]["url"], "https://example.com/s1")
+
+    def test_usecase_routes_no_rag_to_chat_answer_service_only(self) -> None:
+        ask = FakeAskService([])
+        chat = FakeChatAnswerService([])
+        workflow = FakeWorkflowService([])
+        agent = FakeAgent([])
+        usecase = IntegratedInputUsecase(
+            ask_service=ask,
+            chat_answer_service=chat,
+            workflow_service=workflow,
+            comprehensive_agent=agent,
+            router=StaticRouter(
+                IntegratedInputDecision(route="no_rag", required_features=tuple())
+            ),  # type: ignore[arg-type]
+        )
+        access = AccessContext(user_id="u1", guild_id="g1", role_ids=("r1",))
+
+        response = usecase.execute(
+            IntegratedInputRequest(text="こんにちは", source="all", access=access)
+        )
+
+        self.assertEqual(response.text, "rag:こんにちは")
+        self.assertEqual(response.metadata["route"], "no_rag")
+        self.assertEqual(response.metadata["handler"], "no_rag")
+        self.assertEqual(chat.requests[0].route_override, "no_rag")
+        self.assertEqual(chat.requests[0].access_context, access)
+        self.assertEqual(ask.queries, [])
+        self.assertEqual(workflow.requests, [])
+        self.assertEqual(agent.requests, [])
 
     def test_usecase_routes_minecraft_wiki_rag_to_chat_answer_service(self) -> None:
         ask = FakeAskService([])

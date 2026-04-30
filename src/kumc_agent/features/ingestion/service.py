@@ -111,25 +111,34 @@ class IngestionService:
             documents += 1
             chunks += outcome.chunks
             findings_count += outcome.secret_findings
+        connector_sync_metadata: dict[str, object] = {}
+        sync_metadata_fn = getattr(connector, "sync_metadata", None)
+        if callable(sync_metadata_fn):
+            value = sync_metadata_fn()
+            if isinstance(value, dict):
+                connector_sync_metadata = {str(key): item for key, item in value.items()}
+        cursor_metadata = {
+            "mode": (
+                "poll_changes"
+                if use_poll_changes
+                else "full_scan_cursor_unsupported"
+                if cursor is not None and cursor.cursor and not resolved_scope.force
+                else "backfill"
+            ),
+            "cursor_supported": supports_incremental,
+            "previous_cursor_present": bool(cursor is not None and cursor.cursor),
+            "seen": seen,
+            "changed": changed,
+            "skipped": skipped,
+            "deleted": deleted,
+        }
+        if connector_sync_metadata:
+            cursor_metadata["source_sync"] = connector_sync_metadata
         self._repository.save_sync_cursor(
             SyncCursor(
                 source_kind=source_kind,
                 cursor=datetime.now(UTC).isoformat(),
-                metadata={
-                    "mode": (
-                        "poll_changes"
-                        if use_poll_changes
-                        else "full_scan_cursor_unsupported"
-                        if cursor is not None and cursor.cursor and not resolved_scope.force
-                        else "backfill"
-                    ),
-                    "cursor_supported": supports_incremental,
-                    "previous_cursor_present": bool(cursor is not None and cursor.cursor),
-                    "seen": seen,
-                    "changed": changed,
-                    "skipped": skipped,
-                    "deleted": deleted,
-                },
+                metadata=cursor_metadata,
             )
         )
 

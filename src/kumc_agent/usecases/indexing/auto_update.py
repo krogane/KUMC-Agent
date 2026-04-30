@@ -19,6 +19,11 @@ from kumc_agent.features.indexing.quality import IndexQualitySmokeChecker
 from kumc_agent.features.indexing.snapshot import IndexSnapshotPublisher
 from kumc_agent.features.foundation.payload_sanitizer import sanitize_payload_metadata
 from kumc_agent.features.ingestion.service import IngestionResult, IngestionService
+from kumc_agent.features.workflow.extraction_window import (
+    build_extraction_window,
+    normalize_lookback_days,
+    select_recent_chunks,
+)
 from kumc_agent.infra.operations import OperationsRepository
 from kumc_agent.usecases.indexing.build import BuildIndexRequest, BuildIndexUsecase
 from kumc_agent.utils.hashing import stable_hash
@@ -182,7 +187,6 @@ class AutoIndexUpdateUsecase:
         deadline = datetime.now(UTC) + timedelta(minutes=max(1, max_runtime_minutes))
         run = IndexingRun(id=run_id, source_kind="all", status="running", metadata=metadata)
         try:
-            run = self._operations.save_indexing_run(run)
             _ensure_before_deadline(deadline)
             ingestion_results = self._ingest_sources(request)
             _ensure_before_deadline(deadline)
@@ -293,6 +297,7 @@ class AutoIndexUpdateUsecase:
             }
             if getattr(build_result, "stage_results", None):
                 metadata["stage_results"].update(dict(build_result.stage_results or {}))
+            _lift_notion_coverage_metadata(metadata)
             if member_profile_refresh_planned:
                 member_profile_runs = self._rebuild_member_profiles(staging_dir=staging_dir)
                 _ensure_before_deadline(deadline)
@@ -455,15 +460,16 @@ class AutoIndexUpdateUsecase:
                 )
             )
         except Exception as exc:
+            status = "cancelled" if "cancel" in str(exc).lower() else "failed"
             failed = replace(
                 run,
-                status="failed",
+                status=status,
                 error=str(exc),
                 metadata=metadata
                 | {
                     "notification": _notification_payload(
                         run_id=run_id,
-                        status="failed",
+                        status=status,
                         reason=str(exc),
                     )
                 },
@@ -611,9 +617,27 @@ class AutoIndexUpdateUsecase:
         source_kinds = tuple(
             dict.fromkeys(result.source_kind for result in changed_results if result.source_kind)
         )
+        extraction_at = datetime.now(UTC)
+        lookback_days = _workflow_extraction_lookback_days(self._config)
+        base_window = build_extraction_window(
+            lookback_days=lookback_days,
+            extraction_at=extraction_at,
+        )
+        window_metadata: dict[str, object] = {
+            **base_window.as_metadata(),
+            "selected_chunks": 0,
+            "excluded_older_chunks": 0,
+            "excluded_missing_timestamp_chunks": 0,
+        }
         try:
             chunks = self._event_delta_chunk_source.load_active_chunks(source_kinds=source_kinds)
-            selected_chunks = _event_delta_chunks(chunks)
+            recent_selection = select_recent_chunks(
+                chunks,
+                lookback_days=lookback_days,
+                extraction_at=extraction_at,
+            )
+            selected_chunks = _event_delta_chunks(recent_selection.chunks)
+            window_metadata = recent_selection.as_metadata(selected_chunks=len(selected_chunks))
             evidence = tuple(_event_delta_citation(chunk) for chunk in selected_chunks[:12])
             if task_enabled:
                 task_payload = self._run_single_delta_extraction(
@@ -623,6 +647,7 @@ class AutoIndexUpdateUsecase:
                     selected_chunks=selected_chunks,
                     changed_results=changed_results,
                     evidence=evidence,
+                    window_metadata=window_metadata,
                 )
                 workflow_metadata["task"] = task_payload
                 metadata["task_delta_extraction"] = task_payload
@@ -634,6 +659,7 @@ class AutoIndexUpdateUsecase:
                     selected_chunks=selected_chunks,
                     changed_results=changed_results,
                     evidence=evidence,
+                    window_metadata=window_metadata,
                 )
                 workflow_metadata["event"] = event_payload
                 metadata["event_extraction"] = event_payload
@@ -642,6 +668,7 @@ class AutoIndexUpdateUsecase:
                 "status": "failed",
                 "degraded": True,
                 "source_kinds": list(source_kinds),
+                **window_metadata,
                 "error": str(exc)[:500],
             }
             if task_enabled:
@@ -660,13 +687,30 @@ class AutoIndexUpdateUsecase:
         selected_chunks: list[Chunk],
         changed_results: list[IngestionResult],
         evidence: tuple[Citation, ...],
+        window_metadata: dict[str, object],
     ) -> dict[str, Any]:
         extractor = self._task_delta_extractor if kind == "task" else self._event_delta_extractor
         if extractor is None:
             return {
                 "status": "not_configured",
                 "source_kinds": list(source_kinds),
+                **window_metadata,
             }
+        if not selected_chunks:
+            skipped = {
+                "status": "skipped",
+                "reason": "no_recent_chunks",
+                "source_kinds": list(source_kinds),
+                "chunks": 0,
+                "candidate_count": 0,
+                "change_candidate_count": 0,
+                **window_metadata,
+            }
+            skipped["metadata"] = dict(window_metadata) | {
+                "degraded": False,
+                "skipped_reason": "no_recent_chunks",
+            }
+            return skipped
         text = _delta_text(
             kind=kind,
             chunks=selected_chunks,
@@ -684,6 +728,7 @@ class AutoIndexUpdateUsecase:
                 "source_kinds": list(source_kinds),
                 "changed": sum(result.changed for result in changed_results),
                 "deleted": sum(result.deleted for result in changed_results),
+                **window_metadata,
             }
             if kind == "task":
                 response = extractor.task_extract_from_delta(
@@ -713,13 +758,15 @@ class AutoIndexUpdateUsecase:
                 "chunks": len(selected_chunks),
                 "candidate_count": candidate_count,
                 "change_candidate_count": change_candidate_count,
-                "metadata": extraction_detail,
+                **window_metadata,
+                "metadata": dict(window_metadata) | extraction_detail,
             }
         except Exception as exc:
             return {
                 "status": "failed",
                 "degraded": True,
                 "source_kinds": list(source_kinds),
+                **window_metadata,
                 "error": str(exc)[:500],
             }
 
@@ -860,6 +907,27 @@ def _event_delta_text(
     return _delta_text(kind="event", chunks=chunks, source_results=source_results)
 
 
+def _lift_notion_coverage_metadata(metadata: dict[str, Any]) -> None:
+    stage_results = metadata.get("stage_results")
+    if not isinstance(stage_results, dict):
+        return
+    notion_quality = stage_results.get("notion_quality")
+    if not isinstance(notion_quality, dict):
+        return
+    quality_metadata = notion_quality.get("metadata")
+    if not isinstance(quality_metadata, dict):
+        return
+    for key in (
+        "repository_coverage_ratio",
+        "index_coverage_ratio",
+        "repository_unique_page_ids",
+        "index_unique_page_ids",
+        "unique_page_ids",
+    ):
+        if key in quality_metadata:
+            metadata[f"notion_{key}"] = quality_metadata[key]
+
+
 def _event_delta_citation(chunk: Chunk) -> Citation:
     metadata = dict(chunk.metadata or {})
     source_item_id = str(
@@ -923,6 +991,11 @@ def _schedule_timezone(config: RuntimeConfig):
         return ZoneInfo(name)
     except ZoneInfoNotFoundError:
         return UTC
+
+
+def _workflow_extraction_lookback_days(config: RuntimeConfig) -> int:
+    workflow_extraction = getattr(config, "workflow_extraction", None)
+    return normalize_lookback_days(getattr(workflow_extraction, "lookback_days", 1))
 
 
 def _run_id(trigger: str) -> str:

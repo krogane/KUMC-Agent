@@ -318,33 +318,20 @@ def _run_task_delta_extract(
     index_result: dict[str, object],
     source_filter: tuple[str, ...],
 ) -> dict[str, object]:
-    from kumc_agent.apps.workflow import build_workflow_app_context
-
-    workflow = build_workflow_app_context(base_dir=base_dir)
     metadata = dict(index_result.get("metadata") or {})
     source_results = metadata.get("source_results") or []
-    instruction = (
-        "自動インデックス更新で検出されたRAG差分から、実行すべき具体的なタスク候補だけを抽出してください。"
-    )
-    target = "\n".join(
-        [
-            f"source_filter: {', '.join(source_filter) if source_filter else 'all'}",
-            f"index_run_id: {index_result.get('run_id') or ''}",
-            f"source_results: {source_results}",
-        ]
-    )
-    response = workflow.workflow.run(
-        WorkRequest(
-            work_type="task_extract",
-            instruction=instruction,
-            target=target,
-            access=AccessContext(user_id="worker", is_admin=True),
-        )
-    )
     return {
-        "candidate_count": len(response.task_candidates),
-        "metadata": response.metadata,
-        "candidate_ids": [candidate.id for candidate in response.task_candidates],
+        "status": "skipped",
+        "reason": "workflow_extraction_task_metadata_missing",
+        "candidate_count": 0,
+        "candidate_ids": [],
+        "metadata": {
+            "source": "worker_auto_index_update_compat",
+            "index_run_id": index_result.get("run_id") or "",
+            "source_filter": list(source_filter),
+            "source_results": source_results,
+            "skipped_reason": "bounded_workflow_extraction_not_available",
+        },
     }
 
 

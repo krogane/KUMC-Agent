@@ -285,11 +285,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backfill_parser.add_argument("--limit", type=int, default=None)
     backfill_parser.add_argument("--force", action="store_true")
+    compact_parser = ingest_sub.add_parser(
+        "compact",
+        help="Compact append-only file ingestion JSONL history",
+    )
+    compact_parser.add_argument(
+        "--source",
+        action="append",
+        default=None,
+        help="Source kind to compact. Use multiple times or omit for all file-backed ingestion history.",
+    )
     audit_parser = ingest_sub.add_parser("audit")
     audit_parser.add_argument(
         "--source",
         default="minecraft_wiki",
-        choices=("minecraft_wiki", "docs"),
+        choices=("minecraft_wiki", "docs", "notion"),
     )
     audit_parser.add_argument("--raw-dir", type=Path, default=None)
     audit_parser.add_argument(
@@ -521,6 +531,47 @@ def _docs_audit_payload(context, raw_dir: Path | None = None):  # type: ignore[n
     )
 
 
+def _notion_quality_thresholds(context):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.notion_audit import NotionQualityThresholds
+
+    cfg = context.config.indexing.notion_quality
+    return NotionQualityThresholds(
+        enabled=cfg.enabled,
+        policy=cfg.policy,
+        min_text_bytes=cfg.min_text_bytes,
+        min_nonempty_characters=cfg.min_nonempty_characters,
+        max_short_document_ratio=cfg.max_short_document_ratio,
+        max_heading_only_ratio=cfg.max_heading_only_ratio,
+        max_duplicate_text_ratio=cfg.max_duplicate_text_ratio,
+        min_repository_coverage_ratio=cfg.min_repository_coverage_ratio,
+        min_index_coverage_ratio=cfg.min_index_coverage_ratio,
+    )
+
+
+def _notion_audit_payload(context, raw_dir: Path | None = None):  # type: ignore[no-untyped-def]
+    from kumc_agent.usecases.ingestion.notion_audit import audit_notion_raw_dir
+
+    target_dir = raw_dir or context.config.app.ingestion_dir / "notion"
+    return audit_notion_raw_dir(
+        raw_dir=target_dir,
+        repository_dir=context.config.app.ingestion_dir,
+        stage_dirs=(
+            context.config.app.data_dir / "chunks" / "first_rec_chunk",
+            context.config.app.data_dir / "chunks" / "second_rec_chunk",
+            context.config.app.data_dir / "chunks" / "sparse_second_rec_chunk",
+            context.config.app.data_dir / "chunks" / "summary_chunk",
+        ),
+        object_storage_dir=(
+            context.config.app.data_dir
+            / "object_storage"
+            / "kumc-agent"
+            / "raw"
+            / "notion"
+        ),
+        thresholds=_notion_quality_thresholds(context),
+    )
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -692,6 +743,14 @@ def main() -> None:
                     payload["metadata"] = {
                         "minecraft_wiki_quality": audit.to_payload(),
                     }
+            if any(result.source_kind == "notion" for result in results):
+                audit = _notion_audit_payload(ingestion)
+                for payload in result_payloads:
+                    if payload.get("source_kind") != "notion":
+                        continue
+                    payload["metadata"] = {
+                        "notion_quality": audit.to_payload(),
+                    }
             print(
                 json.dumps(
                     result_payloads,
@@ -699,9 +758,30 @@ def main() -> None:
                 )
             )
             return
+        if args.ingest_command == "compact":
+            compact = getattr(ingestion.repository, "compact_history", None)
+            if not callable(compact):
+                print(
+                    json.dumps(
+                        {
+                            "status": "skipped",
+                            "metadata": {
+                                "reason": "file_ingestion_repository_not_active",
+                                "source_kinds": list(args.source or ()),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return
+            result = compact(source_kinds=tuple(args.source or ()))
+            print(json.dumps(result, ensure_ascii=False, default=str))
+            return
         if args.ingest_command == "audit":
             if args.source == "docs":
                 audit = _docs_audit_payload(ingestion, raw_dir=args.raw_dir)
+            elif args.source == "notion":
+                audit = _notion_audit_payload(ingestion, raw_dir=args.raw_dir)
             else:
                 audit = _minecraft_wiki_audit_payload(ingestion, raw_dir=args.raw_dir)
             if args.format == "markdown":

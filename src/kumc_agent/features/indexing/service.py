@@ -22,7 +22,21 @@ from kumc_agent.features.indexing.embedding_cache import (
     IndexEmbeddingCacheKey,
     IndexEmbeddingRecord,
 )
+from kumc_agent.infra.connectors.file_scanner import iter_x_posts
 from kumc_agent.infra.ingestion.repository import IngestionRepository
+from kumc_agent.infra.indexing.summary_searchability import (
+    SummarySearchabilityDecision,
+    build_summary_searchability_prompt,
+    load_summary_searchability_decisions,
+    normalize_summary_parent_id,
+    parse_summary_searchability_response,
+    summary_decision_sidecar_path,
+    write_summary_searchability_decisions,
+)
+from kumc_agent.infra.indexing.summary_quality import (
+    sanitize_summary_text,
+    summary_quality_metadata,
+)
 from kumc_agent.infra.retrieval.faiss import FaissLikeIndex
 from kumc_agent.infra.retrieval.sudachi_bm25 import SudachiBM25Retriever
 from kumc_agent.infra.storage.filesystem import FileSystemStorage
@@ -70,6 +84,12 @@ class _RepositoryIndexArtifacts:
     sparse_chunks: list[Chunk]
     summary_chunks: list[Chunk]
     index_chunks: list[Chunk]
+
+
+@dataclass(frozen=True)
+class _SummaryChunkBuildResult:
+    summary_chunks: list[Chunk]
+    decisions_by_parent_uid: dict[str, SummarySearchabilityDecision]
 
 
 @dataclass(frozen=True)
@@ -256,6 +276,8 @@ class IndexingService:
         minecraft_wiki_quality_payload = self._minecraft_wiki_quality_payload(
             index_chunks=index_chunks
         )
+        notion_quality_payload = self._notion_quality_payload(index_chunks=index_chunks)
+        x_quality_payload = self._x_quality_payload(index_chunks=index_chunks)
         if not bool(docs_quality_payload.get("can_continue", True)):
             metadata = docs_quality_payload.get("metadata")
             failures: list[str] = []
@@ -291,6 +313,20 @@ class IndexingService:
                 + (", ".join(warnings) if warnings else "unknown")
             )
         if (
+            notion_quality_payload is not None
+            and not bool(notion_quality_payload.get("can_continue", True))
+        ):
+            metadata = notion_quality_payload.get("metadata")
+            failures = []
+            if isinstance(metadata, dict):
+                raw_failures = metadata.get("critical_failures")
+                if isinstance(raw_failures, list):
+                    failures = [str(item) for item in raw_failures]
+            raise RuntimeError(
+                "Notion quality gate failed: "
+                + (", ".join(failures) if failures else "unknown")
+            )
+        if (
             minecraft_wiki_quality_payload is not None
             and not bool(minecraft_wiki_quality_payload.get("can_continue", True))
         ):
@@ -302,6 +338,20 @@ class IndexingService:
                     failures = [str(item) for item in raw_failures]
             raise RuntimeError(
                 "Minecraft Wiki quality gate failed: "
+                + (", ".join(failures) if failures else "unknown")
+            )
+        if (
+            x_quality_payload is not None
+            and not bool(x_quality_payload.get("can_continue", True))
+        ):
+            metadata = x_quality_payload.get("metadata")
+            failures = []
+            if isinstance(metadata, dict):
+                raw_failures = metadata.get("critical_failures")
+                if isinstance(raw_failures, list):
+                    failures = [str(item) for item in raw_failures]
+            raise RuntimeError(
+                "X quality gate failed: "
                 + (", ".join(failures) if failures else "unknown")
             )
         self._storage.save_chunks(index_chunks)
@@ -343,7 +393,11 @@ class IndexingService:
         stage_results["docs_quality"] = docs_quality_payload
         if minecraft_wiki_quality_payload is not None:
             stage_results["minecraft_wiki_quality"] = minecraft_wiki_quality_payload
+        if notion_quality_payload is not None:
+            stage_results["notion_quality"] = notion_quality_payload
         stage_results["sheets_quality"] = sheets_quality_payload
+        if x_quality_payload is not None:
+            stage_results["x_quality"] = x_quality_payload
         stage_results["embedding"] = dense_embeddings.metadata
         if self._image_asset_builder is not None:
             build_from_ingestion_sources = getattr(
@@ -1284,7 +1338,7 @@ class IndexingService:
         docs_chunk_count = sum(
             1
             for chunk in index_chunks
-            if str(chunk.metadata.get("source_type") or "").strip().lower() == "docs"
+            if self._is_google_drive_document_chunk(chunk.metadata or {})
         )
         return build_google_drive_docs_quality_payload(
             raw_dir=self._ingestion_docs_dir,
@@ -1342,6 +1396,128 @@ class IndexingService:
         )
         return report.to_payload()
 
+    def _notion_quality_payload(
+        self,
+        *,
+        index_chunks: list[Chunk],
+    ) -> dict[str, object] | None:
+        sources = getattr(getattr(self._runtime, "features", None), "sources", None)
+        if not self._ingestion_notion_dir.exists() and not bool(
+            getattr(sources, "notion", False)
+        ):
+            return None
+        from kumc_agent.usecases.ingestion.notion_audit import (
+            NotionQualityThresholds,
+            build_notion_quality_payload,
+            page_ids_from_chunks,
+        )
+
+        cfg = self._runtime.indexing.notion_quality
+        return build_notion_quality_payload(
+            raw_dir=self._ingestion_notion_dir,
+            repository_dir=self._ingestion_dir,
+            index_page_ids=page_ids_from_chunks(index_chunks),
+            stage_dirs=(
+                self._first_rec_dir,
+                self._second_rec_dir,
+                self._sparse_second_rec_dir,
+                self._summary_dir,
+            ),
+            object_storage_dir=(
+                self._runtime.app.data_dir
+                / "object_storage"
+                / "kumc-agent"
+                / "raw"
+                / "notion"
+            ),
+            thresholds=NotionQualityThresholds(
+                enabled=cfg.enabled,
+                policy=cfg.policy,
+                min_text_bytes=cfg.min_text_bytes,
+                min_nonempty_characters=cfg.min_nonempty_characters,
+                max_short_document_ratio=cfg.max_short_document_ratio,
+                max_heading_only_ratio=cfg.max_heading_only_ratio,
+                max_duplicate_text_ratio=cfg.max_duplicate_text_ratio,
+                min_repository_coverage_ratio=cfg.min_repository_coverage_ratio,
+                min_index_coverage_ratio=cfg.min_index_coverage_ratio,
+            ),
+        )
+
+    def _x_quality_payload(
+        self,
+        *,
+        index_chunks: list[Chunk],
+    ) -> dict[str, object] | None:
+        posts_path = self._ingestion_x_dir / "posts.jsonl"
+        if not posts_path.exists() and not self._runtime.features.sources.x:
+            return None
+        post_items = iter_x_posts(
+            source_kind="x",
+            root_dir=self._ingestion_x_dir,
+            default_visibility="public",
+        )
+        post_count = len(post_items)
+        x_chunks = [
+            chunk
+            for chunk in index_chunks
+            if self._is_x_chunk(chunk)
+        ]
+        missing_required = [
+            str((chunk.metadata or {}).get("external_id") or chunk.id)
+            for chunk in x_chunks
+            if str((chunk.metadata or {}).get("source_type") or "").strip().lower()
+            != "x_posts"
+            or not str((chunk.metadata or {}).get("x_post_id") or "").strip()
+            or not str((chunk.metadata or {}).get("x_post_url") or "").strip()
+            or not str((chunk.metadata or {}).get("message_timestamp") or "").strip()
+        ]
+        legacy_external_id_count = sum(
+            1
+            for chunk in x_chunks
+            if str((chunk.metadata or {}).get("external_id") or "").strip()
+            == "x:posts.jsonl"
+        )
+        tco_chunk_count = sum(1 for chunk in x_chunks if "https://t.co/" in chunk.text)
+        handle_missing_count = sum(
+            1
+            for item in post_items
+            if not str((item.metadata or {}).get("x_author_handle") or "").strip()
+        )
+        critical_failures: list[str] = []
+        warnings: list[str] = []
+        if missing_required:
+            critical_failures.append(
+                f"x_chunks_missing_required_metadata={len(missing_required)}"
+            )
+        if legacy_external_id_count:
+            critical_failures.append(
+                f"legacy_external_id_x_posts_jsonl={legacy_external_id_count}"
+            )
+        if post_count and len(x_chunks) < post_count:
+            critical_failures.append(
+                f"x_chunk_count_below_post_count={len(x_chunks)}/{post_count}"
+            )
+        if handle_missing_count:
+            warnings.append(f"x_author_handle_missing={handle_missing_count}/{post_count}")
+        if tco_chunk_count:
+            warnings.append(f"x_chunks_contain_tco_urls={tco_chunk_count}")
+        metadata = {
+            "post_count": post_count,
+            "x_chunk_count": len(x_chunks),
+            "missing_required_metadata_count": len(missing_required),
+            "missing_required_metadata_sample": missing_required[:10],
+            "legacy_external_id_count": legacy_external_id_count,
+            "author_handle_missing_count": handle_missing_count,
+            "tco_chunk_count": tco_chunk_count,
+            "critical_failures": critical_failures,
+            "warnings": warnings,
+        }
+        return {
+            "status": "failed" if critical_failures else "passed",
+            "can_continue": not critical_failures,
+            "metadata": metadata,
+        }
+
     def _build_minecraft_wiki_summary_chunks(
         self,
         *,
@@ -1375,6 +1551,7 @@ class IndexingService:
             if (
                 skip_existing
                 and out_path.exists()
+                and summary_decision_sidecar_path(out_path).exists()
                 and (not update_existing or out_path.stat().st_mtime >= path.stat().st_mtime)
             ):
                 continue
@@ -1397,18 +1574,21 @@ class IndexingService:
         output_chunks_by_path: dict[Path, list[LegacyChunk]] = {
             path: [] for path in processed_paths
         }
+        decisions_by_path: dict[Path, list[tuple[object, SummarySearchabilityDecision]]] = {
+            path: [] for path in processed_paths
+        }
         for batch_start in range(0, len(summary_jobs), batch_size):
             batch = summary_jobs[batch_start : batch_start + batch_size]
             max_workers = max(1, min(len(batch), batch_size))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures: dict[
-                    Future[str],
+                    Future[SummarySearchabilityDecision],
                     tuple[Path, int, str, dict[str, object]],
                 ] = {}
                 for out_path, output_index, text, metadata in batch:
                     futures[
                         executor.submit(
-                            self._build_minecraft_wiki_summary_text,
+                            self._build_minecraft_wiki_summary_decision,
                             text=text,
                             metadata=metadata,
                             target_chars=target_chars,
@@ -1417,16 +1597,27 @@ class IndexingService:
                 for future in as_completed(futures):
                     out_path, _output_index, text, metadata = futures[future]
                     try:
-                        summary_text = future.result()
+                        decision = future.result()
                     except Exception:
                         logger.exception(
                             "Minecraft Wiki summary chunk worker failed. Fallback to truncation."
                         )
-                        summary_text = self._fallback_minecraft_wiki_summary(
-                            text=text,
-                            metadata=metadata,
-                            target_chars=target_chars,
+                        decision = SummarySearchabilityDecision.keep(
+                            summary=self._fallback_minecraft_wiki_summary(
+                                text=text,
+                                metadata=metadata,
+                                target_chars=target_chars,
+                            ),
+                            reason="worker_exception",
+                            fallback_used=True,
                         )
+                    parent_id = metadata.get("parent_chunk_id")
+                    decisions_by_path.setdefault(out_path, []).append((parent_id, decision))
+                    if not decision.searchable:
+                        continue
+                    summary_text = decision.summary.strip()
+                    if not summary_text:
+                        continue
                     output_chunks_by_path.setdefault(out_path, []).append(
                         LegacyChunk(
                             text=summary_text,
@@ -1440,6 +1631,10 @@ class IndexingService:
                 key=lambda chunk: int(chunk.metadata.get("chunk_id", 0) or 0)
             )
             write_chunks(out_path, output_chunks)
+            write_summary_searchability_decisions(
+                path=summary_decision_sidecar_path(out_path),
+                decisions=decisions_by_path.get(out_path, []),
+            )
         if sync_deleted:
             expected = expected_output_names
             for stale in output_chunk_dir.glob("*.jsonl"):
@@ -1449,6 +1644,17 @@ class IndexingService:
                     stale.unlink()
                 except Exception:
                     logger.warning("Failed to remove stale Minecraft Wiki summary: %s", stale)
+            for stale in output_chunk_dir.glob("*.summary_decisions.json"):
+                chunk_name = stale.name[: -len(".summary_decisions.json")] + ".jsonl"
+                if chunk_name in expected:
+                    continue
+                try:
+                    stale.unlink()
+                except Exception:
+                    logger.warning(
+                        "Failed to remove stale Minecraft Wiki summary decision: %s",
+                        stale,
+                    )
 
     def _build_minecraft_wiki_summary_text(
         self,
@@ -1457,6 +1663,19 @@ class IndexingService:
         metadata: dict[str, object],
         target_chars: int,
     ) -> str:
+        return self._build_minecraft_wiki_summary_decision(
+            text=text,
+            metadata=metadata,
+            target_chars=target_chars,
+        ).summary
+
+    def _build_minecraft_wiki_summary_decision(
+        self,
+        *,
+        text: str,
+        metadata: dict[str, object],
+        target_chars: int,
+    ) -> SummarySearchabilityDecision:
         fallback = self._fallback_minecraft_wiki_summary(
             text=text,
             metadata=metadata,
@@ -1466,9 +1685,17 @@ class IndexingService:
             self._runtime.minecraft_wiki_rag.chunking.summary_llm_provider or ""
         ).strip().lower()
         if provider in {"", "none", "off", "disabled", "false", "0"}:
-            return fallback
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="provider_disabled",
+                fallback_used=True,
+            )
         if self._minecraft_wiki_summary_llm is None:
-            return fallback
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="llm_unavailable",
+                fallback_used=True,
+            )
 
         title = str(metadata.get("minecraft_wiki_title") or "").strip()
         heading_path = metadata.get("heading_path")
@@ -1494,7 +1721,7 @@ class IndexingService:
                 system_prompt=(
                     "You summarize Japanese Minecraft Wiki articles faithfully."
                 ),
-                user_prompt=prompt,
+                user_prompt=build_summary_searchability_prompt(prompt),
                 temperature=self._runtime.minecraft_wiki_rag.chunking.summary_temperature,
                 max_output_tokens=(
                     self._runtime.minecraft_wiki_rag.chunking.summary_max_output_tokens
@@ -1504,10 +1731,25 @@ class IndexingService:
             logger.exception(
                 "Minecraft Wiki summary chunk generation failed. Fallback to truncation."
             )
-            return fallback
-        normalized = (summary or "").strip()
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="generation_exception",
+                fallback_used=True,
+            )
+        decision = parse_summary_searchability_response(
+            summary or "",
+            fallback_summary=fallback,
+        )
+        if not decision.searchable:
+            return decision
+        normalized = (decision.summary or "").strip()
         if not normalized or self._is_llm_error_text(normalized):
-            return fallback
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason=decision.reason or "llm_error_text",
+                fallback_used=True,
+                parse_failed=decision.parse_failed,
+            )
         if len(normalized) > target_chars:
             normalized = normalized[:target_chars].rstrip() + "..."
         prefix = ""
@@ -1515,7 +1757,12 @@ class IndexingService:
             prefix += f"記事名: {title}\n"
         if heading and "見出し:" not in normalized[:80]:
             prefix += f"見出し: {heading}\n"
-        return (prefix + normalized).strip()
+        return SummarySearchabilityDecision.keep(
+            summary=(prefix + normalized).strip(),
+            reason=decision.reason,
+            fallback_used=decision.fallback_used,
+            parse_failed=decision.parse_failed,
+        )
 
     @staticmethod
     def _fallback_minecraft_wiki_summary(
@@ -1629,22 +1876,82 @@ class IndexingService:
         ).strip().lower()
         return source_type == "minecraft_wiki"
 
+    @staticmethod
+    def _summary_parent_uid(chunk: Chunk) -> str:
+        metadata = dict(chunk.metadata or {})
+        return normalize_summary_parent_id(
+            metadata.get("parent_chunk_uid")
+            or metadata.get("chunk_uid")
+            or chunk.id
+        )
+
     def _load_legacy_chunks_from_dirs(self, chunk_dirs: list[Path]) -> list[Chunk]:
-        from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
+        from kumc_agent.infra.indexing.chunks import load_chunks
 
         existing = [path for path in chunk_dirs if path.exists()]
         if not existing:
             return []
-        legacy_chunks = load_chunks_from_dirs(existing)
         out: list[Chunk] = []
-        for idx, legacy_chunk in enumerate(legacy_chunks):
-            converted = self._legacy_chunk_to_domain_chunk(
-                legacy_chunk=legacy_chunk,
-                fallback_index=idx,
-            )
-            if converted is not None:
-                out.append(converted)
+        fallback_index = 0
+        for chunk_dir in existing:
+            for path in sorted(chunk_dir.glob("*.jsonl")):
+                decisions = self._summary_decisions_for_legacy_chunk_path(path)
+                for legacy_chunk in load_chunks(path):
+                    if self._legacy_chunk_excluded_by_summary_decision(
+                        legacy_chunk=legacy_chunk,
+                        decisions=decisions,
+                    ):
+                        continue
+                    converted = self._legacy_chunk_to_domain_chunk(
+                        legacy_chunk=legacy_chunk,
+                        fallback_index=fallback_index,
+                    )
+                    fallback_index += 1
+                    if converted is not None:
+                        out.append(converted)
         return out
+
+    def _summary_decisions_for_legacy_chunk_path(
+        self,
+        path: Path,
+    ) -> dict[str, SummarySearchabilityDecision]:
+        candidates: list[Path] = []
+        if self._path_is_relative_to(path, self._summary_dir):
+            candidates.append(summary_decision_sidecar_path(path))
+        else:
+            candidates.append(
+                summary_decision_sidecar_path(
+                    self._summary_dir / path.parent.name / path.name
+                )
+            )
+        for candidate in candidates:
+            decisions = load_summary_searchability_decisions(candidate)
+            if decisions:
+                return decisions
+        return {}
+
+    @staticmethod
+    def _path_is_relative_to(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _legacy_chunk_excluded_by_summary_decision(
+        *,
+        legacy_chunk,
+        decisions: dict[str, SummarySearchabilityDecision],
+    ) -> bool:
+        if not decisions:
+            return False
+        metadata = dict(getattr(legacy_chunk, "metadata", {}) or {})
+        parent_id = normalize_summary_parent_id(metadata.get("parent_chunk_id"))
+        if not parent_id:
+            parent_id = normalize_summary_parent_id(metadata.get("chunk_id"))
+        decision = decisions.get(parent_id)
+        return decision is not None and not decision.searchable
 
     @staticmethod
     def _to_int(value: object, *, fallback: int) -> int:
@@ -1762,11 +2069,13 @@ class IndexingService:
 
         for idx, chunk in enumerate(repository_chunks):
             normalized = self._normalize_repository_chunk(chunk, fallback_index=idx)
+            first_chunk_id = stable_hash(f"{normalized.id}:first:{normalized.text[:256]}")
             first_metadata = dict(normalized.metadata)
             first_metadata["chunk_stage"] = "first_recursive"
             first_metadata["chunk_id"] = normalized.index
+            first_metadata["parent_chunk_uid"] = first_chunk_id
             first_chunk = Chunk(
-                id=stable_hash(f"{normalized.id}:first:{normalized.text[:256]}"),
+                id=first_chunk_id,
                 document_id=normalized.document_id,
                 text=normalized.text,
                 index=normalized.index,
@@ -1777,6 +2086,7 @@ class IndexingService:
             second_metadata = dict(normalized.metadata)
             second_metadata["chunk_stage"] = "second_recursive"
             second_metadata["parent_chunk_id"] = first_chunk.metadata.get("chunk_id", first_chunk.index)
+            second_metadata["parent_chunk_uid"] = first_chunk.id
             second_metadata["chunk_id"] = normalized.index
             second_metadata["skip_parent_context"] = True
             second_chunk = replace(
@@ -1804,12 +2114,46 @@ class IndexingService:
 
         stages = self._runtime.indexing.stages
         chunking = self._runtime.indexing.chunking
-        if stages.summary_enabled and (not selected or "summary" in selected):
-            summary_chunks = self._build_summary_chunks_for_first_chunks(
-                first_chunks=first_chunks,
+        summary_result = _SummaryChunkBuildResult(
+            summary_chunks=[],
+            decisions_by_parent_uid={},
+        )
+        summary_source_chunks = [
+            chunk for chunk in first_chunks if not self._is_x_chunk(chunk)
+        ]
+        if (
+            stages.summary_enabled
+            and summary_source_chunks
+            and (not selected or "summary" in selected)
+        ):
+            summary_result = self._build_summary_chunks_and_decisions_for_first_chunks(
+                first_chunks=summary_source_chunks,
                 target_characters=int(chunking.summary_characters),
                 include_index_in_hash=False,
             )
+            summary_chunks = summary_result.summary_chunks
+
+        excluded_parent_uids = {
+            parent_uid
+            for parent_uid, decision in summary_result.decisions_by_parent_uid.items()
+            if not decision.searchable
+        }
+        if excluded_parent_uids:
+            first_chunks = [
+                chunk
+                for chunk in first_chunks
+                if self._summary_parent_uid(chunk) not in excluded_parent_uids
+            ]
+            second_chunks = [
+                chunk
+                for chunk in second_chunks
+                if self._summary_parent_uid(chunk) not in excluded_parent_uids
+            ]
+            sparse_chunks = [
+                chunk
+                for chunk in sparse_chunks
+                if self._summary_parent_uid(chunk) not in excluded_parent_uids
+            ]
 
         self._clear_dir_contents(self._first_rec_dir)
         self._clear_dir_contents(self._second_rec_dir)
@@ -1828,6 +2172,13 @@ class IndexingService:
             summary_chunks=summary_chunks,
             index_chunks=[*second_chunks, *summary_chunks],
         )
+
+    @staticmethod
+    def _is_x_chunk(chunk: Chunk) -> bool:
+        metadata = dict(chunk.metadata or {})
+        source_type = str(metadata.get("source_type") or "").strip().lower()
+        source_kind = str(metadata.get("source_kind") or "").strip().lower()
+        return source_type in {"x", "x_posts"} or source_kind == "x"
 
     def _normalize_repository_chunk(self, chunk: Chunk, *, fallback_index: int) -> Chunk:
         metadata = dict(chunk.metadata or {})
@@ -1903,7 +2254,7 @@ class IndexingService:
         grouped: dict[tuple[str, str], dict[str, object]] = {}
         for chunk in chunks:
             metadata = dict(chunk.metadata or {})
-            source_type = str(metadata.get("source_type") or "").strip().lower()
+            source_type = self._stage_output_source_type(metadata)
             source_key = str(
                 metadata.get("drive_file_id")
                 or metadata.get("source_file_name")
@@ -1965,6 +2316,13 @@ class IndexingService:
         metadata: dict[str, object],
         source_key: str,
     ) -> list[str]:
+        notion_page_path = metadata.get("notion_page_path")
+        if isinstance(notion_page_path, list):
+            notion_page_path = " / ".join(
+                str(value).strip()
+                for value in notion_page_path
+                if str(value).strip()
+            )
         values = [
             source_key,
             metadata.get("source_title"),
@@ -1974,6 +2332,7 @@ class IndexingService:
             metadata.get("canonical_url"),
             metadata.get("notion_title"),
             metadata.get("notion_url"),
+            notion_page_path,
             metadata.get("hatenablog_title"),
             metadata.get("hatenablog_url"),
             metadata.get("crafters_colony_title"),
@@ -2083,7 +2442,6 @@ class IndexingService:
     def _build_keyword_inverted_indexes(self, *, legacy_cfg) -> None:
         try:
             from langchain_core.documents import Document as LangDocument
-            from kumc_agent.infra.indexing.chunks import load_chunks_from_dirs
             from kumc_agent.infra.indexing.keyword_inverted_index import (
                 KEYWORD_CORPUS_MATERIAL_NAMES,
                 KEYWORD_CORPUS_SECOND_REC_SPARSE,
@@ -2156,7 +2514,7 @@ class IndexingService:
             existing = [value for value in chunk_dirs if value.exists()]
             if not existing:
                 return []
-            chunks = load_chunks_from_dirs(existing)
+            chunks = self._load_legacy_chunks_from_dirs(existing)
             docs: list[LangDocument] = []
             for idx, chunk in enumerate(chunks):
                 text = str(chunk.text or "").strip()
@@ -2380,6 +2738,7 @@ class IndexingService:
                             "source_file_name": doc.source_name,
                             "chunk_stage": "first_recursive",
                             "chunk_id": idx,
+                            "parent_chunk_uid": chunk_id,
                             "updated_at": (
                                 doc.updated_at.astimezone(timezone.utc).isoformat()
                                 if doc.updated_at is not None
@@ -2432,6 +2791,7 @@ class IndexingService:
                 metadata = dict(parent.metadata)
                 metadata["chunk_stage"] = "second_recursive"
                 metadata["parent_chunk_id"] = parent.metadata.get("chunk_id", parent.index)
+                metadata["parent_chunk_uid"] = parent.id
                 if skip_parent_context:
                     metadata["skip_parent_context"] = True
                 metadata["chunk_id"] = out_index
@@ -2504,6 +2864,10 @@ class IndexingService:
         if selected and stage_name not in selected and self._stage_exists(self._summary_dir):
             return self._load_stage_chunks(self._summary_dir)
 
+        first_chunks = [chunk for chunk in first_chunks if not self._is_x_chunk(chunk)]
+        if not first_chunks:
+            self._clear_dir_contents(self._summary_dir)
+            return []
         limit = max(32, target_characters)
         chunks = self._build_summary_chunks_for_first_chunks(
             first_chunks=first_chunks,
@@ -2520,6 +2884,19 @@ class IndexingService:
         target_characters: int,
         include_index_in_hash: bool,
     ) -> list[Chunk]:
+        return self._build_summary_chunks_and_decisions_for_first_chunks(
+            first_chunks=first_chunks,
+            target_characters=target_characters,
+            include_index_in_hash=include_index_in_hash,
+        ).summary_chunks
+
+    def _build_summary_chunks_and_decisions_for_first_chunks(
+        self,
+        *,
+        first_chunks: list[Chunk],
+        target_characters: int,
+        include_index_in_hash: bool,
+    ) -> _SummaryChunkBuildResult:
         limit = max(32, target_characters)
         batch_size = self._summary_batch_size()
         total_batches = (len(first_chunks) + batch_size - 1) // batch_size
@@ -2529,17 +2906,23 @@ class IndexingService:
                 total_batches,
                 batch_size,
             )
-        summaries = [""] * len(first_chunks)
+        decisions = [
+            SummarySearchabilityDecision.keep(summary="", fallback_used=True)
+            for _ in first_chunks
+        ]
         for batch_start in range(0, len(first_chunks), batch_size):
             batch = first_chunks[batch_start : batch_start + batch_size]
             max_workers = max(1, min(len(batch), batch_size))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures: dict[Future[str], tuple[int, Chunk]] = {}
+                futures: dict[
+                    Future[SummarySearchabilityDecision],
+                    tuple[int, Chunk],
+                ] = {}
                 for offset, source_chunk in enumerate(batch):
                     idx = batch_start + offset
                     futures[
                         executor.submit(
-                            self._build_summary_text,
+                            self._build_summary_decision,
                             text=source_chunk.text or "",
                             target_characters=limit,
                         )
@@ -2548,23 +2931,44 @@ class IndexingService:
                     idx, source_chunk = futures[future]
                     fallback = (source_chunk.text or "").strip()[:limit]
                     try:
-                        summary_text = (future.result() or "").strip()
+                        decision = future.result()
                     except Exception:
                         logger.exception(
                             "Summary chunk worker failed. Fallback to truncation."
                         )
-                        summary_text = fallback
-                    summaries[idx] = summary_text or fallback
+                        decision = SummarySearchabilityDecision.keep(
+                            summary=fallback,
+                            reason="worker_exception",
+                            fallback_used=True,
+                        )
+                    decisions[idx] = decision
 
         chunks: list[Chunk] = []
+        decisions_by_parent_uid: dict[str, SummarySearchabilityDecision] = {}
         for idx, chunk in enumerate(first_chunks):
-            summary = summaries[idx]
+            parent_uid = normalize_summary_parent_id(
+                chunk.metadata.get("parent_chunk_uid") or chunk.id
+            )
+            decision = decisions[idx]
+            if parent_uid:
+                decisions_by_parent_uid[parent_uid] = decision
+            if not decision.searchable:
+                continue
+            summary = sanitize_summary_text(decision.summary)
             if not summary:
                 continue
             metadata = dict(chunk.metadata)
             metadata["chunk_stage"] = "summary"
             metadata["parent_chunk_id"] = chunk.metadata.get("chunk_id", chunk.index)
+            metadata["parent_chunk_uid"] = parent_uid
             metadata["chunk_id"] = idx
+            metadata.update(
+                summary_quality_metadata(
+                    source_text=chunk.text or "",
+                    summary_text=summary,
+                    decision=decision,
+                )
+            )
             hash_seed = (
                 f"{chunk.id}:summary:{idx}:{summary[:64]}"
                 if include_index_in_hash
@@ -2579,10 +2983,16 @@ class IndexingService:
                     metadata=metadata,
                 )
             )
-        return chunks
+        return _SummaryChunkBuildResult(
+            summary_chunks=chunks,
+            decisions_by_parent_uid=decisions_by_parent_uid,
+        )
 
     def _summary_batch_size(self) -> int:
-        return max(1, int(self._runtime.indexing.chunking.summary_batch_size))
+        return max(
+            1,
+            int(getattr(self._runtime.indexing.chunking, "summary_batch_size", 1)),
+        )
 
     def _build_summary_text(
         self,
@@ -2590,19 +3000,38 @@ class IndexingService:
         text: str,
         target_characters: int,
     ) -> str:
+        return self._build_summary_decision(
+            text=text,
+            target_characters=target_characters,
+        ).summary
+
+    def _build_summary_decision(
+        self,
+        *,
+        text: str,
+        target_characters: int,
+    ) -> SummarySearchabilityDecision:
         source_text = (text or "").strip()
         if not source_text:
-            return ""
+            return SummarySearchabilityDecision.keep(summary="")
         fallback = source_text[:target_characters]
         llm_provider = (
             self._runtime.indexing.chunking.summary_llm_provider or ""
         ).strip().lower()
         if llm_provider in {"", "none", "off", "disabled", "false", "0"}:
-            return fallback
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="provider_disabled",
+                fallback_used=True,
+            )
         if self._summary_llm is None:
-            return fallback
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="llm_unavailable",
+                fallback_used=True,
+            )
         user_prompt = (
-            f"次の本文を{target_characters}文字以内で要約してください。"
+            f"次の本文を{target_characters}文字を目安に要約してください。"
             "\n箇条書きにせず、重要な固有名詞・数値・日付は残してください。"
             f"\n\n本文:\n{source_text}"
         )
@@ -2611,7 +3040,7 @@ class IndexingService:
                 system_prompt=(
                     "You summarize Japanese documents concisely and faithfully."
                 ),
-                user_prompt=user_prompt,
+                user_prompt=build_summary_searchability_prompt(user_prompt),
                 temperature=self._runtime.indexing.chunking.summary_temperature,
                 max_output_tokens=(
                     self._runtime.indexing.chunking.summary_max_output_tokens
@@ -2621,11 +3050,31 @@ class IndexingService:
             logger.exception(
                 "Summary chunk generation failed. Fallback to truncation."
             )
-            return fallback
-        normalized = (summary or "").strip()
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason="generation_exception",
+                fallback_used=True,
+            )
+        decision = parse_summary_searchability_response(
+            summary or "",
+            fallback_summary=fallback,
+        )
+        if not decision.searchable:
+            return decision
+        normalized = (decision.summary or "").strip()
         if not normalized or self._is_llm_error_text(normalized):
-            return fallback
-        return normalized[:target_characters]
+            return SummarySearchabilityDecision.keep(
+                summary=fallback,
+                reason=decision.reason or "llm_error_text",
+                fallback_used=True,
+                parse_failed=decision.parse_failed,
+            )
+        return SummarySearchabilityDecision.keep(
+            summary=normalized[:target_characters],
+            reason=decision.reason,
+            fallback_used=decision.fallback_used,
+            parse_failed=decision.parse_failed,
+        )
 
     @staticmethod
     def _is_llm_error_text(text: str) -> bool:
@@ -2684,10 +3133,11 @@ class IndexingService:
                 continue
             canonical = Path(source_key).stem or source_key
             aliases = [canonical, source_key]
+            source_type = self._stage_output_source_type({"source_type": doc.source_type})
             materials.append(
                 {
-                    "material_id": f"{doc.source_type}:{source_key}",
-                    "source_type": doc.source_type,
+                    "material_id": f"{source_type}:{source_key}",
+                    "source_type": source_type,
                     "source_key": source_key,
                     "canonical_name": canonical,
                     "aliases": aliases,
@@ -2711,7 +3161,6 @@ class IndexingService:
             (self._ingestion_docs_dir, {".md"}, "docs"),
             (self._ingestion_sheets_dir, {".csv"}, "sheets"),
             (self._ingestion_messages_dir, {".jsonl"}, "messages"),
-            (self._ingestion_x_dir, {".jsonl"}, "x_posts"),
             (self._ingestion_vc_dir, {".txt"}, "vc_transcript"),
             (self._ingestion_hatenablog_dir, {".md"}, "hatenablog"),
             (self._ingestion_crafters_colony_dir, {".md"}, "crafters_colony"),
@@ -2753,6 +3202,41 @@ class IndexingService:
                         metadata=metadata,
                     )
                 )
+        documents.extend(self._parse_x_post_documents())
+        return documents
+
+    def _parse_x_post_documents(self) -> list[Document]:
+        documents: list[Document] = []
+        for item in iter_x_posts(
+            source_kind="x",
+            root_dir=self._ingestion_x_dir,
+            default_visibility="public",
+        ):
+            metadata = dict(item.metadata or {})
+            source_name = str(metadata.get("raw_relative_path") or "posts.jsonl")
+            line_no = str(metadata.get("structured_record_line") or "").strip()
+            if line_no:
+                source_name = f"x/{source_name}#{line_no}"
+            else:
+                source_name = f"x/{source_name}"
+            documents.append(
+                Document(
+                    id=stable_hash(f"x_posts:{item.external_id}"),
+                    text=item.text,
+                    source_type="x_posts",
+                    source_name=source_name,
+                    source_uri=item.canonical_url,
+                    updated_at=item.updated_at,
+                    metadata={
+                        **metadata,
+                        "path": source_name,
+                        "source_kind": "x",
+                        "source_type": "x_posts",
+                        "external_id": item.external_id,
+                        "canonical_url": item.canonical_url,
+                    },
+                )
+            )
         return documents
 
     @staticmethod
@@ -2922,31 +3406,92 @@ class IndexingService:
         return stage_dir.exists() and any(stage_dir.rglob("*.jsonl"))
 
     @staticmethod
+    def _is_google_drive_document_chunk(metadata: dict[str, object]) -> bool:
+        source_type = str(metadata.get("source_type") or "").strip().lower()
+        source_kind = str(metadata.get("source_kind") or "").strip().lower()
+        if source_type == "docs":
+            return True
+        if source_type not in {"google_drive", "drive"} and source_kind not in {
+            "google_drive",
+            "drive",
+        }:
+            return False
+        mime_type = str(metadata.get("drive_mime_type") or "").strip().lower()
+        if "spreadsheet" in mime_type or "excel" in mime_type:
+            return False
+        if str(metadata.get("sheet_name") or "").strip():
+            return False
+        return bool(
+            metadata.get("drive_file_id")
+            or metadata.get("drive_file_name")
+            or metadata.get("raw_relative_path")
+        )
+
+    @staticmethod
+    def _stage_output_source_type(metadata: dict[str, object]) -> str:
+        source_type = str(metadata.get("source_type") or "misc").strip().lower()
+        source_kind = str(metadata.get("source_kind") or "").strip().lower()
+        if not source_type:
+            source_type = "misc"
+        if source_kind in {"google_drive", "drive"}:
+            return "google_drive"
+        if source_type in {"docs", "sheets", "google_drive", "drive"}:
+            return "google_drive"
+        return source_type
+
+    @staticmethod
     def _write_stage_chunks(stage_dir: Path, chunks: list[Chunk]) -> None:
         stage_dir.mkdir(parents=True, exist_ok=True)
         by_source: dict[str, list[Chunk]] = defaultdict(list)
         for chunk in chunks:
-            source_type = str(chunk.metadata.get("source_type") or "misc").strip().lower()
-            if not source_type:
-                source_type = "misc"
+            source_type = IndexingService._stage_output_source_type(chunk.metadata or {})
             by_source[source_type].append(chunk)
         for source_type, grouped in by_source.items():
-            out_path = stage_dir / f"{source_type}.jsonl"
-            with out_path.open("w", encoding="utf-8") as fw:
+            if source_type == "notion":
+                legacy_flat = stage_dir / "notion.jsonl"
+                if legacy_flat.exists():
+                    legacy_flat.unlink()
+                by_page: dict[str, list[Chunk]] = defaultdict(list)
                 for chunk in grouped:
-                    fw.write(
-                        json.dumps(
-                            {
-                                "id": chunk.id,
-                                "document_id": chunk.document_id,
-                                "text": chunk.text,
-                                "index": chunk.index,
-                                "metadata": chunk.metadata,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
+                    page_id = str(
+                        (chunk.metadata or {}).get("notion_page_id")
+                        or (chunk.metadata or {}).get("external_id")
+                        or chunk.document_id
+                    ).strip()
+                    if not page_id:
+                        page_id = chunk.document_id
+                    by_page[stable_hash(page_id)[:24] if "/" in page_id else page_id].append(chunk)
+                source_dir = stage_dir / "notion"
+                source_dir.mkdir(parents=True, exist_ok=True)
+                for page_key, page_chunks in by_page.items():
+                    IndexingService._write_stage_chunk_file(
+                        source_dir / f"{page_key}.jsonl",
+                        page_chunks,
                     )
+                continue
+            IndexingService._write_stage_chunk_file(
+                stage_dir / f"{source_type}.jsonl",
+                grouped,
+            )
+
+    @staticmethod
+    def _write_stage_chunk_file(out_path: Path, chunks: list[Chunk]) -> None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8") as fw:
+            for chunk in chunks:
+                fw.write(
+                    json.dumps(
+                        {
+                            "id": chunk.id,
+                            "document_id": chunk.document_id,
+                            "text": chunk.text,
+                            "index": chunk.index,
+                            "metadata": chunk.metadata,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
     @staticmethod
     def _load_stage_chunks(stage_dir: Path) -> list[Chunk]:

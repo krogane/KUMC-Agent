@@ -143,7 +143,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     _collect_drive_like_entries(
         cfg=cfg,
         ingestion_dir=cfg.ingestion_data_dir / "docs",
-        source_type="docs",
+        source_type="google_drive",
         file_extensions=(".md",),
         title_key=None,
         on_entry=_upsert,
@@ -151,7 +151,7 @@ def build_material_catalog(cfg: AppConfig) -> list[MaterialCatalogEntry]:
     _collect_drive_like_entries(
         cfg=cfg,
         ingestion_dir=cfg.ingestion_data_dir / "sheets",
-        source_type="sheets",
+        source_type="google_drive",
         file_extensions=(".csv",),
         title_key=None,
         on_entry=_upsert,

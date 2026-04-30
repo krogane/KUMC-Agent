@@ -122,6 +122,15 @@ class AutonomousPlanner:
         for item in snapshot.rag_delta:
             ref = f"source:{item.id}"
             target_refs.append(ref)
+            query_metadata = {
+                "source_item_id": item.id,
+                "source_kind": item.metadata.get("source_kind") or "",
+                "external_id": item.metadata.get("external_id") or "",
+                "lookback_days": item.metadata.get("lookback_days") or "",
+                "extraction_since": item.metadata.get("extraction_since") or "",
+                "extraction_at": item.metadata.get("extraction_at") or "",
+                "changed_at": item.metadata.get("changed_at") or "",
+            }
             queries.append(
                 _query(
                     "rag_delta_extract",
@@ -129,6 +138,7 @@ class AutonomousPlanner:
                     source="all",
                     work_type="task_extract",
                     target_refs=(ref,),
+                    metadata=query_metadata,
                 )
             )
 
@@ -339,6 +349,7 @@ def _query(
     source: str,
     work_type: str,
     target_refs: tuple[str, ...],
+    metadata: dict[str, object] | None = None,
 ) -> AutonomousQuery:
     return AutonomousQuery(
         id=stable_hash(f"autonomous-query:{kind}:{query}:{':'.join(target_refs)}")[:24],
@@ -347,7 +358,7 @@ def _query(
         work_type=work_type,
         target_refs=target_refs,
         risk="candidate_only",
-        metadata={"kind": kind},
+        metadata={"kind": kind, **(metadata or {})},
     )
 
 
