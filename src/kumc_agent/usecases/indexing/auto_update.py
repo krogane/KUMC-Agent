@@ -188,6 +188,11 @@ class AutoIndexUpdateUsecase:
         run = IndexingRun(id=run_id, source_kind="all", status="running", metadata=metadata)
         try:
             _ensure_before_deadline(deadline)
+            if request.full_rebuild and request.refresh_sources and self._ingestion_service is not None:
+                metadata["ingestion_repository_reset"] = (
+                    self._reset_ingestion_repository_for_full_rebuild()
+                )
+                _ensure_before_deadline(deadline)
             ingestion_results = self._ingest_sources(request)
             _ensure_before_deadline(deadline)
             source_results = [result.__dict__ for result in ingestion_results]
@@ -520,6 +525,16 @@ class AutoIndexUpdateUsecase:
                 scope=BackfillScope(force=bool(request.force or request.full_rebuild)),
             )
         )
+
+    def _reset_ingestion_repository_for_full_rebuild(self) -> dict[str, object]:
+        reset = getattr(self._ingestion_service, "reset_repository_for_full_rebuild", None)
+        if not callable(reset):
+            return {
+                "status": "skipped",
+                "reason": "ingestion_service_reset_unsupported",
+            }
+        result = reset()
+        return result if isinstance(result, dict) else {"status": "succeeded"}
 
     def _should_refresh_member_profiles(self, request: AutoIndexUpdateRequest) -> bool:
         if not request.refresh_sources:

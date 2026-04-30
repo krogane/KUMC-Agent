@@ -114,6 +114,20 @@ class _Ingestion:
         return (self.result,)
 
 
+class _ResettableIngestion(_Ingestion):
+    def __init__(self, result: IngestionResult) -> None:
+        super().__init__(result)
+        self.calls: list[str] = []
+
+    def reset_repository_for_full_rebuild(self):
+        self.calls.append("reset")
+        return {"status": "succeeded", "backend": "test"}
+
+    async def backfill_many(self, *, source_kinds, scope):
+        self.calls.append("backfill")
+        return await super().backfill_many(source_kinds=source_kinds, scope=scope)
+
+
 class _ExplodingIngestion:
     async def backfill_many(self, *, source_kinds, scope):
         raise AssertionError("ingestion should not run")
@@ -399,6 +413,37 @@ class AutoIndexUpdateTests(unittest.TestCase):
                 operations.runs[-1].metadata["stage_results"]["embedding"][
                     "cache_compaction"
                 ]["status"],
+                "succeeded",
+            )
+
+    def test_auto_update_full_rebuild_resets_repository_before_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            operations = _Operations()
+            ingestion = _ResettableIngestion(
+                IngestionResult(
+                    source_kind="dummy",
+                    seen=1,
+                    changed=1,
+                    skipped=0,
+                    deleted=0,
+                    documents=1,
+                    chunks=1,
+                    secret_findings=0,
+                )
+            )
+
+            result = AutoIndexUpdateUsecase(
+                config=config,
+                build_usecase=_Build(),
+                operations=operations,
+                ingestion_service=ingestion,
+            ).execute(AutoIndexUpdateRequest(trigger="manual", full_rebuild=True))
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(ingestion.calls, ["reset", "backfill"])
+            self.assertEqual(
+                operations.runs[-1].metadata["ingestion_repository_reset"]["status"],
                 "succeeded",
             )
 
@@ -780,6 +825,34 @@ class AutoIndexUpdateTests(unittest.TestCase):
             self.assertEqual(len(repo.load_active_chunks()), 1)
             repo.mark_deleted(source_kind="drive", external_id="file-1")
             self.assertEqual(repo.load_active_chunks(), [])
+
+    def test_file_ingestion_repository_reset_for_full_rebuild_clears_repository_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in (
+                "source_items.jsonl",
+                "documents.jsonl",
+                "chunks.jsonl",
+                "chunk_acl_entries.jsonl",
+                "source_deletes.jsonl",
+                "sync_cursors.jsonl",
+                "secret_findings.jsonl",
+                "current_source_items.jsonl",
+                "current_documents.jsonl",
+                "current_chunks.jsonl",
+                "current_chunk_acl_entries.jsonl",
+                "ingestion_quality_report.json",
+            ):
+                (root / name).write_text("{}\n", encoding="utf-8")
+            (root / "docs").mkdir()
+            (root / "docs" / "kept.md").write_text("raw export", encoding="utf-8")
+
+            result = FileIngestionRepository(root).reset_for_full_rebuild()
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertFalse((root / "source_items.jsonl").exists())
+            self.assertFalse((root / "current_chunks.jsonl").exists())
+            self.assertTrue((root / "docs" / "kept.md").exists())
 
     def test_file_ingestion_repository_compacts_append_only_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

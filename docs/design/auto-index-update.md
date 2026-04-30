@@ -211,6 +211,8 @@ sourceごとのcursorは `sync_cursors` に保存する。cursorを持つsource�
 
 保存するraw snapshotにはsecret検出前の本文が含まれ得るため、外部payloadへ直接出さない。
 
+`--full-rebuild` / admin `reindex` では、source connectorのbackfillを始める前にingestion repository層の正本を初期化する。File backendでは `source_items.jsonl`、`documents.jsonl`、`chunks.jsonl`、`chunk_acl_entries.jsonl`、`source_deletes.jsonl`、`sync_cursors.jsonl`、`secret_findings.jsonl`、`current_*.jsonl`、`ingestion_quality_report.json` を削除する。Postgres backendでは `source_items`、`documents`、`chunks`、`chunk_acl_entries`、`secret_findings`、`sync_cursors` を削除する。`data/object_storage` のraw snapshot本体と `data/ingestion/docs` などのlegacy export directoryは保持し、再取得・監査・rollback用の参照を失わない。
+
 ### 9.2 正規化とchunking
 本文sourceは次の順で処理する。自動更新runのDense/Sparse構築入力はingestion repositoryに保存されたactive chunkを正本とする。
 

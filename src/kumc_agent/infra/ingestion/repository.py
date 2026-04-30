@@ -53,6 +53,9 @@ class IngestionRepository(Protocol):
     ) -> None:
         ...
 
+    def reset_for_full_rebuild(self) -> dict[str, object]:
+        ...
+
 
 @dataclass(frozen=True)
 class FileIngestionRepository:
@@ -173,6 +176,9 @@ class FileIngestionRepository:
             root_dir=self.root_dir,
             source_kinds=source_kinds,
         )
+
+    def reset_for_full_rebuild(self) -> dict[str, object]:
+        return reset_file_ingestion_repository_for_full_rebuild(root_dir=self.root_dir)
 
     def _compact_after_write(self, *, source_kind: str) -> None:
         if not self.auto_compact:
@@ -476,6 +482,27 @@ class PostgresIngestionRepository:
                 )
             conn.commit()
 
+    def reset_for_full_rebuild(self) -> dict[str, object]:
+        tables = (
+            "chunk_acl_entries",
+            "secret_findings",
+            "chunks",
+            "documents",
+            "source_items",
+            "sync_cursors",
+        )
+        with self.postgres.connect() as conn:
+            with conn.cursor() as cur:
+                for table in tables:
+                    cur.execute(f"delete from {table}")
+            conn.commit()
+        return {
+            "status": "succeeded",
+            "backend": "postgres",
+            "cleared_tables": list(tables),
+            "preserved": ["source_accounts", "raw_object_storage"],
+        }
+
 
 def build_ingestion_repository(
     *,
@@ -710,6 +737,38 @@ def compact_file_ingestion_history(
         "active_chunks": len(active_chunk_ids),
         "current_views": current_views,
         "quality_report": quality_payload,
+    }
+
+
+def reset_file_ingestion_repository_for_full_rebuild(*, root_dir: Path) -> dict[str, object]:
+    root_dir.mkdir(parents=True, exist_ok=True)
+    targets = [
+        "source_items.jsonl",
+        "documents.jsonl",
+        "chunks.jsonl",
+        "chunk_acl_entries.jsonl",
+        "source_deletes.jsonl",
+        "sync_cursors.jsonl",
+        "secret_findings.jsonl",
+        "ingestion_quality_report.json",
+    ]
+    current_targets = sorted(path.name for path in root_dir.glob("current_*.jsonl"))
+    deleted: list[str] = []
+    missing: list[str] = []
+    for name in [*targets, *current_targets]:
+        path = root_dir / name
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            missing.append(name)
+            continue
+        deleted.append(name)
+    return {
+        "status": "succeeded",
+        "backend": "file",
+        "deleted_files": deleted,
+        "missing_files": missing,
+        "preserved": ["raw_object_storage", "legacy_export_directories"],
     }
 
 

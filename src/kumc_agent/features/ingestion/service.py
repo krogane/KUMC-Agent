@@ -195,6 +195,15 @@ class IngestionService:
                 )
         return tuple(results)
 
+    def reset_repository_for_full_rebuild(self) -> dict[str, object]:
+        reset = getattr(self._repository, "reset_for_full_rebuild", None)
+        if not callable(reset):
+            return {
+                "status": "skipped",
+                "reason": "repository_reset_unsupported",
+            }
+        return reset()
+
     async def _ingest_raw_item(
         self,
         *,
